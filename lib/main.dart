@@ -2636,8 +2636,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           bucketKey: _activeQuoteBucketKey,
         );
         if (emptyReuseId != null) {
-          await _loadQuoteById(emptyReuseId);
-          if (!mounted) return;
+          if (_orderLines.isEmpty) {
+            await _loadQuoteById(emptyReuseId);
+            if (!mounted) return;
+          } else {
+            _currentQuoteId = emptyReuseId;
+          }
         }
       }
       if (bucketTrace) {

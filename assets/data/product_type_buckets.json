@@ -1,0 +1,92 @@
+{
+  "mappings": {
+    "CALENDAR": {
+      "bucketKey": "calendar",
+      "displayLabel": "CALENDAR"
+    },
+    "CHINESE NEW YEAR": {
+      "bucketKey": "chinese_new_year",
+      "displayLabel": "CHINESE NEW YEAR"
+    },
+    "CHRISTMAS": {
+      "bucketKey": "christmas",
+      "displayLabel": "CHRISTMAS"
+    },
+    "DIWALI": {
+      "bucketKey": "diwali",
+      "displayLabel": "DIWALI"
+    },
+    "EASTER": {
+      "bucketKey": "easter",
+      "displayLabel": "EASTER"
+    },
+    "EVERYDAY": {
+      "bucketKey": "every_day",
+      "displayLabel": "EVERYDAY"
+    },
+    "FALL/WINTER ESSENTIALS": {
+      "bucketKey": "fall_winter",
+      "displayLabel": "FALL/WINTER ESSENTIALS"
+    },
+    "FATHER'S DAY": {
+      "bucketKey": "fathers_day",
+      "displayLabel": "FATHER'S DAY"
+    },
+    "FIFA": {
+      "bucketKey": "fifa",
+      "displayLabel": "FIFA"
+    },
+    "GIFTCRAFT": {
+      "bucketKey": "giftcraft",
+      "displayLabel": "GIFTCRAFT"
+    },
+    "GRADUATION": {
+      "bucketKey": "graduation",
+      "displayLabel": "GRADUATION"
+    },
+    "HALLOWEEN": {
+      "bucketKey": "halloween",
+      "displayLabel": "HALLOWEEN"
+    },
+    "HANUKKAH": {
+      "bucketKey": "hanukkah",
+      "displayLabel": "HANUKKAH"
+    },
+    "HARVEST": {
+      "bucketKey": "harvest",
+      "displayLabel": "HARVEST"
+    },
+    "KSP": {
+      "bucketKey": "ksp",
+      "displayLabel": "KSP"
+    },
+    "MOTHER'S DAY": {
+      "bucketKey": "mothers_day",
+      "displayLabel": "MOTHER'S DAY"
+    },
+    "NEW YEARS": {
+      "bucketKey": "new_years",
+      "displayLabel": "NEW YEARS"
+    },
+    "PRIDE": {
+      "bucketKey": "pride",
+      "displayLabel": "PRIDE"
+    },
+    "ST PATRICK'S DAY": {
+      "bucketKey": "st_patricks_day",
+      "displayLabel": "ST PATRICK'S DAY"
+    },
+    "SUMMER GENERAL": {
+      "bucketKey": "summer_general",
+      "displayLabel": "SUMMER GENERAL"
+    },
+    "SUMMER TOYS": {
+      "bucketKey": "summer_toys",
+      "displayLabel": "SUMMER TOYS"
+    },
+    "VALENTINE'S DAY": {
+      "bucketKey": "valentines_day",
+      "displayLabel": "VALENTINE'S DAY"
+    }
+  }
+}
