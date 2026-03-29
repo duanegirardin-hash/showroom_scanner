@@ -2309,6 +2309,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return '$cid::$bid';
   }
 
+  /// True when [info] belongs to [soughtLogical] — index [SavedQuoteInfo.quoteBucketKey]
+  /// first, otherwise quote JSON root `quoteBucketKey` (stale/blank index rows).
+  Future<bool> _quoteIndexEntryMatchesLogicalBucket(
+    SavedQuoteInfo info,
+    Directory dir,
+    String soughtLogical,
+  ) async {
+    if (_logicalQuoteBucketKey(info.quoteBucketKey) == soughtLogical) {
+      return true;
+    }
+    final f = File('${dir.path}/quote_${info.id}.json');
+    if (!await f.exists()) return false;
+    try {
+      final data = Map<String, dynamic>.from(
+        jsonDecode(await f.readAsString()) as Map,
+      );
+      final diskKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
+      return _logicalQuoteBucketKey(diskKey) == soughtLogical;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Any persisted quote row for this customer + logical bucket with line data.
   /// Prefers non-empty on-disk quotes (newest-first index order) so routing never
   /// picks an empty starter while a real order exists.
@@ -2322,10 +2345,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final matches = <SavedQuoteInfo>[];
     for (final info in infos) {
       if (!_savedQuoteInfoMatchesCustomer(info, customer)) continue;
-      final infoKey = _logicalQuoteBucketKey(info.quoteBucketKey);
-      if (infoKey == sought) {
-        matches.add(info);
+      if (!await _quoteIndexEntryMatchesLogicalBucket(info, dir, sought)) {
+        continue;
       }
+      matches.add(info);
     }
     if (matches.isEmpty) return null;
     for (final info in matches) {
@@ -2365,7 +2388,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final dir = await _getQuotesDirectory();
     for (final info in infos) {
       if (!_savedQuoteInfoMatchesCustomer(info, customer)) continue;
-      if (_logicalQuoteBucketKey(info.quoteBucketKey) != sought) continue;
+      if (!await _quoteIndexEntryMatchesLogicalBucket(info, dir, sought)) {
+        continue;
+      }
       final f = File('${dir.path}/quote_${info.id}.json');
       if (!await f.exists()) continue;
       try {
@@ -2630,17 +2655,31 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // Import / scan: user is already on this bucket but never adopted a saved id
       // (e.g. [_currentQuoteId] still null). Reuse an empty on-disk starter for this
       // customer + bucket so [_saveQuote] updates that file instead of minting a new id.
+      // After CSV import, reuse the persisted quote for this bucket (non–import runs only)
+      // so scanning appends instead of saving under the wrong id.
       if (_currentQuoteId == null) {
-        final emptyReuseId = await _findEmptyPersistedQuoteIdForCustomerBucket(
-          customer: customer,
-          bucketKey: _activeQuoteBucketKey,
-        );
-        if (emptyReuseId != null) {
-          if (_orderLines.isEmpty) {
-            await _loadQuoteById(emptyReuseId);
+        if (!_orderCsvImportInProgress) {
+          final existingId = await _findExistingQuoteIdForCustomerBucket(
+            customer: customer,
+            bucketKey: _activeQuoteBucketKey,
+          );
+          if (existingId != null) {
+            await _loadQuoteById(existingId);
             if (!mounted) return;
-          } else {
-            _currentQuoteId = emptyReuseId;
+          }
+        }
+        if (_currentQuoteId == null) {
+          final emptyReuseId = await _findEmptyPersistedQuoteIdForCustomerBucket(
+            customer: customer,
+            bucketKey: _activeQuoteBucketKey,
+          );
+          if (emptyReuseId != null) {
+            if (_orderLines.isEmpty) {
+              await _loadQuoteById(emptyReuseId);
+              if (!mounted) return;
+            } else {
+              _currentQuoteId = emptyReuseId;
+            }
           }
         }
       }
