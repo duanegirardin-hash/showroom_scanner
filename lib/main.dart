@@ -239,6 +239,10 @@ class Product {
   final String productType;
   final String discountRaw;
   final bool discountEligible;
+  final String netRaw;
+  final bool isNet;
+  final String psRaw;
+  final bool isPs;
   final String category;
   final String subCategory;
   final int minOrderQty;
@@ -252,12 +256,18 @@ class Product {
     required this.productType,
     required this.discountRaw,
     required this.discountEligible,
+    required this.netRaw,
+    required this.isNet,
+    required this.psRaw,
+    required this.isPs,
     required this.category,
     required this.subCategory,
     required this.minOrderQty,
     required this.caseQty,
   });
 }
+
+enum ProductPricingState { regular, discountEligible, net, ps }
 
 class QuoteBucketDefinition {
   final String bucketKey;
@@ -848,15 +858,30 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
             .discountPercent;
   }
 
-  bool lineDiscountEligible(Map<String, dynamic> map) {
+  bool parseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
+
+  ProductPricingState linePricingState(Map<String, dynamic> map) {
+    final psFlag = map['isPs'];
+    final psRaw = (map['psRaw'] as String?) ?? '';
+    final isPs = (psFlag is bool) ? psFlag : parseYesFlag(psRaw);
+    if (isPs) return ProductPricingState.ps;
+    final netFlag = map['isNet'];
+    final netRaw = (map['netRaw'] as String?) ?? '';
+    final isNet = (netFlag is bool) ? netFlag : parseYesFlag(netRaw);
+    if (isNet) return ProductPricingState.net;
     final b = map['discountEligible'];
-    if (b is bool) return b;
+    if (b is bool) {
+      return b ? ProductPricingState.discountEligible : ProductPricingState.regular;
+    }
     final raw = (map['discountRaw'] as String?) ?? '';
-    return raw.trim().toUpperCase() == 'YES';
+    return parseYesFlag(raw)
+        ? ProductPricingState.discountEligible
+        : ProductPricingState.regular;
   }
 
   double discountedUnit(Map<String, dynamic> map, double regularUnit) {
-    if (!lineDiscountEligible(map) || customerDiscPct <= 0) {
+    if (linePricingState(map) != ProductPricingState.discountEligible ||
+        customerDiscPct <= 0) {
       return regularUnit;
     }
     return regularUnit * (1 - customerDiscPct / 100.0);
@@ -2169,6 +2194,28 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// products.csv `Discount` column: only YES (trimmed, case-insensitive) is eligible.
   bool _parseDiscountEligibility(String value) {
     return value.trim().toUpperCase() == 'YES';
+  }
+
+  bool _parseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
+
+  ProductPricingState _productPricingState(Product product) {
+    // PS takes precedence when both PS and NET are set.
+    if (product.isPs) return ProductPricingState.ps;
+    if (product.isNet) return ProductPricingState.net;
+    if (product.discountEligible) return ProductPricingState.discountEligible;
+    return ProductPricingState.regular;
+  }
+
+  String? _productPricingIndicator(Product product) {
+    switch (_productPricingState(product)) {
+      case ProductPricingState.ps:
+        return 'PS';
+      case ProductPricingState.net:
+        return 'NET';
+      case ProductPricingState.regular:
+      case ProductPricingState.discountEligible:
+        return null;
+    }
   }
 
   static const String _defaultQuoteBucketKey = 'every_day';
@@ -3846,6 +3893,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
+  int? _optionalProductColumnIndex(
+    Map<String, int> byNorm,
+    List<String> normalizedKeys,
+  ) {
+    for (final nk in normalizedKeys) {
+      final i = byNorm[nk];
+      if (i != null) return i;
+    }
+    return null;
+  }
+
   String _productCell(List<dynamic> row, int col) {
     if (col < 0 || col >= row.length) return '';
     return row[col].toString();
@@ -3919,6 +3977,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       const ['discount'],
       header,
     );
+    final idxNet = _optionalProductColumnIndex(byNorm, const ['net']);
+    final idxPs = _optionalProductColumnIndex(byNorm, const ['ps']);
     final idxProductType = _requireProductColumnIndex(
       byNorm,
       'Product Type',
@@ -3965,8 +4025,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     debugPrint(
       '[Products] Column indices — Item:$idxItemNumber Desc:$idxDescription '
-      'UPC:$idxUpc Price:$idxPrice DISCOUNT:$idxDiscount Type:$idxProductType '
-      'Cat:$idxCategory Sub:${idxSubCategory} Min:${idxMinOrderQty} '
+      'UPC:$idxUpc Price:$idxPrice DISCOUNT:$idxDiscount NET:${idxNet ?? '-'} '
+      'PS:${idxPs ?? '-'} Type:$idxProductType Cat:$idxCategory '
+      'Sub:${idxSubCategory} Min:${idxMinOrderQty} '
       'Case:$idxCaseQty (max:$maxColIndex)',
     );
 
@@ -4000,6 +4061,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final price = _parsePrice(_productCell(row, idxPrice));
         final discountRaw = _productCell(row, idxDiscount).trim();
         final discountEligible = _parseDiscountEligibility(discountRaw);
+        final netRaw = idxNet == null ? '' : _productCell(row, idxNet).trim();
+        final isNet = _parseYesFlag(netRaw);
+        final psRaw = idxPs == null ? '' : _productCell(row, idxPs).trim();
+        final isPs = _parseYesFlag(psRaw);
         if (discountEligible) discountEligibleCount++;
         final productType = _productCell(row, idxProductType).trim();
         final category = _productCell(row, idxCategory).trim();
@@ -4020,6 +4085,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           productType: productType,
           discountRaw: discountRaw,
           discountEligible: discountEligible,
+          netRaw: netRaw,
+          isNet: isNet,
+          psRaw: psRaw,
+          isPs: isPs,
           category: category,
           subCategory: subCategory,
           minOrderQty: minOrderQty == 0 ? 1 : minOrderQty,
@@ -4650,7 +4719,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return product;
   }
 
-  bool _productIsDiscountEligible(Product product) => product.discountEligible;
+  bool _productIsDiscountEligible(Product product) =>
+      _productPricingState(product) == ProductPricingState.discountEligible;
 
   double _getCustomerDiscountPercent() =>
       _selectedCustomer?.discountPercent ?? 0.0;
@@ -6494,6 +6564,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'productType': line.product.productType,
         'discountRaw': line.product.discountRaw,
         'discountEligible': line.product.discountEligible,
+        'netRaw': line.product.netRaw,
+        'isNet': line.product.isNet,
+        'psRaw': line.product.psRaw,
+        'isPs': line.product.isPs,
         'category': line.product.category,
         'subCategory': line.product.subCategory,
         'quoteBucketKey': bucket.bucketKey,
@@ -6743,15 +6817,28 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       buffer.writeln('');
     }
 
-    bool lineDiscountEligible(Map<String, dynamic> map) {
+    ProductPricingState linePricingState(Map<String, dynamic> map) {
+      final psFlag = map['isPs'];
+      final psRaw = (map['psRaw'] as String?) ?? '';
+      final isPs = (psFlag is bool) ? psFlag : _parseYesFlag(psRaw);
+      if (isPs) return ProductPricingState.ps;
+      final netFlag = map['isNet'];
+      final netRaw = (map['netRaw'] as String?) ?? '';
+      final isNet = (netFlag is bool) ? netFlag : _parseYesFlag(netRaw);
+      if (isNet) return ProductPricingState.net;
       final b = map['discountEligible'];
-      if (b is bool) return b;
+      if (b is bool) {
+        return b ? ProductPricingState.discountEligible : ProductPricingState.regular;
+      }
       final raw = (map['discountRaw'] as String?) ?? '';
-      return raw.trim().toUpperCase() == 'YES';
+      return _parseYesFlag(raw)
+          ? ProductPricingState.discountEligible
+          : ProductPricingState.regular;
     }
 
     double discountedUnit(Map<String, dynamic> map, double regularUnit) {
-      if (!lineDiscountEligible(map) || customerDiscPct <= 0) {
+      if (linePricingState(map) != ProductPricingState.discountEligible ||
+          customerDiscPct <= 0) {
         return regularUnit;
       }
       return regularUnit * (1 - customerDiscPct / 100.0);
@@ -6906,6 +6993,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final productType = (map['productType'] as String?) ?? '';
         final discountRaw = (map['discountRaw'] as String?)?.trim() ?? '';
         final discountEligible = (map['discountEligible'] as bool?) ?? false;
+        final netRaw = (map['netRaw'] as String?)?.trim() ?? '';
+        final isNet = (map['isNet'] as bool?) ?? _parseYesFlag(netRaw);
+        final psRaw = (map['psRaw'] as String?)?.trim() ?? '';
+        final isPs = (map['isPs'] as bool?) ?? _parseYesFlag(psRaw);
         final category = (map['category'] as String?) ?? '';
         final subCategory = (map['subCategory'] as String?) ?? '';
         final quantity = (map['quantity'] as int?) ?? 1;
@@ -6923,6 +7014,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             productType: productType,
             discountRaw: discountRaw,
             discountEligible: discountEligible,
+            netRaw: netRaw,
+            isNet: isNet,
+            psRaw: psRaw,
+            isPs: isPs,
             category: category,
             subCategory: subCategory,
             minOrderQty: 1,
@@ -7274,6 +7369,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       lineHasDiscount: line != null && _lineHasDiscount(line),
       discountedUnitPrice:
           line != null ? _getDiscountedUnitPrice(line) : 0,
+      priceIndicator:
+          line != null ? _productPricingIndicator(line.product) : null,
       onDecreaseQty: _decreaseSelectedLineQty,
       onIncreaseQty: _increaseSelectedLineQty,
       onDeleteSelectedLine: _confirmDeleteLine,
@@ -7383,6 +7480,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       scanTabHighlightFlash: scanTabHighlightFlash,
       lineHasDiscount: _lineHasDiscount(line),
       discountedUnitPrice: _getDiscountedUnitPrice(line),
+      priceIndicator: _productPricingIndicator(line.product),
       lineTotal: _getDiscountedLineTotal(line),
       onSwipeDeletePrompt: () => _confirmDeleteLine(line),
       onCardTap: () {
@@ -7962,6 +8060,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
     required this.lineTotal,
     required this.lineHasDiscount,
     required this.discountedUnitPrice,
+    required this.priceIndicator,
     required this.onDecreaseQty,
     required this.onIncreaseQty,
     required this.onDeleteSelectedLine,
@@ -7973,6 +8072,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
   final double lineTotal;
   final bool lineHasDiscount;
   final double discountedUnitPrice;
+  final String? priceIndicator;
   final VoidCallback onDecreaseQty;
   final VoidCallback onIncreaseQty;
   final Future<void> Function(OrderLine line) onDeleteSelectedLine;
@@ -8073,7 +8173,8 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                     ],
                                   )
                                 : Text(
-                                    'Price: \$${line.product.price.toStringAsFixed(2)}',
+                                    'Price: \$${line.product.price.toStringAsFixed(2)}'
+                                    '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -8506,6 +8607,7 @@ class _OrderLineCardRow extends StatelessWidget {
     required this.line,
     required this.lineHasDiscount,
     required this.discountedUnitPrice,
+    required this.priceIndicator,
     required this.lineTotal,
     required this.onDecrease,
     required this.onIncrease,
@@ -8529,6 +8631,7 @@ class _OrderLineCardRow extends StatelessWidget {
   final OrderLine line;
   final bool lineHasDiscount;
   final double discountedUnitPrice;
+  final String? priceIndicator;
   final double lineTotal;
   final VoidCallback onDecrease;
   final VoidCallback onIncrease;
@@ -8580,7 +8683,8 @@ class _OrderLineCardRow extends StatelessWidget {
                     ),
                   ] else
                     Text(
-                      'Price: \$${line.product.price.toStringAsFixed(2)}',
+                      'Price: \$${line.product.price.toStringAsFixed(2)}'
+                      '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
                     ),
                 ],
               ),
@@ -8672,6 +8776,7 @@ class _OrderLineCard extends StatelessWidget {
     this.scanTabHighlightFlash = false,
     required this.lineHasDiscount,
     required this.discountedUnitPrice,
+    required this.priceIndicator,
     required this.lineTotal,
     required this.onSwipeDeletePrompt,
     required this.onCardTap,
@@ -8684,6 +8789,7 @@ class _OrderLineCard extends StatelessWidget {
   final bool scanTabHighlightFlash;
   final bool lineHasDiscount;
   final double discountedUnitPrice;
+  final String? priceIndicator;
   final double lineTotal;
   final Future<void> Function() onSwipeDeletePrompt;
   final VoidCallback onCardTap;
@@ -8730,6 +8836,7 @@ class _OrderLineCard extends StatelessWidget {
                 line: line,
                 lineHasDiscount: lineHasDiscount,
                 discountedUnitPrice: discountedUnitPrice,
+                priceIndicator: priceIndicator,
                 lineTotal: lineTotal,
                 onDecrease: onDecrease,
                 onIncrease: onIncrease,
