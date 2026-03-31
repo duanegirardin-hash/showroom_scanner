@@ -7580,8 +7580,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) {
         if (!_quickEntryFocusNode.hasFocus &&
             !_quoteNameFocusNode.hasFocus &&
             !_editDialogOpen) {
@@ -7689,103 +7690,89 @@ class _ScanTabLayout extends StatelessWidget {
         'REBUILD_INSTRUMENT _ScanTabLayout #$_debugRebuildCount',
       );
     }
-    return Stack(
-      clipBehavior: Clip.none,
+    final Widget scanBody = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Positioned.fill(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: loadingProducts
-                    ? _loadingProductsIndicator
-                    : CustomScrollView(
-                        controller: scanPanelScrollController,
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
-                        slivers: [
-                          // Pin quote + last-scanned panels so the middle region can shrink
-                          // under the keyboard without a Column flex overflow; order lines scroll.
-                          PinnedHeaderSliver(
-                            child: Padding(
-                              padding: _quotePanelPadding,
-                              child: RepaintBoundary(child: quotePanel),
-                            ),
-                          ),
-                          PinnedHeaderSliver(
-                            child: Padding(
-                              padding: EdgeInsets.fromLTRB(
-                                _livePanelPadding.left,
-                                8,
-                                _livePanelPadding.right,
-                                0,
-                              ),
-                              child: RepaintBoundary(
-                                child: liveOrderControlPanel,
-                              ),
-                            ),
-                          ),
-                          const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                          SliverPadding(
-                            padding: _scrollListPadding,
-                            sliver: SliverToBoxAdapter(
-                              child: RepaintBoundary(child: orderListContent),
-                            ),
-                          ),
-                          const SliverToBoxAdapter(child: SizedBox(height: 8)),
-                          SliverPadding(
-                            padding: _scrollListPadding,
-                            sliver: SliverToBoxAdapter(
-                              child: RepaintBoundary(child: searchResultsList),
-                            ),
-                          ),
-                          const SliverToBoxAdapter(child: SizedBox(height: 8)),
-                        ],
-                      ),
-              ),
-              Padding(
-                padding: _bottomActionsPadding,
-                child: SafeArea(
-                  top: false,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+        Padding(
+          padding: _quotePanelPadding,
+          child: RepaintBoundary(child: quotePanel),
+        ),
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            _livePanelPadding.left,
+            8,
+            _livePanelPadding.right,
+            0,
+          ),
+          child: RepaintBoundary(child: liveOrderControlPanel),
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: loadingProducts
+              ? _loadingProductsIndicator
+              : Padding(
+                  padding: _scrollListPadding,
+                  child: ListView(
+                    controller: scanPanelScrollController,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
                     children: [
-                      quickEntryFloatAboveKeyboard
-                          ? _ScanTabItemSearchPlaceholder(
-                              statusText: quickEntryStatusForPlaceholder,
-                            )
-                          : itemSearchBlock,
+                      RepaintBoundary(child: orderListContent),
                       const SizedBox(height: 8),
-                      loadCreateQuoteBar,
+                      RepaintBoundary(child: searchResultsList),
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
-              ),
-            ],
+        ),
+        Padding(
+          padding: _bottomActionsPadding,
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                quickEntryFloatAboveKeyboard
+                    ? _ScanTabItemSearchPlaceholder(
+                        statusText: quickEntryStatusForPlaceholder,
+                      )
+                    : itemSearchBlock,
+                const SizedBox(height: 8),
+                loadCreateQuoteBar,
+              ],
+            ),
           ),
         ),
-        if (quickEntryFloatAboveKeyboard)
-          Positioned(
-            left: 0,
-            right: 0,
-            // The Scaffold already uses `resizeToAvoidBottomInset: true`, so the
-            // Stack's height is reduced when the keyboard opens. Avoid
-            // double-offsetting by the viewInsets bottom to prevent RenderFlex
-            // overflow stripes while the manual-entry keyboard field is active.
-            bottom: 0,
-            child: Material(
-              elevation: 8,
-              color: Theme.of(context).colorScheme.surface,
-              child: SafeArea(
-                top: false,
-                child: Padding(
-                  padding: _bottomActionsPadding,
-                  child: itemSearchBlock,
-                ),
+      ],
+    );
+
+    if (!quickEntryFloatAboveKeyboard) return scanBody;
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned.fill(child: scanBody),
+        Positioned(
+          left: 0,
+          right: 0,
+          // The Scaffold already uses `resizeToAvoidBottomInset: true`, so the
+          // Stack's height is reduced when the keyboard opens. Avoid
+          // double-offsetting by the viewInsets bottom to prevent RenderFlex
+          // overflow stripes while the manual-entry keyboard field is active.
+          bottom: 0,
+          child: Material(
+            elevation: 8,
+            color: Theme.of(context).colorScheme.surface,
+            child: SafeArea(
+              top: false,
+              child: Padding(
+                padding: _bottomActionsPadding,
+                child: itemSearchBlock,
               ),
             ),
           ),
+        ),
       ],
     );
   }
