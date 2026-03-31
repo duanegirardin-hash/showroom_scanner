@@ -4,6 +4,10 @@
       "bucketKey": "calendar",
       "displayLabel": "CALENDAR"
     },
+    "CANADA DAY": {
+      "bucketKey": "canada_day",
+      "displayLabel": "Canada Day"
+    },
     "CHINESE NEW YEAR": {
       "bucketKey": "chinese_new_year",
       "displayLabel": "CHINESE NEW YEAR"
@@ -71,6 +75,10 @@
     "PRIDE": {
       "bucketKey": "pride",
       "displayLabel": "PRIDE"
+    },
+    "ST PATRICKS DAY": {
+      "bucketKey": "st_patricks_day",
+      "displayLabel": "St Patrick's Day"
     },
     "ST PATRICK'S DAY": {
       "bucketKey": "st_patricks_day",
