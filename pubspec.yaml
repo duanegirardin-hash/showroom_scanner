@@ -15,12 +15,15 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.5
   share_plus: ^10.1.4
+  http: ^1.2.0
+  mobile_scanner: ^7.1.4
 
 flutter:
   uses-material-design: true
   assets:
-    - assets/
-    - assets/data/
+    - assets/data/products.csv
     - assets/data/customers.csv
-    - assets/sounds/
+    - assets/data/product_type_buckets.json
+    - assets/sounds/good_scan.mp3
     - assets/sounds/good_scan2.mp3
+    - assets/sounds/error_scan.mp3

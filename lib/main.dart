@@ -9,9 +9,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+
+const String _productsCsvUrl =
+  'https://docs.google.com/spreadsheets/d/1yf8cTpjawA2O7M4_N7_C3AV0cEe8Hh0j8uw-2OUo82c/export?format=csv&gid=829058073';
 
 /// Master switch for temporary scan-tab profiling (Steps 3–5).
 /// When `true` (debug builds only): `REBUILD_INSTRUMENT`, `SETSTATE_TRACE[...]`, and
@@ -1366,6 +1371,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   // ignore: unused_field
   bool _readyToScan = false;
   bool _loadingProducts = true;
+  bool _loadingProductsFromWeb = false;
   bool _editDialogOpen = false;
   /// Prevents overlapping order-CSV imports (second tap while apply/write still runs → duplicate ITEMS_NOT_IMPORTED writes).
   bool _orderCsvImportInProgress = false;
@@ -4295,6 +4301,64 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _requestScannerFocus();
   }
 
+  Future<void> _loadProductsFromWeb() async {
+    if (_loadingProductsFromWeb) return;
+    setState(() => _loadingProductsFromWeb = true);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Updating products...'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
+    try {
+      final response = await http.get(Uri.parse(_productsCsvUrl));
+
+      if (response.statusCode != 200) {
+        print('Failed to download products CSV');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to download products'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+
+      final csvString = response.body;
+      int productCount = 0;
+
+      _parseAndStoreProducts(csvString, sourceLabel: 'Google Sheets CSV');
+      productCount = _catalogCount;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Products updated successfully ($productCount loaded)',
+          ),
+          duration: Duration(seconds: 2),
+        ),
+      );
+
+      print('Products successfully updated from Google Sheets');
+    } catch (e) {
+      print('Error loading products: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error updating products'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _loadingProductsFromWeb = false);
+      }
+    }
+  }
+
   /// Customers.csv headers: Id, CompanyName, Address, Address2, City, State, Zip, Phone, Fax, Email, Contact, SalesRepName, PriceList, Discount, PaymentTerms.
   void _parseAndStoreCustomers(String rawCsv) {
     debugPrint('[Customers] parse started');
@@ -5016,6 +5080,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return;
     }
     unawaited(_drainScanQueue());
+  }
+
+  Future<void> _openCameraScanner() async {
+    _editDialogOpen = true;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _CameraScannerPage(
+          onDetect: (rawValue) {
+            final value = rawValue.trim();
+            if (value.isEmpty) return;
+            _enqueueScan(value);
+          },
+        ),
+      ),
+    );
+
+    _editDialogOpen = false;
+    if (!mounted) return;
+    _requestScannerFocus();
   }
 
   Future<void> _drainScanQueue() async {
@@ -7383,6 +7467,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return _ScanTabLoadCreateQuoteBar(
       onLoadQuote: _showLoadQuoteDialog,
       onCreateQuote: _confirmNewQuote,
+      onScanWithCamera: _openCameraScanner,
     );
   }
 
@@ -7573,8 +7658,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Widget _buildSetupTab() {
     return _SetupTab(
-      onLoadProducts: _loadCsvFromPhone,
+      onLoadProducts: _loadProductsFromWeb,
       onLoadCustomers: _loadCustomersCsvFromPhone,
+      loadingProductsFromWeb: _loadingProductsFromWeb,
     );
   }
 
@@ -8343,10 +8429,12 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
   const _ScanTabLoadCreateQuoteBar({
     required this.onLoadQuote,
     required this.onCreateQuote,
+    required this.onScanWithCamera,
   });
 
   final VoidCallback onLoadQuote;
   final VoidCallback onCreateQuote;
+  final VoidCallback onScanWithCamera;
 
   @override
   Widget build(BuildContext context) {
@@ -8375,6 +8463,20 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
           ),
           onPressed: onCreateQuote,
           child: const Text('Create Quote', style: TextStyle(fontSize: 13)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 8,
+            ),
+          ),
+          onPressed: onScanWithCamera,
+          child: const Text(
+            'Scan with Camera',
+            style: TextStyle(fontSize: 13),
+          ),
         ),
       ],
     );
@@ -8991,10 +9093,12 @@ class _SetupTab extends StatelessWidget {
   const _SetupTab({
     required this.onLoadProducts,
     required this.onLoadCustomers,
+    required this.loadingProductsFromWeb,
   });
 
   final VoidCallback onLoadProducts;
   final VoidCallback onLoadCustomers;
+  final bool loadingProductsFromWeb;
 
   @override
   Widget build(BuildContext context) {
@@ -9017,8 +9121,13 @@ class _SetupTab extends StatelessWidget {
             children: [
               Expanded(
                 child: FilledButton(
-                  onPressed: onLoadProducts,
-                  child: const Text('LOAD PRODUCTS'),
+                  onPressed:
+                      loadingProductsFromWeb ? null : onLoadProducts,
+                  child: Text(
+                    loadingProductsFromWeb
+                        ? 'UPDATING...'
+                        : 'LOAD PRODUCTS',
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -9029,6 +9138,128 @@ class _SetupTab extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CameraScannerPage extends StatefulWidget {
+  final ValueChanged<String> onDetect;
+
+  const _CameraScannerPage({
+    required this.onDetect,
+  });
+
+  @override
+  State<_CameraScannerPage> createState() => _CameraScannerPageState();
+}
+
+class _CameraScannerPageState extends State<_CameraScannerPage> {
+  final MobileScannerController _controller = MobileScannerController();
+  static const Duration _duplicateScanCooldown = Duration(milliseconds: 1200);
+  String? _lastScannedValue;
+  DateTime? _lastScannedAt;
+  bool _torchEnabled = false;
+
+  Future<void> _toggleTorch() async {
+    final state = _controller.value;
+    if (!state.isRunning || state.torchState == TorchState.unavailable) {
+      return;
+    }
+    await _controller.toggleTorch();
+    if (!mounted) return;
+    setState(() => _torchEnabled = !_torchEnabled);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleBarcode(BarcodeCapture capture) {
+    for (final barcode in capture.barcodes) {
+      final rawValue = barcode.rawValue;
+      if (rawValue == null) continue;
+      final raw = rawValue.trim();
+      if (raw.isEmpty) continue;
+
+      final now = DateTime.now();
+      final isRecentDuplicate = _lastScannedValue == raw &&
+          _lastScannedAt != null &&
+          now.difference(_lastScannedAt!) < _duplicateScanCooldown;
+      if (isRecentDuplicate) continue;
+
+      _lastScannedValue = raw;
+      _lastScannedAt = now;
+      widget.onDetect(raw);
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Scan with Camera'),
+        actions: [
+          IconButton(
+            icon: Icon(
+              _torchEnabled ? Icons.flashlight_on : Icons.flashlight_off,
+            ),
+            tooltip: _torchEnabled
+                ? 'Turn flashlight off'
+                : 'Turn flashlight on',
+            onPressed: () {
+              _toggleTorch();
+            },
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: _handleBarcode,
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Point camera at barcode',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    if (_lastScannedValue != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Last scanned: $_lastScannedValue',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
           ),
         ],
       ),
