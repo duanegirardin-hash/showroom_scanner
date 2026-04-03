@@ -18,6 +18,18 @@ import 'package:share_plus/share_plus.dart';
 const String _productsCsvUrl =
   'https://docs.google.com/spreadsheets/d/1yf8cTpjawA2O7M4_N7_C3AV0cEe8Hh0j8uw-2OUo82c/export?format=csv&gid=829058073';
 
+const String _customersCsvUrl =
+  'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
+
+/// Locally added customers (showroom / Setup); not synced to Google Sheets.
+const String _kAddedCustomersFilename = 'added_customers.json';
+
+String _normalizeCustomerNameForDedup(String raw) {
+  var t = raw.trim().toLowerCase();
+  t = t.replaceAll(RegExp(r'\s+'), ' ');
+  return t;
+}
+
 /// Master switch for temporary scan-tab profiling (Steps 3–5).
 /// When `true` (debug builds only): `REBUILD_INSTRUMENT`, `SETSTATE_TRACE[...]`, and
 /// `SCAN_PATH[...]` logs are printed. When `false`, all of that code stays in place but is silent.
@@ -1372,6 +1384,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   bool _readyToScan = false;
   bool _loadingProducts = true;
   bool _loadingProductsFromWeb = false;
+  bool _isLoadingCustomers = false;
+  /// After a CSV/sheet customer reload, used to re-select a locally added customer.
+  Customer? _pendingRestoreCustomerAfterLocalMerge;
   bool _editDialogOpen = false;
   /// Prevents overlapping order-CSV imports (second tap while apply/write still runs → duplicate ITEMS_NOT_IMPORTED writes).
   bool _orderCsvImportInProgress = false;
@@ -4233,6 +4248,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _customersByKey.clear();
         _selectedCustomer = null;
       }
+      scheduleMicrotask(() => _reapplyLocalAddedCustomers());
     }
   }
 
@@ -4359,6 +4375,341 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
+  Future<void> _loadCustomersFromSheet() async {
+    if (_isLoadingCustomers) return;
+    setState(() => _isLoadingCustomers = true);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Updating customers...'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
+    try {
+      final response = await http.get(Uri.parse(_customersCsvUrl));
+
+      if (response.statusCode != 200) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to load customers'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+
+      final csvString = response.body;
+      _parseAndStoreCustomers(csvString);
+      final count = _customers.length;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$count customers loaded'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to load customers'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingCustomers = false);
+      }
+    }
+  }
+
+  Future<File> _addedCustomersFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File(p.join(dir.path, _kAddedCustomersFilename));
+  }
+
+  Future<List<Customer>> _readAddedCustomersFromDisk() async {
+    try {
+      final file = await _addedCustomersFile();
+      if (!await file.exists()) return [];
+      final text = await file.readAsString();
+      final decoded = jsonDecode(text);
+      if (decoded is! List<dynamic>) return [];
+      final out = <Customer>[];
+      for (final e in decoded) {
+        if (e is Map<String, dynamic>) {
+          out.add(Customer.fromJson(e));
+        } else if (e is Map) {
+          out.add(Customer.fromJson(Map<String, dynamic>.from(e)));
+        }
+      }
+      return out;
+    } catch (e, st) {
+      debugPrint(
+        '[Customers] Read $_kAddedCustomersFilename failed: $e\n$st',
+      );
+      return [];
+    }
+  }
+
+  Future<void> _writeAddedCustomersToDisk(List<Customer> customers) async {
+    final file = await _addedCustomersFile();
+    final payload =
+        customers.map((c) => c.toJson()).toList(growable: false);
+    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(payload));
+  }
+
+  bool _customerNameCollides(
+    String companyNameTrimmed,
+    Iterable<Customer> pool,
+  ) {
+    final n = _normalizeCustomerNameForDedup(companyNameTrimmed);
+    if (n.isEmpty) return false;
+    for (final c in pool) {
+      if (_normalizeCustomerNameForDedup(c.companyName) == n) return true;
+    }
+    return false;
+  }
+
+  bool _customerIdCollides(String idTrimmed, Iterable<Customer> pool) {
+    final key = idTrimmed.trim().toLowerCase();
+    if (key.isEmpty) return false;
+    for (final c in pool) {
+      if (c.id.trim().toLowerCase() == key) return true;
+    }
+    return false;
+  }
+
+  Customer _customerFromManualEntry({
+    required String companyName,
+    required String idOrEmpty,
+  }) {
+    final name = companyName.trim();
+    final idPart = idOrEmpty.trim();
+    final id = idPart.isNotEmpty ? idPart : name;
+    return Customer(
+      id: id,
+      companyName: name,
+      address: '',
+      address2: '',
+      city: '',
+      state: '',
+      zip: '',
+      phone: '',
+      fax: '',
+      email: '',
+      contact: '',
+      salesRepName: '',
+      priceList: '',
+      discount: '',
+      discountPercent: 0,
+      paymentTerms: '',
+    );
+  }
+
+  Future<void> _reapplyLocalAddedCustomers() async {
+    final Customer? restore = _pendingRestoreCustomerAfterLocalMerge;
+    _pendingRestoreCustomerAfterLocalMerge = null;
+
+    List<Customer> local;
+    try {
+      local = await _readAddedCustomersFromDisk();
+    } catch (e, st) {
+      debugPrint('[Customers] Reapply read failed: $e\n$st');
+      return;
+    }
+    if (local.isEmpty) {
+      _tryRestoreCustomerSelectionAfterMerge(restore);
+      return;
+    }
+
+    final seenNames = <String>{
+      for (final c in _customers) _normalizeCustomerNameForDedup(c.companyName),
+    };
+    final seenIds = <String>{
+      for (final c in _customers)
+        if (c.id.trim().isNotEmpty) c.id.trim().toLowerCase(),
+    };
+
+    final toAdd = <Customer>[];
+    for (final c in local) {
+      final nn = _normalizeCustomerNameForDedup(c.companyName);
+      if (nn.isEmpty) continue;
+      if (seenNames.contains(nn)) continue;
+      final idn = c.id.trim().toLowerCase();
+      if (idn.isNotEmpty && seenIds.contains(idn)) continue;
+      toAdd.add(c);
+      seenNames.add(nn);
+      if (idn.isNotEmpty) seenIds.add(idn);
+    }
+
+    if (toAdd.isEmpty) {
+      _tryRestoreCustomerSelectionAfterMerge(restore);
+      return;
+    }
+    if (!mounted) return;
+
+    setState(() {
+      _customers = List<Customer>.from(_customers)..addAll(toAdd);
+      for (final c in toAdd) {
+        _customersByKey[c.idOrKey] = c;
+      }
+    });
+    _tryRestoreCustomerSelectionAfterMerge(restore);
+  }
+
+  void _tryRestoreCustomerSelectionAfterMerge(Customer? restore) {
+    if (restore == null || !mounted) return;
+    if (_selectedCustomer != null) return;
+    final rid = restore.id;
+    Customer? match;
+    for (final c in _customers) {
+      if (c.id == rid) {
+        match = c;
+        break;
+      }
+    }
+    if (match != null) {
+      setState(() => _selectedCustomer = match);
+    }
+  }
+
+  Future<void> _showAddCustomerDialog() async {
+    _editDialogOpen = true;
+    final nameController = TextEditingController();
+    final idController = TextEditingController();
+    try {
+      final saved = await showDialog<bool>(
+        context: context,
+        builder: (ctx) {
+          return AlertDialog(
+            title: const Text('Add Customer'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Customer Name',
+                    ),
+                    textCapitalization: TextCapitalization.words,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: idController,
+                    decoration: const InputDecoration(
+                      labelText: 'Customer ID / Code (optional)',
+                      helperText: 'If blank, the name is used as the ID',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      );
+      if (saved != true || !mounted) return;
+
+      final name = nameController.text.trim();
+      if (name.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Customer name is required')),
+        );
+        return;
+      }
+
+      if (_customerNameCollides(name, _customers)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('A customer with this name already exists'),
+          ),
+        );
+        return;
+      }
+
+      final idPart = idController.text.trim();
+      final effectiveId = idPart.isNotEmpty ? idPart : name;
+      if (_customerIdCollides(effectiveId, _customers)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This customer ID is already in use'),
+          ),
+        );
+        return;
+      }
+
+      List<Customer> onDisk;
+      try {
+        onDisk = await _readAddedCustomersFromDisk();
+      } catch (e, st) {
+        debugPrint('[Customers] Add load disk: $e\n$st');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not read saved customers from device'),
+          ),
+        );
+        return;
+      }
+
+      final newCustomer =
+          _customerFromManualEntry(companyName: name, idOrEmpty: idPart);
+      if (_customerNameCollides(name, onDisk) ||
+          _customerIdCollides(effectiveId, onDisk)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This customer is already in local additions'),
+          ),
+        );
+        return;
+      }
+
+      try {
+        await _writeAddedCustomersToDisk([...onDisk, newCustomer]);
+      } catch (e, st) {
+        debugPrint('[Customers] Add write disk: $e\n$st');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not save customer to device'),
+          ),
+        );
+        return;
+      }
+
+      if (!mounted) return;
+      await _reapplyLocalAddedCustomers();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Customer added')),
+      );
+    } finally {
+      _editDialogOpen = false;
+      nameController.dispose();
+      idController.dispose();
+      _requestScannerFocus();
+    }
+  }
+
   /// Customers.csv headers: Id, CompanyName, Address, Address2, City, State, Zip, Phone, Fax, Email, Contact, SalesRepName, PriceList, Discount, PaymentTerms.
   void _parseAndStoreCustomers(String rawCsv) {
     debugPrint('[Customers] parse started');
@@ -4402,6 +4753,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     void applyEmpty() {
+      _pendingRestoreCustomerAfterLocalMerge = _selectedCustomer;
       if (mounted) {
         setState(() {
           _customers = [];
@@ -4411,7 +4763,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       } else {
         _customers = [];
         _customersByKey.clear();
+        _selectedCustomer = null;
       }
+      scheduleMicrotask(() => _reapplyLocalAddedCustomers());
     }
 
     final trimmed = rawCsv.trim();
@@ -4599,55 +4953,35 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       duplicateKeyRows: duplicateKeyRows,
     );
 
+    final previous = _selectedCustomer;
+    Customer? resolvedSelection;
+    if (previous != null && list.isNotEmpty) {
+      final prevId = previous.id;
+      for (final c in list) {
+        if (c.id == prevId) {
+          resolvedSelection = c;
+          break;
+        }
+      }
+    }
+
+    _pendingRestoreCustomerAfterLocalMerge = previous;
     if (mounted) {
       setState(() {
         _customers = list;
         _customersByKey
           ..clear()
           ..addAll(byKey);
-        _selectedCustomer = null;
+        _selectedCustomer = resolvedSelection;
       });
     } else {
       _customers = list;
       _customersByKey
         ..clear()
         ..addAll(byKey);
+      _selectedCustomer = resolvedSelection;
     }
-  }
-
-  Future<void> _loadCustomersCsvFromPhone() async {
-    try {
-      _editDialogOpen = true;
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
-        withData: true,
-      );
-      _editDialogOpen = false;
-      if (result == null || result.files.isEmpty) {
-        setState(() => _status = 'Customers CSV load cancelled');
-        _requestScannerFocus();
-        return;
-      }
-      final file = result.files.single;
-      String? rawCsv;
-      if (file.bytes != null) {
-        rawCsv = utf8.decode(file.bytes!);
-      } else if (file.path != null) {
-        rawCsv = await File(file.path!).readAsString();
-      }
-      if (rawCsv == null || rawCsv.trim().isEmpty) {
-        setState(() => _status = 'Selected customers CSV was empty');
-        _requestScannerFocus();
-        return;
-      }
-      _parseAndStoreCustomers(rawCsv);
-      setState(() => _status = 'Loaded customers from ${file.name}');
-    } catch (e) {
-      _editDialogOpen = false;
-      setState(() => _status = 'Error loading customers CSV');
-    }
-    _requestScannerFocus();
+    scheduleMicrotask(() => _reapplyLocalAddedCustomers());
   }
 
   Future<void> _showSelectCustomerDialog() async {
@@ -7659,8 +7993,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Widget _buildSetupTab() {
     return _SetupTab(
       onLoadProducts: _loadProductsFromWeb,
-      onLoadCustomers: _loadCustomersCsvFromPhone,
+      onLoadCustomers: _loadCustomersFromSheet,
+      onAddCustomer: _showAddCustomerDialog,
       loadingProductsFromWeb: _loadingProductsFromWeb,
+      loadingCustomersFromWeb: _isLoadingCustomers,
     );
   }
 
@@ -9093,12 +9429,16 @@ class _SetupTab extends StatelessWidget {
   const _SetupTab({
     required this.onLoadProducts,
     required this.onLoadCustomers,
+    required this.onAddCustomer,
     required this.loadingProductsFromWeb,
+    required this.loadingCustomersFromWeb,
   });
 
   final VoidCallback onLoadProducts;
   final VoidCallback onLoadCustomers;
+  final Future<void> Function() onAddCustomer;
   final bool loadingProductsFromWeb;
+  final bool loadingCustomersFromWeb;
 
   @override
   Widget build(BuildContext context) {
@@ -9133,11 +9473,23 @@ class _SetupTab extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: FilledButton(
-                  onPressed: onLoadCustomers,
-                  child: const Text('LOAD CUSTOMERS'),
+                  onPressed:
+                      loadingCustomersFromWeb ? null : onLoadCustomers,
+                  child: Text(
+                    loadingCustomersFromWeb
+                        ? 'UPDATING...'
+                        : 'LOAD CUSTOMERS',
+                  ),
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 12),
+          FilledButton.tonal(
+            onPressed: () {
+              onAddCustomer();
+            },
+            child: const Text('Add Customer'),
           ),
         ],
       ),
