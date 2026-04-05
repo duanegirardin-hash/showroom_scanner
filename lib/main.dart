@@ -1407,6 +1407,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Order line key ([_orderLineKeyForProduct]) to flash-highlight on the Scan tab list after a successful scan.
   String? _scanTabHighlightLineKey;
 
+  /// Orders tab only: which order line card is expanded ([_orderLineKeyForProduct]); at most one.
+  String? _ordersTabExpandedLineKey;
+
   /// [GlobalKey]s for Scan tab order rows — used with [Scrollable.ensureVisible] after a scan (UI only).
   final Map<String, GlobalKey> _scanTabOrderRowKeys = <String, GlobalKey>{};
 
@@ -1732,9 +1735,28 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     super.dispose();
   }
 
+  /// Persists the Scan workspace with [_saveQuote] when the app is not in the
+  /// foreground. Order edits (scan, manual add, import merge, qty, delete)
+  /// otherwise update memory only until routing, export, Load Quote, or import
+  /// triggers a save — so closing the app without those would drop changes.
+  Future<void> _persistWorkingQuoteIfAny() async {
+    if (_orderCsvImportInProgress) return;
+    if (_loadingProducts) return;
+    if (_orderLines.isEmpty && _currentQuoteId == null) return;
+    try {
+      await _saveQuote(notifyOnArchiveSideSave: false);
+    } catch (e, st) {
+      debugPrint('[PersistWorkingQuote] failed: $e\n$st');
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      unawaited(_persistWorkingQuoteIfAny());
+    }
     if (state == AppLifecycleState.resumed) {
       _scheduleScannerRefocus();
     }
@@ -7892,22 +7914,39 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Widget _buildOrderCard(
     OrderLine line, {
     bool scanTabHighlightFlash = false,
+    bool compactLayout = false,
   }) {
+    final String lineKey = _orderLineKeyForProduct(line.product);
+    final bool ordersExpanded =
+        compactLayout && _ordersTabExpandedLineKey == lineKey;
     return _OrderLineCard(
-      dismissibleKey: ValueKey(_orderLineKeyForProduct(line.product)),
+      dismissibleKey: ValueKey(lineKey),
       line: line,
       scanTabHighlightFlash: scanTabHighlightFlash,
+      compactLayout: compactLayout,
+      expandedOrdersCompact: ordersExpanded,
+      restrictCardTapToProductArea: compactLayout,
       lineHasDiscount: _lineHasDiscount(line),
       discountedUnitPrice: _getDiscountedUnitPrice(line),
       priceIndicator: _productPricingIndicator(line.product),
       lineTotal: _getDiscountedLineTotal(line),
       onSwipeDeletePrompt: () => _confirmDeleteLine(line),
-      onCardTap: () {
-        _setStateDebug('order_card_tap_select_line', () {
-          _selectedLine = line;
-        });
-        _showEditQuantityDialog(line);
-      },
+      onCardTap: compactLayout
+          ? () {
+              _setStateDebug('orders_tab_toggle_card_expand', () {
+                if (_ordersTabExpandedLineKey == lineKey) {
+                  _ordersTabExpandedLineKey = null;
+                } else {
+                  _ordersTabExpandedLineKey = lineKey;
+                }
+              });
+            }
+          : () {
+              _setStateDebug('order_card_tap_select_line', () {
+                _selectedLine = line;
+              });
+              _showEditQuantityDialog(line);
+            },
       onDecrease: () => _decreaseLineQty(line),
       onIncrease: () => _increaseLineQty(line),
     );
@@ -7930,7 +7969,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final line = _orderLines[index];
         return KeyedSubtree(
           key: ValueKey(_orderLineKeyForProduct(line.product)),
-          child: _buildOrderCard(line),
+          child: _buildOrderCard(line, compactLayout: true),
         );
       },
     );
@@ -8128,7 +8167,6 @@ class _ScanTabLayout extends StatelessWidget {
           ),
           child: RepaintBoundary(child: liveOrderControlPanel),
         ),
-        const SizedBox(height: 12),
         Expanded(
           child: loadingProducts
               ? _loadingProductsIndicator
@@ -8497,14 +8535,14 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
         curve: Curves.easeOut,
         color: feedbackColor ?? Colors.transparent,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
               if (selectedLine == null)
                 Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  padding: const EdgeInsets.symmetric(vertical: 6),
                   child: Text(
                     'Scan an item to begin',
                     textAlign: TextAlign.center,
@@ -8519,118 +8557,161 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                 Builder(
                   builder: (context) {
                     final line = selectedLine!;
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
+                    final colorScheme = Theme.of(context).colorScheme;
+                    const double imgSize = 150;
+                    const double gap = 6;
+                    const double ctrlColW = 128;
+                    const double sideBtn = 44;
+                    const double qtyRowH = 44;
+                    const double widePanelMinW = 352;
+
+                    Widget lineImage(double size) {
+                      return SizedBox(
+                        width: size,
+                        height: size,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.network(
+                            'https://showroom-images.netlify.app/images/${line.product.itemNumber.trim()}.jpeg',
+                            fit: BoxFit.cover,
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return const Center(
+                                child: SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                              );
+                            },
+                            errorBuilder: (context, error, stackTrace) {
+                              return const Center(
+                                child: Icon(
+                                  Icons.image_not_supported,
+                                  size: 32,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      );
+                    }
+
+                    Widget priceBlockFor(
+                      TextAlign textAlign,
+                      CrossAxisAlignment priceCross,
+                    ) {
+                      if (lineHasDiscount) {
+                        return Column(
+                          crossAxisAlignment: priceCross,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Price: \$${line.product.price.toStringAsFixed(2)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: textAlign,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            Text(
+                              'Sale: \$${discountedUnitPrice.toStringAsFixed(2)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: textAlign,
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.green.shade800,
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                      return Text(
+                        'Price: \$${line.product.price.toStringAsFixed(2)}'
+                        '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: textAlign,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      );
+                    }
+
+                    List<Widget> detailColumnChildren(
+                      TextAlign textAlign,
+                      CrossAxisAlignment priceCross,
+                    ) {
+                      return [
                         Text(
                           line.product.description,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
+                          textAlign: textAlign,
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 15,
-                            height: 1.2,
+                            height: 1.15,
                           ),
                         ),
-                        const SizedBox(height: 2),
+                        const SizedBox(height: 3),
                         Text(
                           'Item # ${line.product.itemNumber}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          textAlign: textAlign,
                           style: TextStyle(
                             fontWeight: FontWeight.w500,
                             fontSize: 11,
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant,
+                            color: colorScheme.onSurfaceVariant,
                           ),
                         ),
-                        const SizedBox(height: 6),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            lineHasDiscount
-                                ? Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        'Price: \$${line.product.price.toStringAsFixed(2)}',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w500,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .onSurfaceVariant,
-                                        ),
-                                      ),
-                                      Text(
-                                        'Sale: \$${discountedUnitPrice.toStringAsFixed(2)}',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.green.shade800,
-                                        ),
-                                      ),
-                                    ],
-                                  )
-                                : Text(
-                                    'Price: \$${line.product.price.toStringAsFixed(2)}'
-                                    '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                            Align(
-                              alignment: Alignment.centerRight,
-                              child: Text(
-                                'Min: ${line.product.minOrderQty}',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                          ],
+                        const SizedBox(height: 4),
+                        priceBlockFor(textAlign, priceCross),
+                        const SizedBox(height: 3),
+                        Text(
+                          'Min: ${line.product.minOrderQty}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: textAlign,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: colorScheme.onSurfaceVariant,
+                          ),
                         ),
-                        const SizedBox(height: 2),
+                        const SizedBox(height: 3),
                         Text(
                           'Line total: \$${lineTotal.toStringAsFixed(2)}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          textAlign: textAlign,
                           style: TextStyle(
-                            fontSize: 13,
+                            fontSize: 14,
                             fontWeight: FontWeight.w700,
-                            color: Theme.of(context).colorScheme.primary,
+                            color: colorScheme.primary,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            const double sideBtn = 52;
-                            const double deleteW = 84;
-                            const double rowH = 48;
-                            const double gap = 8;
-                            final double midW = (constraints.maxWidth -
-                                    sideBtn * 2 -
-                                    deleteW -
-                                    gap * 3)
-                                .clamp(48.0, constraints.maxWidth);
-                            return SizedBox(
-                              height: rowH,
+                      ];
+                    }
+
+                    Widget rightQtyDeleteColumn() {
+                      return SizedBox(
+                        width: ctrlColW,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              height: qtyRowH,
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
@@ -8640,38 +8721,37 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                       onPressed: onDecreaseQty,
                                       style: FilledButton.styleFrom(
                                         padding: EdgeInsets.zero,
-                                        backgroundColor: Theme.of(context)
-                                            .colorScheme
-                                            .errorContainer,
-                                        foregroundColor: Theme.of(context)
-                                            .colorScheme
-                                            .onErrorContainer,
+                                        minimumSize: Size.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        backgroundColor:
+                                            colorScheme.errorContainer,
+                                        foregroundColor:
+                                            colorScheme.onErrorContainer,
                                       ),
                                       child: const Icon(
                                         Icons.remove,
-                                        size: 28,
+                                        size: 24,
                                       ),
                                     ),
                                   ),
-                                  SizedBox(width: gap),
-                                  SizedBox(
-                                    width: midW,
+                                  const SizedBox(width: 4),
+                                  Expanded(
                                     child: Container(
                                       alignment: Alignment.center,
                                       padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 10,
+                                        horizontal: 4,
+                                        vertical: 6,
                                       ),
                                       decoration: BoxDecoration(
-                                        color: Theme.of(context)
-                                            .colorScheme
+                                        color: colorScheme
                                             .surfaceContainerHighest
                                             .withValues(alpha: 0.5),
                                         border: Border.all(color: Colors.grey),
                                         borderRadius: BorderRadius.circular(8),
                                       ),
                                       child: Text(
-                                        'Qty: ${line.quantity}',
+                                        '${line.quantity}',
                                         textAlign: TextAlign.center,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
@@ -8682,50 +8762,209 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                       ),
                                     ),
                                   ),
-                                  SizedBox(width: gap),
+                                  const SizedBox(width: 4),
                                   SizedBox(
                                     width: sideBtn,
                                     child: FilledButton(
                                       onPressed: onIncreaseQty,
                                       style: FilledButton.styleFrom(
                                         padding: EdgeInsets.zero,
+                                        minimumSize: Size.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
                                       ),
-                                      child: const Icon(Icons.add, size: 28),
-                                    ),
-                                  ),
-                                  SizedBox(width: gap),
-                                  SizedBox(
-                                    width: deleteW,
-                                    child: FilledButton(
-                                      style: FilledButton.styleFrom(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                        ),
-                                        backgroundColor: Theme.of(context)
-                                            .colorScheme
-                                            .error,
-                                        foregroundColor: Theme.of(context)
-                                            .colorScheme
-                                            .onError,
-                                      ),
-                                      onPressed: () =>
-                                          onDeleteSelectedLine(line),
-                                      child: const FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        child: Text('Delete'),
+                                      child: const Icon(
+                                        Icons.add,
+                                        size: 24,
                                       ),
                                     ),
                                   ),
                                 ],
                               ),
-                            );
-                          },
+                            ),
+                            const SizedBox(height: 6),
+                            FilledButton(
+                              style: FilledButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 8,
+                                ),
+                                minimumSize: const Size(0, 40),
+                                tapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                                backgroundColor: colorScheme.error,
+                                foregroundColor: colorScheme.onError,
+                              ),
+                              onPressed: () => onDeleteSelectedLine(line),
+                              child: const FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text('Delete'),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      );
+                    }
+
+                    return LayoutBuilder(
+                      builder: (context, constraints) {
+                        if (constraints.maxWidth >= widePanelMinW) {
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              lineImage(imgSize),
+                              SizedBox(width: gap),
+                              Expanded(
+                                child: Align(
+                                  alignment: Alignment.center,
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: detailColumnChildren(
+                                      TextAlign.center,
+                                      CrossAxisAlignment.center,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              SizedBox(width: gap),
+                              rightQtyDeleteColumn(),
+                            ],
+                          );
+                        }
+
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                lineImage(104),
+                                SizedBox(width: gap),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: detailColumnChildren(
+                                      TextAlign.start,
+                                      CrossAxisAlignment.start,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            LayoutBuilder(
+                              builder: (context, c2) {
+                                const double sideB = 52;
+                                const double deleteW = 84;
+                                const double rowH = 48;
+                                const double g = 8;
+                                final double midW = (c2.maxWidth -
+                                        sideB * 2 -
+                                        deleteW -
+                                        g * 3)
+                                    .clamp(48.0, c2.maxWidth);
+                                return SizedBox(
+                                  height: rowH,
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      SizedBox(
+                                        width: sideB,
+                                        child: FilledButton(
+                                          onPressed: onDecreaseQty,
+                                          style: FilledButton.styleFrom(
+                                            padding: EdgeInsets.zero,
+                                            backgroundColor: colorScheme
+                                                .errorContainer,
+                                            foregroundColor: colorScheme
+                                                .onErrorContainer,
+                                          ),
+                                          child: const Icon(
+                                            Icons.remove,
+                                            size: 28,
+                                          ),
+                                        ),
+                                      ),
+                                      SizedBox(width: g),
+                                      SizedBox(
+                                        width: midW,
+                                        child: Container(
+                                          alignment: Alignment.center,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: colorScheme
+                                                .surfaceContainerHighest
+                                                .withValues(alpha: 0.5),
+                                            border: Border.all(
+                                              color: Colors.grey,
+                                            ),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                          ),
+                                          child: Text(
+                                            'Qty: ${line.quantity}',
+                                            textAlign: TextAlign.center,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      SizedBox(width: g),
+                                      SizedBox(
+                                        width: sideB,
+                                        child: FilledButton(
+                                          onPressed: onIncreaseQty,
+                                          style: FilledButton.styleFrom(
+                                            padding: EdgeInsets.zero,
+                                          ),
+                                          child: const Icon(Icons.add, size: 28),
+                                        ),
+                                      ),
+                                      SizedBox(width: g),
+                                      SizedBox(
+                                        width: deleteW,
+                                        child: FilledButton(
+                                          style: FilledButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                            ),
+                                            backgroundColor: colorScheme.error,
+                                            foregroundColor:
+                                                colorScheme.onError,
+                                          ),
+                                          onPressed: () =>
+                                              onDeleteSelectedLine(line),
+                                          child: const FittedBox(
+                                            fit: BoxFit.scaleDown,
+                                            child: Text('Delete'),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        );
+                      },
                     );
                   },
                 ),
-              const Divider(height: 12),
+              const Divider(height: 10),
               Text(
                 lastScanSummary,
                 maxLines: 1,
@@ -9023,6 +9262,103 @@ class _ScanTabOrderLinesColumn extends StatelessWidget {
   }
 }
 
+/// Qty + scans + line total column shared by [_OrderLineCardRow] and [_OrderLineCard].
+class _OrderLineQtyColumn extends StatelessWidget {
+  const _OrderLineQtyColumn({
+    required this.line,
+    required this.lineTotal,
+    required this.onDecrease,
+    required this.onIncrease,
+    this.compactLayout = false,
+  });
+
+  static const TextStyle _qtyStyle = TextStyle(
+    fontWeight: FontWeight.bold,
+    fontSize: 18,
+  );
+
+  static final ButtonStyle _increaseQtyIconStyle = IconButton.styleFrom(
+    padding: EdgeInsets.zero,
+  );
+
+  static const double _width = 132;
+
+  final OrderLine line;
+  final double lineTotal;
+  final VoidCallback onDecrease;
+  final VoidCallback onIncrease;
+  final bool compactLayout;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final double gap = compactLayout ? 3.0 : 2.0;
+    return SizedBox(
+      width: _width,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 36,
+                height: 36,
+                child: IconButton(
+                  onPressed: onDecrease,
+                  icon: const Icon(Icons.remove),
+                  style: IconButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    backgroundColor: colorScheme.errorContainer
+                        .withValues(alpha: 0.5),
+                    foregroundColor: colorScheme.onErrorContainer,
+                  ),
+                ),
+              ),
+              SizedBox(width: compactLayout ? 8 : 6),
+              Text(
+                '${line.quantity}',
+                style: compactLayout
+                    ? _qtyStyle
+                    : _qtyStyle.copyWith(fontSize: 17),
+              ),
+              SizedBox(width: compactLayout ? 8 : 6),
+              SizedBox(
+                width: 36,
+                height: 36,
+                child: IconButton(
+                  onPressed: onIncrease,
+                  icon: const Icon(Icons.add),
+                  style: _increaseQtyIconStyle,
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: gap),
+          Text(
+            'Scans ${line.scans}',
+            style: compactLayout
+                ? null
+                : const TextStyle(fontSize: 12, height: 1.1),
+          ),
+          SizedBox(height: gap),
+          Text(
+            '\$${lineTotal.toStringAsFixed(2)}',
+            style: compactLayout
+                ? const TextStyle(fontWeight: FontWeight.w600)
+                : const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                    height: 1.1,
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Single order line row layout (product details + qty controls) for scan / orders lists.
 class _OrderLineCardRow extends StatelessWidget {
   // REBUILD_INSTRUMENT: remove when done profiling scan-tab rebuild frequency
@@ -9030,6 +9366,9 @@ class _OrderLineCardRow extends StatelessWidget {
 
   const _OrderLineCardRow({
     required this.line,
+    this.compactLayout = false,
+    this.expandedOrdersCompact = false,
+    this.includeQtyColumn = true,
     required this.lineHasDiscount,
     required this.discountedUnitPrice,
     required this.priceIndicator,
@@ -9038,20 +9377,20 @@ class _OrderLineCardRow extends StatelessWidget {
     required this.onIncrease,
   });
 
-  static const TextStyle _qtyStyle = TextStyle(
-    fontWeight: FontWeight.bold,
-    fontSize: 18,
-  );
-
   static final TextStyle _saleUnitStyle = TextStyle(
     fontSize: 14,
     fontWeight: FontWeight.w600,
     color: Colors.green.shade800,
   );
 
-  static final ButtonStyle _increaseQtyIconStyle = IconButton.styleFrom(
-    padding: EdgeInsets.zero,
-  );
+  /// When true (Orders tab only), use denser text lines and bottom-right image.
+  final bool compactLayout;
+
+  /// Orders tab only: expanded card uses a large top image and untruncated text.
+  final bool expandedOrdersCompact;
+
+  /// When false, only the product / image block is built (qty sits outside the card tap target).
+  final bool includeQtyColumn;
 
   final OrderLine line;
   final bool lineHasDiscount;
@@ -9060,6 +9399,35 @@ class _OrderLineCardRow extends StatelessWidget {
   final double lineTotal;
   final VoidCallback onDecrease;
   final VoidCallback onIncrease;
+
+  Widget _productNetworkImage(double size, double cornerRadius) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(cornerRadius),
+        child: Image.network(
+          'https://showroom-images.netlify.app/images/${line.product.itemNumber.trim()}.jpeg',
+          fit: BoxFit.cover,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return const Center(
+              child: SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) {
+            return const Center(
+              child: Icon(Icons.image_not_supported, size: 16),
+            );
+          },
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -9070,118 +9438,249 @@ class _OrderLineCardRow extends StatelessWidget {
       );
     }
     final colorScheme = Theme.of(context).colorScheme;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        const double rightCol = 132;
-        final leftW = (constraints.maxWidth - 12 - rightCol)
-            .clamp(0.0, double.infinity);
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: leftW,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
+
+    final Widget qtyColumn = _OrderLineQtyColumn(
+      line: line,
+      lineTotal: lineTotal,
+      onDecrease: onDecrease,
+      onIncrease: onIncrease,
+      compactLayout: compactLayout,
+    );
+
+    if (compactLayout) {
+      const double collapsedImageSize = 84;
+      const double expandedImageSize = 192;
+      const double imageGutter = 8;
+      final TextStyle line3BaseStyle = TextStyle(
+        fontSize: 11.5,
+        height: 1.1,
+        fontWeight: FontWeight.w500,
+        color: colorScheme.onSurface,
+      );
+
+      final Widget line3Collapsed = lineHasDiscount
+          ? Text.rich(
+              TextSpan(
+                style: line3BaseStyle,
                 children: [
-                  Text(
-                    line.product.description,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
+                  TextSpan(
+                    text:
+                        'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · ',
+                  ),
+                  TextSpan(
+                    text:
+                        'Reg \$${line.product.price.toStringAsFixed(2)} → ',
+                  ),
+                  TextSpan(
+                    text:
+                        'Sale \$${discountedUnitPrice.toStringAsFixed(2)}',
+                    style: TextStyle(
+                      color: Colors.green.shade800,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  Text('Item: ${line.product.itemNumber}'),
-                  Text('UPC: ${line.product.upc}'),
-                  Text(
-                    'Min Order Qty: ${line.product.minOrderQty}    Case Qty: ${line.product.caseQty}',
-                  ),
-                  if (lineHasDiscount) ...[
-                    Text(
-                      'Reg. unit: \$${line.product.price.toStringAsFixed(2)}',
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                    Text(
-                      'Sale unit: \$${discountedUnitPrice.toStringAsFixed(2)}',
-                      style: _saleUnitStyle,
-                    ),
-                  ] else
-                    Text(
-                      'Price: \$${line.product.price.toStringAsFixed(2)}'
-                      '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
-                    ),
                 ],
               ),
-            ),
-            const SizedBox(width: 12),
-            SizedBox(
-              width: rightCol,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            )
+          : Text(
+              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+              'Price \$${line.product.price.toStringAsFixed(2)}'
+              '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: line3BaseStyle,
+            );
+
+      final Widget line3Expanded = lineHasDiscount
+          ? Text.rich(
+              TextSpan(
+                style: line3BaseStyle,
                 children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 36,
-                        height: 36,
-                        child: IconButton(
-                          onPressed: onDecrease,
-                          icon: const Icon(Icons.remove),
-                          style: IconButton.styleFrom(
-                            padding: EdgeInsets.zero,
-                            backgroundColor: colorScheme.errorContainer
-                                .withValues(alpha: 0.5),
-                            foregroundColor: colorScheme.onErrorContainer,
+                  TextSpan(
+                    text:
+                        'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · ',
+                  ),
+                  TextSpan(
+                    text:
+                        'Reg \$${line.product.price.toStringAsFixed(2)} → ',
+                  ),
+                  TextSpan(
+                    text:
+                        'Sale \$${discountedUnitPrice.toStringAsFixed(2)}',
+                    style: TextStyle(
+                      color: Colors.green.shade800,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : Text(
+              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+              'Price \$${line.product.price.toStringAsFixed(2)}'
+              '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
+              style: line3BaseStyle,
+            );
+
+      final Widget compactProductBlock = expandedOrdersCompact
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _productNetworkImage(expandedImageSize, 14),
+                SizedBox(height: imageGutter + 2),
+                Text(
+                  line.product.description,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    height: 1.12,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  'Item ${line.product.itemNumber}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.08,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                Text(
+                  'UPC ${line.product.upc}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.08,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                line3Expanded,
+              ],
+            )
+          : Stack(
+              clipBehavior: Clip.hardEdge,
+              children: [
+                Padding(
+                  padding: EdgeInsets.only(
+                    right: collapsedImageSize + imageGutter,
+                  ),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: collapsedImageSize,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          line.product.description,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                            height: 1.12,
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${line.quantity}',
-                        style: _qtyStyle,
-                      ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 36,
-                        height: 36,
-                        child: IconButton(
-                          onPressed: onIncrease,
-                          icon: const Icon(Icons.add),
-                          style: _increaseQtyIconStyle,
+                        const SizedBox(height: 1),
+                        Text(
+                          'Item ${line.product.itemNumber} · UPC ${line.product.upc}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            height: 1.08,
+                            color: colorScheme.onSurfaceVariant,
+                          ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 1),
+                        line3Collapsed,
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 4),
-                  Text('Scans ${line.scans}'),
-                  const SizedBox(height: 4),
-                  Text(
-                    '\$${lineTotal.toStringAsFixed(2)}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                ],
+                ),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: _productNetworkImage(collapsedImageSize, 10),
+                ),
+              ],
+            );
+
+      if (!includeQtyColumn) {
+        return compactProductBlock;
+      }
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: compactProductBlock),
+          const SizedBox(width: 8),
+          qtyColumn,
+        ],
+      );
+    }
+
+    // Scan tab only (non-compact): dense row — description + qty column (Scans / line $).
+    const double scanRowImageSize = 50;
+    final Widget scanProductRow = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _productNetworkImage(scanRowImageSize, 10),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                line.product.description,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                  height: 1.12,
+                ),
               ),
-            ),
-          ],
-        );
-      },
+            ],
+          ),
+        ),
+      ],
+    );
+
+    if (!includeQtyColumn) {
+      return scanProductRow;
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: scanProductRow),
+        const SizedBox(width: 8),
+        qtyColumn,
+      ],
     );
   }
 }
 
 /// Swipe-delete hint behind [Dismissible] — const so unchanged cards skip subtree work.
 class _OrderLineCardDismissBackground extends StatelessWidget {
-  const _OrderLineCardDismissBackground();
+  const _OrderLineCardDismissBackground({this.compactLayout = true});
+
+  final bool compactLayout;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       alignment: Alignment.centerRight,
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      margin: EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: compactLayout ? 3 : 2,
+      ),
       decoration: BoxDecoration(
         color: Colors.red.shade400,
         borderRadius: _kOrderLineCardBorderRadius,
@@ -9199,6 +9698,9 @@ class _OrderLineCard extends StatelessWidget {
     required this.dismissibleKey,
     required this.line,
     this.scanTabHighlightFlash = false,
+    this.compactLayout = false,
+    this.expandedOrdersCompact = false,
+    this.restrictCardTapToProductArea = false,
     required this.lineHasDiscount,
     required this.discountedUnitPrice,
     required this.priceIndicator,
@@ -9212,6 +9714,12 @@ class _OrderLineCard extends StatelessWidget {
   final Key dismissibleKey;
   final OrderLine line;
   final bool scanTabHighlightFlash;
+  /// Denser card + line layout for the Orders tab [ListView] only.
+  final bool compactLayout;
+  /// Orders tab expanded card: large top image, untruncated compact text.
+  final bool expandedOrdersCompact;
+  /// When true (Orders tab), [onCardTap] applies only to the product block, not qty.
+  final bool restrictCardTapToProductArea;
   final bool lineHasDiscount;
   final double discountedUnitPrice;
   final String? priceIndicator;
@@ -9240,6 +9748,59 @@ class _OrderLineCard extends StatelessWidget {
           )
         : null;
 
+    final EdgeInsets cardPadding = compactLayout
+        ? const EdgeInsets.all(6)
+        : const EdgeInsets.symmetric(horizontal: 10, vertical: 6);
+
+    final Widget rowBody = restrictCardTapToProductArea
+        ? Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: InkWell(
+                  borderRadius: _kOrderLineCardBorderRadius,
+                  onTap: onCardTap,
+                  child: _OrderLineCardRow(
+                    line: line,
+                    compactLayout: compactLayout,
+                    expandedOrdersCompact: expandedOrdersCompact,
+                    includeQtyColumn: false,
+                    lineHasDiscount: lineHasDiscount,
+                    discountedUnitPrice: discountedUnitPrice,
+                    priceIndicator: priceIndicator,
+                    lineTotal: lineTotal,
+                    onDecrease: onDecrease,
+                    onIncrease: onIncrease,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              _OrderLineQtyColumn(
+                line: line,
+                lineTotal: lineTotal,
+                onDecrease: onDecrease,
+                onIncrease: onIncrease,
+                compactLayout: compactLayout,
+              ),
+            ],
+          )
+        : InkWell(
+            borderRadius: _kOrderLineCardBorderRadius,
+            onTap: onCardTap,
+            child: _OrderLineCardRow(
+              line: line,
+              compactLayout: compactLayout,
+              expandedOrdersCompact: expandedOrdersCompact,
+              includeQtyColumn: true,
+              lineHasDiscount: lineHasDiscount,
+              discountedUnitPrice: discountedUnitPrice,
+              priceIndicator: priceIndicator,
+              lineTotal: lineTotal,
+              onDecrease: onDecrease,
+              onIncrease: onIncrease,
+            ),
+          );
+
     return Dismissible(
       key: dismissibleKey,
       direction: DismissDirection.endToStart,
@@ -9247,26 +9808,17 @@ class _OrderLineCard extends StatelessWidget {
         await onSwipeDeletePrompt();
         return false;
       },
-      background: const _OrderLineCardDismissBackground(),
+      background: _OrderLineCardDismissBackground(compactLayout: compactLayout),
       child: Card(
-        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        margin: EdgeInsets.symmetric(
+          horizontal: 8,
+          vertical: compactLayout ? 3 : 2,
+        ),
         shape: cardShape,
         child: RepaintBoundary(
-          child: InkWell(
-            borderRadius: _kOrderLineCardBorderRadius,
-            onTap: onCardTap,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: _OrderLineCardRow(
-                line: line,
-                lineHasDiscount: lineHasDiscount,
-                discountedUnitPrice: discountedUnitPrice,
-                priceIndicator: priceIndicator,
-                lineTotal: lineTotal,
-                onDecrease: onDecrease,
-                onIncrease: onIncrease,
-              ),
-            ),
+          child: Padding(
+            padding: cardPadding,
+            child: rowBody,
           ),
         ),
       ),
@@ -9303,6 +9855,14 @@ class _OrderListTab extends StatelessWidget {
   final Future<void> Function() onExportCurrentQuote;
   final Widget orderList;
 
+  /// Dense order-tab actions (~42px tall) while keeping full-width labels readable.
+  static final ButtonStyle _orderTabActionButtonStyle = FilledButton.styleFrom(
+    padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 16),
+    visualDensity: const VisualDensity(horizontal: 0, vertical: -2),
+    minimumSize: const Size(double.infinity, 42),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  );
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -9312,7 +9872,7 @@ class _OrderListTab extends StatelessWidget {
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -9326,7 +9886,7 @@ class _OrderListTab extends StatelessWidget {
                               'Items in Order',
                               style: TextStyle(fontWeight: FontWeight.w600),
                             ),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             Text(
                               '$orderLinesCount',
                               style: Theme.of(context).textTheme.titleLarge,
@@ -9342,7 +9902,7 @@ class _OrderListTab extends StatelessWidget {
                               'Total Units',
                               style: TextStyle(fontWeight: FontWeight.w600),
                             ),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             Text(
                               '$totalUnits',
                               style: Theme.of(context).textTheme.titleLarge,
@@ -9360,7 +9920,7 @@ class _OrderListTab extends StatelessWidget {
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             Text(
                               '\$${orderTotal.toStringAsFixed(2)}',
                               style: Theme.of(context).textTheme.titleLarge,
@@ -9371,7 +9931,7 @@ class _OrderListTab extends StatelessWidget {
                     ],
                   ),
                   if (orderHasDiscount) ...[
-                    const Divider(height: 20),
+                    const Divider(height: 16),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -9393,25 +9953,28 @@ class _OrderListTab extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           FilledButton.icon(
+            style: _orderTabActionButtonStyle,
             onPressed: loadingProducts ? null : () => onImportOrder(),
             icon: const Icon(Icons.file_upload_outlined),
             label: const Text('Import Order'),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           FilledButton.icon(
+            style: _orderTabActionButtonStyle,
             onPressed: loadingProducts ? null : () => onExportAllQuotes(),
             icon: const Icon(Icons.file_download_outlined),
             label: const Text('Export All Quotes'),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           FilledButton.icon(
+            style: _orderTabActionButtonStyle,
             onPressed: loadingProducts ? null : () => onExportCurrentQuote(),
             icon: const Icon(Icons.download_for_offline_outlined),
             label: const Text('Export Current Quote Only'),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           Expanded(
             child: loadingProducts
                 ? const Center(child: CircularProgressIndicator())
