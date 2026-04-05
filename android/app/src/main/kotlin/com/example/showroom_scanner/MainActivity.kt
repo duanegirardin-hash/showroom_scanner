@@ -98,8 +98,7 @@ class MainActivity : FlutterActivity() {
         content: String,
     ): String {
         val bytes = content.toByteArray(Charsets.UTF_8)
-        val showroomRoot = "Showroom_Exports"
-        val relativeInsideDocuments = "$showroomRoot/$customerFolder"
+        val relativeInsideDocuments = "Showroom_Sync/Exported orders/$customerFolder"
         val documentsDir =
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
         val relativePath =

@@ -372,10 +372,16 @@ List<List<String>> orderExportCsvRows({
 class OrderImportCsvRow {
   final String item;
   final int quantity;
+  /// From an optional Description column when the import header names it.
+  final String description;
+  /// From an optional Price column when the import header names it.
+  final String price;
 
   const OrderImportCsvRow({
     required this.item,
     required this.quantity,
+    this.description = '',
+    this.price = '',
   });
 }
 
@@ -383,11 +389,15 @@ class OrderImportCsvRow {
 class OrderImportSkippedRow {
   final String item;
   final String quantity;
+  final String description;
+  final String price;
   final String reason;
 
   const OrderImportSkippedRow({
     required this.item,
     required this.quantity,
+    this.description = '',
+    this.price = '',
     required this.reason,
   });
 }
@@ -408,13 +418,39 @@ class OrderImportApplyOutcome {
   final int moqAdjustedRows;
   final Map<String, int> importedQuantityByBucket;
   final List<OrderImportSkippedRow> skippedRows;
+  /// Non-header data rows from the selected CSV files (valid rows + parse-time skips).
+  final int totalRowsProcessed;
+  final int newItemsCount;
+  final int duplicateChoiceTotalQtyCount;
+  final int duplicateChoiceMinimumQtyCount;
+  final int duplicateChoiceSkipCount;
+  final int duplicateChoiceUseImportedQtyCount;
 
   const OrderImportApplyOutcome({
     required this.importedRows,
     required this.moqAdjustedRows,
     required this.importedQuantityByBucket,
     required this.skippedRows,
+    required this.totalRowsProcessed,
+    required this.newItemsCount,
+    required this.duplicateChoiceTotalQtyCount,
+    required this.duplicateChoiceMinimumQtyCount,
+    required this.duplicateChoiceSkipCount,
+    required this.duplicateChoiceUseImportedQtyCount,
   });
+
+  int get duplicateItemsCount =>
+      duplicateChoiceTotalQtyCount +
+      duplicateChoiceMinimumQtyCount +
+      duplicateChoiceSkipCount +
+      duplicateChoiceUseImportedQtyCount;
+
+  int get moqAdjustedCount => moqAdjustedRows;
+
+  /// Catalog resolution and apply failures only (merge with parse-phase skips for a full report).
+  List<OrderImportSkippedRow> get notImportedItems => skippedRows;
+
+  int get notImportedCount => skippedRows.length;
 }
 
 /// Resolution for a catalog item that already exists on the order during CSV import.
@@ -441,6 +477,8 @@ class OrderImportPreparedLine {
   final int rawCsvCombinedQty;
   /// When non-null, the order already has at least one matching line; sum of those quantities.
   final int? existingOrderQtySum;
+  final String sourceDescription;
+  final String sourcePrice;
 
   const OrderImportPreparedLine({
     required this.displayItem,
@@ -448,6 +486,8 @@ class OrderImportPreparedLine {
     required this.importedQtyMoq,
     required this.rawCsvCombinedQty,
     required this.existingOrderQtySum,
+    this.sourceDescription = '',
+    this.sourcePrice = '',
   });
 
   bool get isDuplicate => existingOrderQtySum != null;
@@ -458,15 +498,67 @@ class OrderImportPrepareOutcome {
   final List<OrderImportSkippedRow> skippedRows;
   /// Rows where grouped CSV quantity differed from MOQ-rounded import quantity.
   final int csvMoqAdjustedRows;
+  /// Non-header data rows from the selected CSV files (valid rows + parse-time skips).
+  final int totalRowsProcessed;
 
   const OrderImportPrepareOutcome({
     required this.lines,
     required this.skippedRows,
     required this.csvMoqAdjustedRows,
+    required this.totalRowsProcessed,
   });
 }
 
 String _orderImportNormalizeItemKey(String value) => value.trim().toUpperCase();
+
+String _orderImportNormalizedImportHeaderLabel(String s) {
+  return s.trim().toLowerCase().replaceAll(RegExp(r'[\s\-]+'), '');
+}
+
+String _orderImportOptionalCsvCell(List<dynamic> row, int? columnIndex) {
+  if (columnIndex == null || columnIndex >= row.length) return '';
+  return row[columnIndex].toString().trim();
+}
+
+/// First matching column index for optional Description / Price on order-import CSVs.
+({int? descriptionCol, int? priceCol})
+    _orderImportOptionalDescriptionPriceColumns(List<dynamic> headerRow) {
+  int? descriptionCol;
+  int? priceCol;
+  for (var i = 0; i < headerRow.length; i++) {
+    final nk = _orderImportNormalizedImportHeaderLabel(headerRow[i].toString());
+    if (nk.isEmpty) continue;
+    // Columns 0–1 are always Item and Quantity; optional fields start at index 2+.
+    if (i < 2) continue;
+    if (descriptionCol == null &&
+        (nk == 'description' ||
+            nk == 'itemdescription' ||
+            nk == 'productdescription')) {
+      descriptionCol = i;
+    }
+    if (priceCol == null &&
+        (nk == 'price' ||
+            nk == 'unitprice' ||
+            nk == 'listprice' ||
+            nk == 'saleprice')) {
+      priceCol = i;
+    }
+  }
+  return (descriptionCol: descriptionCol, priceCol: priceCol);
+}
+
+void _orderImportMergeOptionalFieldByItemKey(
+  Map<String, String> byKey,
+  String itemKey,
+  String value,
+) {
+  final existing = byKey[itemKey];
+  if (existing == null) {
+    byKey[itemKey] = value;
+  } else if (existing.isEmpty && value.isNotEmpty) {
+    byKey[itemKey] = value;
+  }
+}
 
 String _orderImportNormalizeUpcLookupKey(String value) {
   final trimmed = value.trim();
@@ -498,6 +590,8 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
 
   final list = <OrderImportCsvRow>[];
   final skippedRows = <OrderImportSkippedRow>[];
+  final (:descriptionCol, :priceCol) =
+      _orderImportOptionalDescriptionPriceColumns(rows[0]);
 
   for (int i = 1; i < rows.length; i++) {
     final row = rows[i];
@@ -527,6 +621,8 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
         OrderImportSkippedRow(
           item: itemOnly,
           quantity: '',
+          description: _orderImportOptionalCsvCell(row, descriptionCol),
+          price: _orderImportOptionalCsvCell(row, priceCol),
           reason: 'Malformed row: missing Quantity column.',
         ),
       );
@@ -534,11 +630,15 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
     }
     final item = row[0].toString().trim();
     final qtyStr = row[1].toString().trim();
+    final rowDescription = _orderImportOptionalCsvCell(row, descriptionCol);
+    final rowPrice = _orderImportOptionalCsvCell(row, priceCol);
     if (item.isEmpty) {
       skippedRows.add(
         OrderImportSkippedRow(
           item: '',
           quantity: qtyStr,
+          description: rowDescription,
+          price: rowPrice,
           reason: 'Empty item.',
         ),
       );
@@ -550,12 +650,21 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
         OrderImportSkippedRow(
           item: item,
           quantity: qtyStr,
+          description: rowDescription,
+          price: rowPrice,
           reason: 'Invalid quantity.',
         ),
       );
       continue;
     }
-    list.add(OrderImportCsvRow(item: item, quantity: qty));
+    list.add(
+      OrderImportCsvRow(
+        item: item,
+        quantity: qty,
+        description: rowDescription,
+        price: rowPrice,
+      ),
+    );
   }
 
   if (list.isEmpty) {
@@ -623,9 +732,17 @@ Future<String> uniqueCsvFilenameInDirectory(
   return candidate;
 }
 
-/// Fixed root under the platform "Documents" area: `Documents/Showroom_Exports/...` on Android
-/// (public Documents); app documents directory on other platforms.
-const String kShowroomExportsRootFolderName = 'Showroom_Exports';
+/// Debug: log absolute path for persistent order CSV exports. Debug builds only; set false to silence.
+const bool _kPersistExportPathDebug = true;
+
+void _debugLogPersistExportPath(String action, File file) {
+  if (!kDebugMode || !_kPersistExportPathDebug) return;
+  debugPrint('[PersistExport] $action -> ${file.path}');
+}
+
+/// Fallback export root under [getApplicationDocumentsDirectory] when user `Documents` is unavailable.
+/// Uses the same `Showroom_Sync/Exported orders` layout as the primary paths in
+/// [ensureShowroomSyncExportedOrdersRootDirectory] (Android public Documents uses the platform channel).
 
 /// Fallback folder name when the customer name is blank after trimming.
 const String kNoCustomerExportFolderName = 'No_Customer';
@@ -680,7 +797,7 @@ const _androidPublicDocumentsChannel = MethodChannel(
   'com.example.showroom_scanner/documents',
 );
 
-/// Android: `Documents/Showroom_Exports/[customerFolder]/[filename]` via platform channel.
+/// Android: `Documents/Showroom_Sync/Exported orders/[customerFolder]/[filename]` via platform channel.
 /// [sanitizedCustomerFolderName] must be a single path segment (from [sanitizeCustomerExportFolderName]).
 Future<File> saveOrderExportCsvToAndroidPublicShowroomExports({
   required String sanitizedCustomerFolderName,
@@ -706,35 +823,81 @@ Future<File> saveOrderExportCsvToAndroidPublicShowroomExports({
   return File(path);
 }
 
-/// Ensures `[getApplicationDocumentsDirectory]/Showroom_Exports` exists (non-Android export root).
+/// Ensures `[getApplicationDocumentsDirectory]/Showroom_Sync/Exported orders` exists.
+/// Used only as a fallback when the user Documents tree cannot be resolved (see
+/// [ensureShowroomSyncExportedOrdersRootDirectory]).
 Future<Directory> ensureLocalShowroomExportsRootDirectory() async {
   final base = await getApplicationDocumentsDirectory();
-  final root = Directory(p.join(base.path, kShowroomExportsRootFolderName));
+  final root = Directory(
+    p.join(base.path, 'Showroom_Sync', 'Exported orders'),
+  );
   await root.create(recursive: true);
   return root;
 }
 
-/// Writes order CSV to `Showroom_Exports/<customer>/` under the platform documents area.
+/// `Documents/Showroom_Sync/Exported orders` (Windows: typically under OneDrive). Used for order CSV layout.
+Future<Directory> ensureShowroomSyncExportedOrdersRootDirectory() async {
+  if (Platform.isWindows) {
+    final profile = Platform.environment['USERPROFILE']?.trim();
+    if (profile != null && profile.isNotEmpty) {
+      final root = Directory(
+        p.join(profile, 'Documents', 'Showroom_Sync', 'Exported orders'),
+      );
+      await root.create(recursive: true);
+      return root;
+    }
+  }
+  if (Platform.isLinux || Platform.isMacOS) {
+    final home = Platform.environment['HOME']?.trim();
+    if (home != null && home.isNotEmpty) {
+      final root = Directory(
+        p.join(home, 'Documents', 'Showroom_Sync', 'Exported orders'),
+      );
+      await root.create(recursive: true);
+      return root;
+    }
+  }
+  if (Platform.isIOS) {
+    final base = await getApplicationDocumentsDirectory();
+    final root = Directory(
+      p.join(base.path, 'Showroom_Sync', 'Exported orders'),
+    );
+    await root.create(recursive: true);
+    return root;
+  }
+  return ensureLocalShowroomExportsRootDirectory();
+}
+
+/// Writes order CSV to `Showroom_Sync/Exported orders/<customer>/` (Android: public Documents; desktop: user Documents when available).
+///
+/// When [persistExportDebugAction] is non-null (debug builds), logs the final absolute path written.
 Future<File> exportOrderCsvToShowroomExportsLayout({
   required String customerDisplayName,
   required String filename,
   required String csvText,
+  String? persistExportDebugAction,
 }) async {
+  late final File file;
   if (Platform.isAndroid) {
     final folder = sanitizeCustomerExportFolderName(customerDisplayName);
-    return saveOrderExportCsvToAndroidPublicShowroomExports(
+    file = await saveOrderExportCsvToAndroidPublicShowroomExports(
       sanitizedCustomerFolderName: folder,
       filename: filename,
       csvText: csvText,
     );
+  } else {
+    final root = await ensureShowroomSyncExportedOrdersRootDirectory();
+    file = await writeOrderExportCsvUnderDesignatedBase(
+      exportBasePath: root.path,
+      customerDisplayName: customerDisplayName,
+      filename: filename,
+      csvText: csvText,
+    );
   }
-  final root = await ensureLocalShowroomExportsRootDirectory();
-  return writeOrderExportCsvUnderDesignatedBase(
-    exportBasePath: root.path,
-    customerDisplayName: customerDisplayName,
-    filename: filename,
-    csvText: csvText,
-  );
+  if (persistExportDebugAction != null) {
+    _debugLogPersistExportPath(persistExportDebugAction, file);
+  }
+  return file;
 }
 
 enum ScanFeedbackType {
@@ -1611,9 +1774,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Prevents overlapping order-CSV imports (second tap while apply/write still runs → duplicate ITEMS_NOT_IMPORTED writes).
   bool _orderCsvImportInProgress = false;
 
+  /// Set when order import writes ITEMS_NOT_IMPORTED_*.csv (path + owning customer id).
+  /// [Export All Quotes] appends this file to the share payload when the export customer id matches.
+  String? _lastItemsNotImportedCsvPath;
+  String? _lastItemsNotImportedCsvCustomerId;
+
   /// When non-null, [_ensureRoutingForProduct] logs each bucket once per CSV import session.
   String? _quoteImportDebugSession;
   final Set<String> _quoteImportLoggedBucketKeys = <String>{};
+  /// Grep: [ImportRoute] — first routing touch per customer+bucket during CSV import.
+  final Set<String> _orderImportRouteTraceKeys = <String>{};
+  /// Every quote id persisted via [_saveQuote] during a single order CSV import (all routed buckets).
+  final Set<String> _orderImportTouchedQuoteIds = <String>{};
 
   /// Quote name to restore when a barcode was mistakenly entered in the quote name field
   String _savedQuoteNameBeforeEdit = 'NEW QUOTE';
@@ -2454,6 +2626,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     debugPrint(message);
   }
 
+  /// Grep: [ImportRoute] — once per customer+bucket per CSV import.
+  void _traceOrderImportRouteFirstTouch({
+    required Customer customer,
+    required String targetLogicalBucket,
+    required String normType,
+    required String note,
+  }) {
+    if (!kDebugMode || !_orderCsvImportInProgress) return;
+    final k = '${customer.id}|$targetLogicalBucket';
+    if (!_orderImportRouteTraceKeys.add(k)) return;
+    debugPrint(
+      '[ImportRoute] $note logicalBucket=$targetLogicalBucket '
+      'productType="$normType" quoteId=${_currentQuoteId ?? 'null'} '
+      'customer="${customer.displayName}"',
+    );
+  }
+
   /// products.csv `Discount` column: only YES (trimmed, case-insensitive) is eligible.
   bool _parseDiscountEligibility(String value) {
     return value.trim().toUpperCase() == 'YES';
@@ -3004,6 +3193,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               '$tracePrefix Final target quote: "${_quoteNameController.text.trim()}"',
         );
       }
+      _traceOrderImportRouteFirstTouch(
+        customer: customer,
+        targetLogicalBucket: targetId,
+        normType: normType,
+        note: 'alreadyOnTargetBucket',
+      );
       return;
     }
 
@@ -3077,6 +3272,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '[Routing] Target quote name: "${_quoteNameController.text.trim()}"',
         );
       }
+      _traceOrderImportRouteFirstTouch(
+        customer: customer,
+        targetLogicalBucket: targetId,
+        normType: normType,
+        note: 'reusedPersistedQuote',
+      );
       _setStateDebug('routing_after_load_bucket_quote', () {
         _status = 'Switched to ${bucket.displayLabel} quote';
       });
@@ -3111,6 +3312,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         );
       }
     }
+    _traceOrderImportRouteFirstTouch(
+      customer: customer,
+      targetLogicalBucket: targetId,
+      normType: normType,
+      note: 'startNewRoutedQuote',
+    );
   }
 
   void _debugLogMissingProductTypeMappings() {
@@ -3346,6 +3553,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final existing = <XFile>[];
       for (final file in files) {
         if (await file.exists()) {
+          if (kDebugMode) {
+            debugPrint('[OneDriveExport] file attached: ${file.path}');
+          }
           existing.add(XFile(file.path, mimeType: 'text/csv'));
         }
       }
@@ -3361,13 +3571,56 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  String _buildItemsNotImportedFilename(
-    String customerDisplayName,
-    DateTime stampedOn,
-  ) {
-    final customerSegment = _sanitizeOrderExportFileSegment(customerDisplayName);
-    final stamp = _formatExportTimestamp(stampedOn);
-    return 'ITEMS_NOT_IMPORTED_${customerSegment}_$stamp.csv';
+  Future<void> _openCsvWithSystemHandler(File file) async {
+    try {
+      if (!await file.exists()) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('File not found.')),
+        );
+        return;
+      }
+      final path = file.path;
+      if (Platform.isWindows) {
+        await Process.run('explorer', ['/select,', path]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [path]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [path]);
+      } else {
+        await _shareSingleExportedCsv(file);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open file')),
+      );
+    }
+  }
+
+  /// Basename only; [uniqueCsvFilenameInDirectory] / Android export still dedupe on collision.
+  String _itemsNotImportedCustomerFilenameSegment(String displayName) {
+    var s = sanitizeCustomerExportFolderName(displayName);
+    s = s.replaceAll(RegExp(r'\s+'), '_');
+    s = s.replaceAll(RegExp(r'_+'), '_');
+    s = s.replaceAll(RegExp(r'^_+|_+$'), '');
+    if (s.isEmpty) s = kNoCustomerExportFolderName;
+    return s.toUpperCase();
+  }
+
+  String _buildItemsNotImportedFilename({
+    required DateTime stampedOn,
+    required String customerDisplayName,
+  }) {
+    final y = stampedOn.year.toString().padLeft(4, '0');
+    final mo = stampedOn.month.toString().padLeft(2, '0');
+    final day = stampedOn.day.toString().padLeft(2, '0');
+    final dateUnderscore = '${y}_${mo}_${day}';
+    final dateCompact = '$y$mo$day';
+    final seq =
+        (stampedOn.millisecondsSinceEpoch % 1000).toString().padLeft(3, '0');
+    final cust = _itemsNotImportedCustomerFilenameSegment(customerDisplayName);
+    return 'ITEMS_NOT_IMPORTED_${dateUnderscore}_${seq}_${cust}_$dateCompact.csv';
   }
 
   String _csvEscape(String value) {
@@ -3377,11 +3630,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return '"${value.replaceAll('"', '""')}"';
   }
 
+  String _orderImportNotImportedReasonForCsv(OrderImportSkippedRow r) {
+    final reason = r.reason.trim();
+    if (reason == 'Item not found') return 'Not found in product catalog';
+    if (reason == 'Invalid quantity.' || reason == 'Invalid quantity') {
+      return 'Invalid quantity';
+    }
+    if (reason == 'Empty item.') return 'Missing UPC and item number';
+    return reason;
+  }
+
   String _formatNotImportedRowsCsv(List<OrderImportSkippedRow> rows) {
-    final out = <String>['Item,Quantity,Reason'];
+    final out = <String>['Item,Reason'];
     for (final r in rows) {
+      final itemLabel = r.item.trim().isEmpty ? '(no item)' : r.item.trim();
       out.add(
-        '${_csvEscape(r.item)},${_csvEscape(r.quantity)},${_csvEscape(r.reason)}',
+        '${_csvEscape(itemLabel)},'
+        '${_csvEscape(_orderImportNotImportedReasonForCsv(r))}',
       );
     }
     return out.join('\n');
@@ -3391,16 +3656,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required String customerDisplayName,
     required List<OrderImportSkippedRow> skippedRows,
   }) async {
+    final stampedOn = DateTime.now();
     final filename = _buildItemsNotImportedFilename(
-      customerDisplayName,
-      DateTime.now(),
+      stampedOn: stampedOn,
+      customerDisplayName: customerDisplayName,
     );
     final csvText = _formatNotImportedRowsCsv(skippedRows);
-    return exportOrderCsvToShowroomExportsLayout(
+    final out = await exportOrderCsvToShowroomExportsLayout(
       customerDisplayName: customerDisplayName,
       filename: filename,
       csvText: csvText,
+      persistExportDebugAction: 'ITEMS_NOT_IMPORTED',
     );
+    if (kDebugMode) {
+      debugPrint('[ItemsNotImported] csv created: ${out.path}');
+    }
+    return out;
   }
 
   void _debugLogQuoteLifecycleExport(String message) {
@@ -3492,6 +3763,43 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     await dumpFile('quotes_archive.json', archivePath);
   }
 
+  /// Temporary trace: active saved quotes for [customer] after order CSV import (grep: [ImportApply]).
+  Future<void> _debugLogImportApplyQuoteSnapshot(
+    Customer customer,
+    String phase,
+  ) async {
+    if (!kDebugMode) return;
+    try {
+      final idx = await _loadQuoteIndex();
+      final dir = await _getQuotesDirectory();
+      final parts = <String>[];
+      for (final q in idx) {
+        if (!_savedQuoteInfoMatchesCustomer(q, customer)) continue;
+        final f = File('${dir.path}/quote_${q.id}.json');
+        var lineCount = 0;
+        if (await f.exists()) {
+          try {
+            final raw = await f.readAsString();
+            final d = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+            final lines =
+                d['lines'] as List<dynamic>? ?? d['items'] as List<dynamic>?;
+            lineCount = lines?.length ?? 0;
+          } catch (_) {}
+        }
+        parts.add(
+          'id=${q.id} logicalBucket=${_logicalQuoteBucketKey(q.quoteBucketKey)} '
+          'lines=$lineCount status=${quoteLifecycleStatusToJson(q.status)}',
+        );
+      }
+      debugPrint(
+        '[ImportApply] $phase customer="${customer.displayName}" '
+        'count=${parts.length} ${parts.join(' || ')}',
+      );
+    } catch (e) {
+      debugPrint('[ImportApply] $phase snapshot failed: $e');
+    }
+  }
+
   Future<void> _exportAllQuotesToCsv() async {
     final customer = _selectedCustomer;
     if (customer == null) {
@@ -3501,6 +3809,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       return;
     }
+    final quoteIdForExportReload = _currentQuoteId;
+    if (quoteIdForExportReload != null) {
+      await _loadQuoteById(quoteIdForExportReload);
+    }
+    if (kDebugMode && quoteIdForExportReload != null) {
+      debugPrint(
+        '[Export] using quote id=$quoteIdForExportReload lines=${_orderLines.length}',
+      );
+    }
+
     if (_orderLines.isEmpty && _currentQuoteId == null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3514,12 +3832,30 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // Persist the in-memory quote so export reads all routed quotes consistently.
       await _saveQuote(notifyOnArchiveSideSave: false);
 
-      final index = await _loadQuoteIndex();
       await _debugLogActiveIndexSnapshot('ExportAll after save+loadIndex');
       await _debugLogQuoteIndexAuditForCustomer('before Export All');
       final archivedIds = (await _loadArchiveQuoteIndex())
           .map((e) => e.id)
           .toSet();
+      // Reload active index from disk immediately before candidate selection so
+      // post-import quotes are visible without a tab switch.
+      final index = await _loadQuoteIndex();
+      if (kDebugMode) {
+        final forCustomer = index
+            .where(
+              (i) => _sameLogicalCustomerQuoteRows(
+                customerIdA: customer.id,
+                customerNameA: customer.displayName,
+                customerIdB: i.customerId,
+                customerNameB: i.customerName,
+              ),
+            )
+            .toList();
+        debugPrint(
+          '[ExportAll] activeIndexRowsForCustomer=${forCustomer.length} '
+          'ids=${forCustomer.map((e) => e.id).join(',')}',
+        );
+      }
       final matchingByBucket = <String, SavedQuoteInfo>{};
       for (final info in index) {
         if (!_sameLogicalCustomerQuoteRows(
@@ -3584,10 +3920,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       for (final info in matchingByBucket.values) {
+        final bucketLabel =
+            info.quoteBucketLabel.trim().isEmpty ? '?' : info.quoteBucketLabel;
         if (!exportedQuoteIds.add(info.id)) {
+          if (kDebugMode) {
+            debugPrint(
+              '[ExportAll] candidate quoteId=${info.id} bucket=$bucketLabel '
+              'included=no reason=duplicate_id_set',
+            );
+          }
           continue;
         }
         if (!await _quoteIdHasActiveEligibleRowInActiveIndexStorage(info.id)) {
+          if (kDebugMode) {
+            debugPrint(
+              '[ExportAll] candidate quoteId=${info.id} bucket=$bucketLabel '
+              'included=no reason=not_active_eligible_storage',
+            );
+          }
           _debugLogQuoteLifecycleExport(
             'ExportAll skip id=${info.id} (no active eligible row at export time)',
           );
@@ -3595,6 +3945,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
         final quoteFile = File('${quotesDir.path}/quote_${info.id}.json');
         if (!await quoteFile.exists()) {
+          if (kDebugMode) {
+            debugPrint(
+              '[ExportAll] candidate quoteId=${info.id} bucket=$bucketLabel '
+              'included=no reason=quote_file_missing',
+            );
+          }
           skippedMissingOnDisk.add(info.id);
           continue;
         }
@@ -3604,6 +3960,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             jsonDecode(quoteRaw) as Map,
           );
           if (persistedQuoteDataIsEmptyForReuse(quoteData)) {
+            if (kDebugMode) {
+              debugPrint(
+                '[ExportAll] candidate quoteId=${info.id} bucket=$bucketLabel '
+                'included=no reason=persisted_empty',
+              );
+            }
             _debugLogQuoteImportExport(
               '[ExportAll] skip-empty id=${info.id} '
               'bucket=${_logicalQuoteBucketKey(info.quoteBucketKey)}',
@@ -3621,7 +3983,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             customerDisplayName: customerName,
             filename: filename,
             csvText: csvText,
+            persistExportDebugAction: 'export_all_quotes',
           );
+          if (kDebugMode) {
+            debugPrint(
+              '[ExportAll] candidate quoteId=${info.id} bucket=$bucketLabel '
+              'included=yes reason=exported',
+            );
+            debugPrint('[ExportAll] normal csv added: ${file.path}');
+          }
           exportedFiles.add(file);
           final moved = await _moveActiveQuoteToArchiveAfterSuccessfulExport(
             quoteId: info.id,
@@ -3637,12 +4007,41 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           }
         } catch (e, st) {
           exportFailureCount++;
+          if (kDebugMode) {
+            debugPrint(
+              '[ExportAll] candidate quoteId=${info.id} bucket=$bucketLabel '
+              'included=no reason=export_error',
+            );
+            debugPrint('[ExportAll] fail id=${info.id} error=$e');
+          }
           debugPrint('[OrderExportAll] quote id=${info.id} failed: $e\n$st');
         }
       }
 
       if (mounted && movedToArchiveCount > 0) {
         setState(() {});
+      }
+
+      final quoteCsvFilesExported = exportedFiles.length;
+      if (exportedFiles.isNotEmpty &&
+          _lastItemsNotImportedCsvPath != null &&
+          _lastItemsNotImportedCsvCustomerId == customer.id) {
+        final notImported = File(_lastItemsNotImportedCsvPath!);
+        if (await notImported.exists()) {
+          final base = p.basename(notImported.path);
+          if (base.startsWith('ITEMS_NOT_IMPORTED_') && base.endsWith('.csv')) {
+            final pathNorm = p.normalize(notImported.path);
+            final already = exportedFiles.any(
+              (f) => p.normalize(f.path) == pathNorm,
+            );
+            if (!already) {
+              if (kDebugMode) {
+                debugPrint('[ItemsNotImported] current file path=$pathNorm');
+              }
+              exportedFiles.add(notImported);
+            }
+          }
+        }
       }
 
       if (exportedFiles.isEmpty) {
@@ -3663,7 +4062,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       ];
       await _showExportSuccessDialog(
         customerName: customer.displayName.trim(),
-        quotesExported: exportedFiles.length,
+        quotesExported: quoteCsvFilesExported,
         fileBasenames: basenames,
         folderPath: exportedFiles.first.parent.path,
         noteAfterQuotes: noteParts.join(' '),
@@ -3686,6 +4085,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       return;
     }
+    final quoteIdForExportReload = _currentQuoteId;
+    if (quoteIdForExportReload != null) {
+      await _loadQuoteById(quoteIdForExportReload);
+    }
+    if (kDebugMode && quoteIdForExportReload != null) {
+      debugPrint(
+        '[Export] using quote id=$quoteIdForExportReload lines=${_orderLines.length}',
+      );
+    }
+
     if (_orderLines.isEmpty && _currentQuoteId == null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3704,6 +4113,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         );
         return;
       }
+
+      await _ensureActiveIndexRowForQuoteFile(currentId);
 
       _debugLogQuoteLifecycleExport(
         'ExportCurrent quoteId=$currentId activeBucket=$_activeQuoteBucketKey',
@@ -3748,6 +4159,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final quoteRaw = await quoteFile.readAsString();
       final quoteData = Map<String, dynamic>.from(jsonDecode(quoteRaw) as Map);
+      if (kDebugMode) {
+        final stats = quoteDataLineStatsAndTotal(quoteData);
+        debugPrint(
+          '[ExportCurrent] quoteId=$currentId lineCount=${stats.$1} '
+          'unitCount=${stats.$2}',
+        );
+      }
       if (persistedQuoteDataIsEmptyForReuse(quoteData)) {
         _debugLogQuoteImportExport(
           '[ExportCurrent] skip-empty quoteId=$currentId',
@@ -3772,7 +4190,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         customerDisplayName: customer.displayName.trim(),
         filename: filename,
         csvText: csvText,
+        persistExportDebugAction: 'export_current_quote',
       );
+      if (kDebugMode) {
+        debugPrint('[ExportCurrent] wrote path=${file.path}');
+      }
 
       final moved = await _moveActiveQuoteToArchiveAfterSuccessfulExport(
         quoteId: currentId,
@@ -3920,11 +4342,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Groups CSV rows, resolves catalog products, applies file-side MOQ rounding, and
   /// tags lines that already exist on the order (import merge identity).
-  OrderImportPrepareOutcome _prepareOrderImportLines(List<OrderImportCsvRow> rows) {
+  OrderImportPrepareOutcome _prepareOrderImportLines(
+    List<OrderImportCsvRow> rows, {
+    required int totalRowsProcessed,
+  }) {
     var csvMoqAdjustedRows = 0;
     final skippedRows = <OrderImportSkippedRow>[];
     final groupedQuantityByItemKey = <String, int>{};
     final displayItemByItemKey = <String, String>{};
+    final descriptionByItemKey = <String, String>{};
+    final priceByItemKey = <String, String>{};
     for (final r in rows) {
       final key = _orderImportNormalizeItemKey(r.item);
       groupedQuantityByItemKey.update(
@@ -3933,6 +4360,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ifAbsent: () => r.quantity,
       );
       displayItemByItemKey.putIfAbsent(key, () => r.item);
+      _orderImportMergeOptionalFieldByItemKey(descriptionByItemKey, key, r.description);
+      _orderImportMergeOptionalFieldByItemKey(priceByItemKey, key, r.price);
     }
 
     final workingOrderLines = <OrderLine>[
@@ -3958,6 +4387,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           OrderImportSkippedRow(
             item: item,
             quantity: combinedQuantity.toString(),
+            description: descriptionByItemKey[entry.key] ?? '',
+            price: priceByItemKey[entry.key] ?? '',
             reason: 'Item not found',
           ),
         );
@@ -3979,6 +4410,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           importedQtyMoq: importedQty,
           rawCsvCombinedQty: combinedQuantity,
           existingOrderQtySum: existingSum,
+          sourceDescription: descriptionByItemKey[entry.key] ?? '',
+          sourcePrice: priceByItemKey[entry.key] ?? '',
         ),
       );
       _mergeImportedProductIntoOrderLinesSnapshot(
@@ -3991,6 +4424,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       lines: lines,
       skippedRows: skippedRows,
       csvMoqAdjustedRows: csvMoqAdjustedRows,
+      totalRowsProcessed: totalRowsProcessed,
     );
   }
 
@@ -4004,6 +4438,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     var importedRows = 0;
     var moqAdjustedRows = prepare.csvMoqAdjustedRows;
+    var newItemsCount = 0;
+    var duplicateChoiceTotalQtyCount = 0;
+    var duplicateChoiceMinimumQtyCount = 0;
+    var duplicateChoiceSkipCount = 0;
+    var duplicateChoiceUseImportedQtyCount = 0;
     final importedQuantityByBucket = <String, int>{};
     final skippedRows = <OrderImportSkippedRow>[...prepare.skippedRows];
     var dupIndex = 0;
@@ -4014,6 +4453,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           await _ensureRoutingForProduct(line.product);
           _mergeImportedProductIntoOrder(line.product, line.importedQtyMoq);
           importedRows++;
+          newItemsCount++;
           _addImportedUnitsToQuoteBucketMap(
             line.product,
             line.importedQtyMoq,
@@ -4026,6 +4466,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         switch (choice) {
           case OrderImportDuplicateResolution.skip:
             importedRows++;
+            duplicateChoiceSkipCount++;
             break;
           case OrderImportDuplicateResolution.totalQty:
             await _ensureRoutingForProduct(line.product);
@@ -4042,6 +4483,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               scanIncrement: 1,
             );
             importedRows++;
+            duplicateChoiceTotalQtyCount++;
             _addImportedUnitsToQuoteBucketMap(
               line.product,
               line.importedQtyMoq,
@@ -4065,6 +4507,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               scanIncrement: 1,
             );
             importedRows++;
+            duplicateChoiceMinimumQtyCount++;
             _addImportedUnitsToQuoteBucketMap(
               line.product,
               line.importedQtyMoq,
@@ -4085,6 +4528,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               scanIncrement: 1,
             );
             importedRows++;
+            duplicateChoiceUseImportedQtyCount++;
             _addImportedUnitsToQuoteBucketMap(
               line.product,
               line.importedQtyMoq,
@@ -4097,6 +4541,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           OrderImportSkippedRow(
             item: line.displayItem,
             quantity: line.rawCsvCombinedQty.toString(),
+            description: line.sourceDescription,
+            price: line.sourcePrice,
             reason: 'Import failure: $e',
           ),
         );
@@ -4108,6 +4554,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       moqAdjustedRows: moqAdjustedRows,
       importedQuantityByBucket: importedQuantityByBucket,
       skippedRows: skippedRows,
+      totalRowsProcessed: prepare.totalRowsProcessed,
+      newItemsCount: newItemsCount,
+      duplicateChoiceTotalQtyCount: duplicateChoiceTotalQtyCount,
+      duplicateChoiceMinimumQtyCount: duplicateChoiceMinimumQtyCount,
+      duplicateChoiceSkipCount: duplicateChoiceSkipCount,
+      duplicateChoiceUseImportedQtyCount: duplicateChoiceUseImportedQtyCount,
     );
   }
 
@@ -4144,49 +4596,70 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return upDistance <= downDistance ? upper : lower;
   }
 
-  Future<void> _showImportSummaryDialog({
-    required Map<String, int> importedByBucket,
-    required int importedLineCount,
-    required int moqAdjustedRowCount,
-    required int skippedRowCount,
-    required String sourceFileName,
-    String? itemsNotImportedPath,
+  Future<void> _showOrderImportSummaryDialog({
+    required String filesImportedDescription,
+    required OrderImportApplyOutcome applyOutcome,
+    required int notImportedRowCount,
+    File? itemsNotImportedCsvFile,
   }) async {
-    var totalUnitsAdded = 0;
-    for (final v in importedByBucket.values) {
-      totalUnitsAdded += v;
-    }
-    final bucketLines = importedByBucket.entries.map((entry) {
-      return '• ${entry.key}: ${entry.value}';
-    }).join('\n');
-    final bucketText = bucketLines.isEmpty ? 'None' : bucketLines;
-
-    final buffer = StringBuffer()
-      ..writeln('File: $sourceFileName')
-      ..writeln()
-      ..writeln('Rows imported: $importedLineCount')
-      ..writeln('Rows adjusted to MOQ: $moqAdjustedRowCount')
-      ..writeln('Rows skipped: $skippedRowCount')
-      ..writeln('Total units added: $totalUnitsAdded')
-      ..writeln()
-      ..writeln('Quantity by bucket:')
-      ..writeln(bucketText);
-    if (itemsNotImportedPath != null) {
-      buffer
-        ..writeln()
-        ..writeln('Items not imported report:')
-        ..writeln(itemsNotImportedPath);
-    }
-
+    final dupUse = applyOutcome.duplicateChoiceUseImportedQtyCount;
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Import Complete'),
+          title: const Text('Import Summary'),
           content: SingleChildScrollView(
-            child: SelectableText(buffer.toString()),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Files imported: $filesImportedDescription'),
+                const SizedBox(height: 8),
+                Text(
+                  'Total rows processed: ${applyOutcome.totalRowsProcessed}',
+                ),
+                const SizedBox(height: 16),
+                Text('New Items Added: ${applyOutcome.newItemsCount}'),
+                const SizedBox(height: 12),
+                Text('Duplicates Resolved: ${applyOutcome.duplicateItemsCount}'),
+                Padding(
+                  padding: const EdgeInsets.only(left: 12, top: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Total qty: ${applyOutcome.duplicateChoiceTotalQtyCount}',
+                      ),
+                      Text(
+                        'Minimum qty: ${applyOutcome.duplicateChoiceMinimumQtyCount}',
+                      ),
+                      Text(
+                        'Skipped: ${applyOutcome.duplicateChoiceSkipCount}',
+                      ),
+                      if (dupUse > 0)
+                        Text('Use imported qty: $dupUse'),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text('MOQ Adjustments: ${applyOutcome.moqAdjustedCount}'),
+                const SizedBox(height: 12),
+                Text('Items Not Imported: $notImportedRowCount'),
+                if (itemsNotImportedCsvFile != null) ...[
+                  const SizedBox(height: 8),
+                  SelectableText(itemsNotImportedCsvFile.path),
+                ],
+              ],
+            ),
           ),
           actions: [
+            if (notImportedRowCount > 0 && itemsNotImportedCsvFile != null)
+              TextButton(
+                onPressed: () async {
+                  await _openCsvWithSystemHandler(itemsNotImportedCsvFile);
+                },
+                child: const Text('Open File'),
+              ),
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
               child: const Text('OK'),
@@ -4295,6 +4768,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (_loadingProducts) return;
     if (_orderCsvImportInProgress) return;
     _orderCsvImportInProgress = true;
+    _orderImportRouteTraceKeys.clear();
+    _orderImportTouchedQuoteIds.clear();
     try {
       _editDialogOpen = true;
       final result = await FilePicker.platform.pickFiles(
@@ -4381,7 +4856,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _quoteImportDebugSession =
           kDebugMode ? 'imp_${DateTime.now().millisecondsSinceEpoch}' : null;
       _quoteImportLoggedBucketKeys.clear();
-      final prepare = _prepareOrderImportLines(combinedRows);
+      final totalRowsProcessed =
+          combinedRows.length + allParseSkipped.length;
+      final prepare = _prepareOrderImportLines(
+        combinedRows,
+        totalRowsProcessed: totalRowsProcessed,
+      );
       final duplicateLines =
           prepare.lines.where((l) => l.isDuplicate).toList(growable: false);
       final List<OrderImportDuplicateResolution> dupChoices;
@@ -4405,6 +4885,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       await _saveQuote();
       await _pruneSupersededEmptyDuplicateQuotesForCustomer(_selectedCustomer!);
+      await _syncOrderImportTouchedQuotesInActiveIndex();
+      await _debugLogImportApplyQuoteSnapshot(
+        _selectedCustomer!,
+        'after import save+prune',
+      );
       await _debugLogQuoteIndexAuditForCustomer('after import (persisted)');
       final skippedRows = <OrderImportSkippedRow>[
         ...allParseSkipped,
@@ -4412,34 +4897,50 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       ];
       File? skippedCsvFile;
       if (skippedRows.isNotEmpty) {
-        skippedCsvFile = await _writeItemsNotImportedCsv(
-          customerDisplayName: _selectedCustomer!.displayName,
-          skippedRows: skippedRows,
-        );
+        try {
+          skippedCsvFile = await _writeItemsNotImportedCsv(
+            customerDisplayName: _selectedCustomer!.displayName,
+            skippedRows: skippedRows,
+          );
+          // Single tracked file per import cycle (export/share uses this only).
+          _lastItemsNotImportedCsvPath = skippedCsvFile.path;
+          _lastItemsNotImportedCsvCustomerId = _selectedCustomer!.id;
+        } catch (e, st) {
+          debugPrint('[OrderImport] ITEMS_NOT_IMPORTED CSV failed: $e\n$st');
+        }
+      } else {
+        _lastItemsNotImportedCsvPath = null;
+        _lastItemsNotImportedCsvCustomerId = null;
+      }
+
+      final quoteIdToSync = _currentQuoteId;
+      if (quoteIdToSync != null) {
+        await _loadQuoteById(quoteIdToSync);
+        if (kDebugMode) {
+          debugPrint('[ImportSync] quote reloaded id=$quoteIdToSync');
+        }
       }
 
       if (!mounted) return;
       setState(() {
-        _syncItemsScannedFromOrderLines();
-        _recalculateTotals();
-        _orderListVersion += 1;
-        if (_orderLines.isNotEmpty) {
-          _selectedLine = _orderLines.first;
-          _lastAddedUpc = _orderLines.first.product.upc;
+        if (quoteIdToSync == null) {
+          _syncItemsScannedFromOrderLines();
+          _recalculateTotals();
+          _orderListVersion += 1;
+          if (_orderLines.isNotEmpty) {
+            _selectedLine = _orderLines.first;
+            _lastAddedUpc = _orderLines.first.product.upc;
+          }
         }
         _status = 'Imported order from $sourceFileLabel';
       });
 
       if (!mounted) return;
-      await _showImportSummaryDialog(
-        importedByBucket: SplayTreeMap<String, int>.from(
-          applyOutcome.importedQuantityByBucket,
-        ),
-        importedLineCount: applyOutcome.importedRows,
-        moqAdjustedRowCount: applyOutcome.moqAdjustedRows,
-        skippedRowCount: skippedRows.length,
-        sourceFileName: sourceFileLabel,
-        itemsNotImportedPath: skippedCsvFile?.path,
+      await _showOrderImportSummaryDialog(
+        filesImportedDescription: sourceFileLabel,
+        applyOutcome: applyOutcome,
+        notImportedRowCount: skippedRows.length,
+        itemsNotImportedCsvFile: skippedCsvFile,
       );
     } catch (e, st) {
       _editDialogOpen = false;
@@ -7530,6 +8031,141 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
+  /// Ensures [quoteId] has an active, archive-disjoint row in the active index when
+  /// [quote_<id>.json] exists and is non-empty. Used after multi-bucket import so
+  /// Export / Load Quote see every routed quote without a UI refresh.
+  Future<void> _ensureActiveIndexRowForQuoteFile(String quoteId) async {
+    if (quoteId.isEmpty) return;
+    try {
+      final dir = await _getQuotesDirectory();
+      await _ensureLegacyQuoteIndexMigratedIfNeeded();
+      final quoteFile = File('${dir.path}/quote_$quoteId.json');
+      if (!await quoteFile.exists()) return;
+
+      final data = Map<String, dynamic>.from(
+        jsonDecode(await quoteFile.readAsString()) as Map,
+      );
+      if (persistedQuoteDataIsEmptyForReuse(data)) return;
+
+      if (await _quoteIdHasActiveEligibleRowInActiveIndexStorage(quoteId)) {
+        return;
+      }
+
+      var name = (data['name'] as String?)?.trim() ?? '';
+      if (name.isEmpty) name = 'NEW QUOTE';
+      name = name.toUpperCase();
+
+      String customerName = '';
+      String customerId = '';
+      final customerMap = data['customer'];
+      if (customerMap is Map<String, dynamic>) {
+        final c = Customer.fromJson(Map<String, dynamic>.from(customerMap));
+        customerName = c.displayName.trim();
+        customerId = c.id.trim();
+      }
+
+      var rawBucketKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
+      var persistedBucketKey = _logicalQuoteBucketKey(rawBucketKey);
+      final rootBucketKeyForRow = persistedBucketKey.isNotEmpty
+          ? persistedBucketKey
+          : _defaultQuoteBucketDefinition.bucketKey;
+
+      var bucketLabel = (data['quoteBucketLabel'] as String?)?.trim() ?? '';
+      if (bucketLabel.isEmpty) {
+        final fromConfig = _quoteBucketsByBucketKey[rootBucketKeyForRow];
+        bucketLabel =
+            fromConfig?.displayLabel ?? _defaultQuoteBucketDefinition.displayLabel;
+      }
+      if (_logicalQuoteBucketKey(rootBucketKeyForRow) == _defaultQuoteBucketKey) {
+        bucketLabel = _defaultQuoteBucketDefinition.displayLabel;
+      }
+
+      final updatedAt =
+          DateTime.tryParse((data['updatedAt'] as String?) ?? '') ??
+              DateTime.now();
+
+      final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
+      List<Map<String, dynamic>> list = [];
+      if (await indexFile.exists()) {
+        final content = await indexFile.readAsString();
+        final decoded = jsonDecode(content);
+        if (decoded is List) {
+          list = List<Map<String, dynamic>>.from(
+            decoded.map((e) => Map<String, dynamic>.from(e as Map)),
+          );
+        }
+      }
+
+      final priorIdx = list.indexWhere((e) => e['id']?.toString() == quoteId);
+      final priorEntry = priorIdx >= 0
+          ? Map<String, dynamic>.from(list[priorIdx])
+          : <String, dynamic>{};
+
+      list.removeWhere((e) => e['id']?.toString() == quoteId);
+
+      final row = <String, dynamic>{
+        ...priorEntry,
+        'id': quoteId,
+        'name': name,
+        'customerName': customerName,
+        'customerId': customerId,
+        'quoteBucketKey': rootBucketKeyForRow,
+        'quoteBucketLabel': bucketLabel,
+        'updatedAt': updatedAt.toIso8601String(),
+        'quoteStatus': quoteLifecycleStatusToJson(QuoteLifecycleStatus.active),
+      };
+
+      list.insert(0, row);
+      await indexFile.writeAsString(jsonEncode(list), flush: true);
+      await _removeQuoteFromArchiveIndexIfPresent(quoteId);
+    } catch (e, st) {
+      debugPrint(
+        '[QuoteIndex] ensure active row for id=$quoteId failed: $e\n$st',
+      );
+    }
+  }
+
+  Future<void> _syncOrderImportTouchedQuotesInActiveIndex() async {
+    if (_orderImportTouchedQuoteIds.isEmpty) return;
+    final touched = List<String>.from(_orderImportTouchedQuoteIds);
+    for (final id in touched) {
+      await _ensureActiveIndexRowForQuoteFile(id);
+    }
+    if (kDebugMode) {
+      final dir = await _getQuotesDirectory();
+      for (final id in touched) {
+        final qf = File('${dir.path}/quote_$id.json');
+        final onDisk = await qf.exists();
+        var bucketTag = '';
+        if (onDisk) {
+          try {
+            final raw = await qf.readAsString();
+            final d = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+            bucketTag = (d['quoteBucketLabel'] as String?)?.trim() ??
+                _logicalQuoteBucketKey(
+                  (d['quoteBucketKey'] as String?)?.trim() ?? '',
+                );
+          } catch (_) {
+            bucketTag = '?';
+          }
+        }
+        final eligible =
+            await _quoteIdHasActiveEligibleRowInActiveIndexStorage(id);
+        debugPrint(
+          '[ImportTouched] quoteId=$id bucket=${bucketTag.isEmpty ? '?' : bucketTag} '
+          'saved=${onDisk ? 'yes' : 'no'} activeIndex=${eligible ? 'yes' : 'no'}',
+        );
+      }
+      final idx = await _loadQuoteIndex();
+      final visible =
+          touched.where((id) => idx.any((e) => e.id == id)).toList();
+      debugPrint(
+        '[ImportPostSync] activeIndexCount=${idx.length} '
+        'touchedVisible=${visible.join(',')}',
+      );
+    }
+  }
+
   /// True when this id is archived on disk but is not eligible as an active
   /// workspace quote (no active-status row in the active index file).
   /// Used to avoid "resurrecting" a quote into the active workspace after export
@@ -7698,14 +8334,21 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'quoteBucketLabel': _activeQuoteBucketLabel,
         'updatedAt': now.toIso8601String(),
       };
+      // Active index rows must stay eligible for Load Quote / export. A stale
+      // quoteStatus copied from [priorEntry] (e.g. archived/confirmed) would
+      // otherwise persist and hide otherwise valid routed quotes from
+      // [_loadQuoteIndex] / [_quoteIdHasActiveEligibleRowInActiveIndexStorage].
       row['quoteStatus'] =
-          row['quoteStatus'] ??
           quoteLifecycleStatusToJson(QuoteLifecycleStatus.active);
 
       list.insert(0, row);
 
       await indexFile.writeAsString(jsonEncode(list), flush: true);
       await _removeQuoteFromArchiveIndexIfPresent(id);
+
+      if (_orderCsvImportInProgress) {
+        _orderImportTouchedQuoteIds.add(id);
+      }
 
       if (!mounted) return;
       setState(() {
