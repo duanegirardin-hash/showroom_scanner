@@ -417,6 +417,55 @@ class OrderImportApplyOutcome {
   });
 }
 
+/// Resolution for a catalog item that already exists on the order during CSV import.
+enum OrderImportDuplicateResolution {
+  totalQty,
+  minimumQty,
+  skip,
+  useImportedQty,
+}
+
+/// Options shown in the duplicate import review dialog (MOQ-safe presets only; no replace-with-file).
+const List<OrderImportDuplicateResolution> _kOrderImportDuplicateReviewOptions = [
+  OrderImportDuplicateResolution.totalQty,
+  OrderImportDuplicateResolution.minimumQty,
+  OrderImportDuplicateResolution.skip,
+];
+
+/// One grouped CSV import row after catalog match and MOQ snap (may conflict with current order).
+class OrderImportPreparedLine {
+  final String displayItem;
+  final Product product;
+  /// Quantity from the file after grouping rows and snapping to MOQ (import path).
+  final int importedQtyMoq;
+  final int rawCsvCombinedQty;
+  /// When non-null, the order already has at least one matching line; sum of those quantities.
+  final int? existingOrderQtySum;
+
+  const OrderImportPreparedLine({
+    required this.displayItem,
+    required this.product,
+    required this.importedQtyMoq,
+    required this.rawCsvCombinedQty,
+    required this.existingOrderQtySum,
+  });
+
+  bool get isDuplicate => existingOrderQtySum != null;
+}
+
+class OrderImportPrepareOutcome {
+  final List<OrderImportPreparedLine> lines;
+  final List<OrderImportSkippedRow> skippedRows;
+  /// Rows where grouped CSV quantity differed from MOQ-rounded import quantity.
+  final int csvMoqAdjustedRows;
+
+  const OrderImportPrepareOutcome({
+    required this.lines,
+    required this.skippedRows,
+    required this.csvMoqAdjustedRows,
+  });
+}
+
 String _orderImportNormalizeItemKey(String value) => value.trim().toUpperCase();
 
 String _orderImportNormalizeUpcLookupKey(String value) {
@@ -1024,6 +1073,177 @@ class Customer {
       discount: discStr,
       discountPercent: pct,
       paymentTerms: s('paymentTerms'),
+    );
+  }
+}
+
+String _orderImportDuplicateResolutionLabel(OrderImportDuplicateResolution r) {
+  switch (r) {
+    case OrderImportDuplicateResolution.totalQty:
+      return 'Total qty (order + file)';
+    case OrderImportDuplicateResolution.minimumQty:
+      return 'Minimum qty';
+    case OrderImportDuplicateResolution.skip:
+      return 'Skip (keep order qty)';
+    case OrderImportDuplicateResolution.useImportedQty:
+      return 'Use imported qty (replace order)';
+  }
+}
+
+class _OrderImportDuplicateReviewDialog extends StatefulWidget {
+  const _OrderImportDuplicateReviewDialog({required this.items});
+
+  final List<OrderImportPreparedLine> items;
+
+  @override
+  State<_OrderImportDuplicateReviewDialog> createState() =>
+      _OrderImportDuplicateReviewDialogState();
+}
+
+class _OrderImportDuplicateReviewDialogState
+    extends State<_OrderImportDuplicateReviewDialog> {
+  late List<OrderImportDuplicateResolution> _choices;
+
+  @override
+  void initState() {
+    super.initState();
+    _choices = List<OrderImportDuplicateResolution>.generate(
+      widget.items.length,
+      (_) => OrderImportDuplicateResolution.totalQty,
+      growable: false,
+    );
+  }
+
+  void _applyAll(OrderImportDuplicateResolution value) {
+    setState(() {
+      for (var i = 0; i < _choices.length; i++) {
+        _choices[i] = value;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = MediaQuery.sizeOf(context).height;
+    final contentHeight = (h * 0.58).clamp(280.0, 560.0);
+    return AlertDialog(
+      title: const Text('Items already on order'),
+      content: SizedBox(
+        width: 440,
+        height: contentHeight,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'These lines match your current order. Choose how to set quantity for each. '
+              'All results use your existing MOQ rounding (no manual quantities).',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: [
+                TextButton(
+                  onPressed: () => _applyAll(OrderImportDuplicateResolution.totalQty),
+                  child: const Text('Total qty — all'),
+                ),
+                TextButton(
+                  onPressed: () => _applyAll(OrderImportDuplicateResolution.minimumQty),
+                  child: const Text('Minimum qty — all'),
+                ),
+                TextButton(
+                  onPressed: () => _applyAll(OrderImportDuplicateResolution.skip),
+                  child: const Text('Skip — all'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Expanded(
+              child: ListView.separated(
+                itemCount: widget.items.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, index) {
+                  final row = widget.items[index];
+                  final existing = row.existingOrderQtySum!;
+                  final desc = row.product.description.trim();
+                  final sub = desc.isEmpty
+                      ? ''
+                      : (desc.length > 80 ? '${desc.substring(0, 80)}…' : desc);
+                  return Material(
+                    type: MaterialType.card,
+                    elevation: 0.5,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            row.displayItem.trim().isEmpty
+                                ? row.product.itemNumber
+                                : row.displayItem.trim(),
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          if (sub.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                sub,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ),
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              'On order: $existing  ·  From file (MOQ): ${row.importedQtyMoq}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Quantity rule',
+                            style: Theme.of(context).textTheme.labelMedium,
+                          ),
+                          const SizedBox(height: 4),
+                          DropdownButton<OrderImportDuplicateResolution>(
+                            value: _choices[index],
+                            isExpanded: true,
+                            items: [
+                              for (final opt in _kOrderImportDuplicateReviewOptions)
+                                DropdownMenuItem(
+                                  value: opt,
+                                  child: Text(_orderImportDuplicateResolutionLabel(opt)),
+                                ),
+                            ],
+                            onChanged: (v) {
+                              if (v == null) return;
+                              setState(() => _choices[index] = v);
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () =>
+              Navigator.of(context).pop(List<OrderImportDuplicateResolution>.from(_choices)),
+          child: const Text('Apply import'),
+        ),
+      ],
     );
   }
 }
@@ -3601,12 +3821,107 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  Future<OrderImportApplyOutcome> _applyOrderImportRows(
-    List<OrderImportCsvRow> rows,
-  ) async {
-    var importedRows = 0;
-    var moqAdjustedRows = 0;
-    final importedQuantityByBucket = <String, int>{};
+  /// Sum of quantities on [lines] that match [product] under import-merge rules.
+  /// Returns null when no matching line exists (treat as new import line).
+  int? _sumExistingQtyOnLinesForImportMerge(
+    Product product,
+    List<OrderLine> lines,
+  ) {
+    var sum = 0;
+    var any = false;
+    for (final line in lines) {
+      if (_productsMatchForOrderImportMerge(line.product, product)) {
+        sum += line.quantity;
+        any = true;
+      }
+    }
+    return any ? sum : null;
+  }
+
+  /// Same merge behavior as [_mergeImportedProductIntoOrder], for a throwaway
+  /// line list used while preparing an import batch (same-batch duplicate detection).
+  void _mergeImportedProductIntoOrderLinesSnapshot(
+    List<OrderLine> lines,
+    Product product,
+    int addQty,
+  ) {
+    final matching = <OrderLine>[];
+    for (final line in lines) {
+      if (_productsMatchForOrderImportMerge(line.product, product)) {
+        matching.add(line);
+      }
+    }
+
+    if (matching.isEmpty) {
+      lines.insert(
+        0,
+        OrderLine(
+          product: product,
+          quantity: addQty,
+          scans: 1,
+        ),
+      );
+      return;
+    }
+
+    final primary = matching.first;
+    var qtyToAdd = addQty;
+    for (var i = 1; i < matching.length; i++) {
+      final dup = matching[i];
+      qtyToAdd += dup.quantity;
+      lines.remove(dup);
+    }
+    primary.quantity += qtyToAdd;
+    primary.scans += 1;
+    lines.remove(primary);
+    lines.insert(0, primary);
+  }
+
+  /// Collapses all import-merge matches to a single primary line with [newQuantity].
+  void _replaceImportMergedOrderLinesQuantity(
+    Product product,
+    int newQuantity, {
+    required int scanIncrement,
+  }) {
+    final matching = <OrderLine>[];
+    for (final line in _orderLines) {
+      if (_productsMatchForOrderImportMerge(line.product, product)) {
+        matching.add(line);
+      }
+    }
+
+    if (matching.isEmpty) {
+      final key = _orderLineKeyForProduct(product);
+      final line = OrderLine(
+        product: product,
+        quantity: newQuantity,
+        scans: 1,
+      );
+      _orderLines.insert(0, line);
+      _orderLineByKey[key] = line;
+      return;
+    }
+
+    final primary = matching.first;
+    for (var i = 1; i < matching.length; i++) {
+      final dup = matching[i];
+      _orderLineByKey.remove(_orderLineKeyForProduct(dup.product));
+      _orderLines.remove(dup);
+    }
+    primary.quantity = newQuantity;
+    primary.scans += scanIncrement;
+    _orderLines.remove(primary);
+    _orderLines.insert(0, primary);
+
+    final key = _orderLineKeyForProduct(product);
+    _orderLineByKey.removeWhere((_, v) => identical(v, primary));
+    _orderLineByKey[key] = primary;
+  }
+
+  /// Groups CSV rows, resolves catalog products, applies file-side MOQ rounding, and
+  /// tags lines that already exist on the order (import merge identity).
+  OrderImportPrepareOutcome _prepareOrderImportLines(List<OrderImportCsvRow> rows) {
+    var csvMoqAdjustedRows = 0;
     final skippedRows = <OrderImportSkippedRow>[];
     final groupedQuantityByItemKey = <String, int>{};
     final displayItemByItemKey = <String, String>{};
@@ -3620,59 +3935,195 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       displayItemByItemKey.putIfAbsent(key, () => r.item);
     }
 
+    final workingOrderLines = <OrderLine>[
+      for (final l in _orderLines)
+        OrderLine(
+          product: l.product,
+          quantity: l.quantity,
+          scans: l.scans,
+        ),
+    ];
+
+    final lines = <OrderImportPreparedLine>[];
     for (final entry in groupedQuantityByItemKey.entries) {
       final item = displayItemByItemKey[entry.key] ?? entry.key;
       final combinedQuantity = entry.value;
-      try {
-        final product = matchOrderImportProduct(
-          item,
-          _productsByItemNumber,
-          _productsByUpc,
-        );
-        if (product == null) {
-          skippedRows.add(
-            OrderImportSkippedRow(
-              item: item,
-              quantity: combinedQuantity.toString(),
-              reason: 'Item not found',
-            ),
-          );
-          continue;
-        }
-        final importedQty = _nearestValidMoqMultiple(
-          requestedQty: combinedQuantity,
-          minOrderQty: product.minOrderQty,
-        );
-        if (importedQty != combinedQuantity) {
-          moqAdjustedRows++;
-        }
-        await _ensureRoutingForProduct(product);
-        _mergeImportedProductIntoOrder(product, importedQty);
-        importedRows++;
-        final bucket = _resolveQuoteBucketForProduct(product);
-        final label = bucket.displayLabel.trim().isEmpty
-            ? 'EVERYDAY'
-            : bucket.displayLabel.trim().toUpperCase();
-        importedQuantityByBucket.update(
-          label,
-          (value) => value + importedQty,
-          ifAbsent: () => importedQty,
-        );
-      } catch (e) {
+      final product = matchOrderImportProduct(
+        item,
+        _productsByItemNumber,
+        _productsByUpc,
+      );
+      if (product == null) {
         skippedRows.add(
           OrderImportSkippedRow(
             item: item,
             quantity: combinedQuantity.toString(),
+            reason: 'Item not found',
+          ),
+        );
+        continue;
+      }
+      final importedQty = _nearestValidMoqMultiple(
+        requestedQty: combinedQuantity,
+        minOrderQty: product.minOrderQty,
+      );
+      if (importedQty != combinedQuantity) {
+        csvMoqAdjustedRows++;
+      }
+      final existingSum =
+          _sumExistingQtyOnLinesForImportMerge(product, workingOrderLines);
+      lines.add(
+        OrderImportPreparedLine(
+          displayItem: item,
+          product: product,
+          importedQtyMoq: importedQty,
+          rawCsvCombinedQty: combinedQuantity,
+          existingOrderQtySum: existingSum,
+        ),
+      );
+      _mergeImportedProductIntoOrderLinesSnapshot(
+        workingOrderLines,
+        product,
+        importedQty,
+      );
+    }
+    return OrderImportPrepareOutcome(
+      lines: lines,
+      skippedRows: skippedRows,
+      csvMoqAdjustedRows: csvMoqAdjustedRows,
+    );
+  }
+
+  Future<OrderImportApplyOutcome> _applyOrderImportPrepareOutcome({
+    required OrderImportPrepareOutcome prepare,
+    required List<OrderImportDuplicateResolution> duplicateChoices,
+  }) async {
+    final expectedDupes =
+        prepare.lines.where((OrderImportPreparedLine l) => l.isDuplicate).length;
+    assert(duplicateChoices.length == expectedDupes);
+
+    var importedRows = 0;
+    var moqAdjustedRows = prepare.csvMoqAdjustedRows;
+    final importedQuantityByBucket = <String, int>{};
+    final skippedRows = <OrderImportSkippedRow>[...prepare.skippedRows];
+    var dupIndex = 0;
+
+    for (final line in prepare.lines) {
+      try {
+        if (!line.isDuplicate) {
+          await _ensureRoutingForProduct(line.product);
+          _mergeImportedProductIntoOrder(line.product, line.importedQtyMoq);
+          importedRows++;
+          _addImportedUnitsToQuoteBucketMap(
+            line.product,
+            line.importedQtyMoq,
+            importedQuantityByBucket,
+          );
+          continue;
+        }
+
+        final choice = duplicateChoices[dupIndex++];
+        switch (choice) {
+          case OrderImportDuplicateResolution.skip:
+            importedRows++;
+            break;
+          case OrderImportDuplicateResolution.totalQty:
+            await _ensureRoutingForProduct(line.product);
+            final existing = line.existingOrderQtySum!;
+            final raw = existing + line.importedQtyMoq;
+            final finalQty = _nearestValidMoqMultiple(
+              requestedQty: raw,
+              minOrderQty: line.product.minOrderQty,
+            );
+            if (finalQty != raw) moqAdjustedRows++;
+            _replaceImportMergedOrderLinesQuantity(
+              line.product,
+              finalQty,
+              scanIncrement: 1,
+            );
+            importedRows++;
+            _addImportedUnitsToQuoteBucketMap(
+              line.product,
+              line.importedQtyMoq,
+              importedQuantityByBucket,
+            );
+            break;
+          case OrderImportDuplicateResolution.minimumQty:
+            await _ensureRoutingForProduct(line.product);
+            final existing = line.existingOrderQtySum!;
+            final raw = existing < line.importedQtyMoq
+                ? existing
+                : line.importedQtyMoq;
+            final finalQty = _nearestValidMoqMultiple(
+              requestedQty: raw,
+              minOrderQty: line.product.minOrderQty,
+            );
+            if (finalQty != raw) moqAdjustedRows++;
+            _replaceImportMergedOrderLinesQuantity(
+              line.product,
+              finalQty,
+              scanIncrement: 1,
+            );
+            importedRows++;
+            _addImportedUnitsToQuoteBucketMap(
+              line.product,
+              line.importedQtyMoq,
+              importedQuantityByBucket,
+            );
+            break;
+          case OrderImportDuplicateResolution.useImportedQty:
+            await _ensureRoutingForProduct(line.product);
+            final raw = line.importedQtyMoq;
+            final finalQty = _nearestValidMoqMultiple(
+              requestedQty: raw,
+              minOrderQty: line.product.minOrderQty,
+            );
+            if (finalQty != raw) moqAdjustedRows++;
+            _replaceImportMergedOrderLinesQuantity(
+              line.product,
+              finalQty,
+              scanIncrement: 1,
+            );
+            importedRows++;
+            _addImportedUnitsToQuoteBucketMap(
+              line.product,
+              line.importedQtyMoq,
+              importedQuantityByBucket,
+            );
+            break;
+        }
+      } catch (e) {
+        skippedRows.add(
+          OrderImportSkippedRow(
+            item: line.displayItem,
+            quantity: line.rawCsvCombinedQty.toString(),
             reason: 'Import failure: $e',
           ),
         );
       }
     }
+
     return OrderImportApplyOutcome(
       importedRows: importedRows,
       moqAdjustedRows: moqAdjustedRows,
       importedQuantityByBucket: importedQuantityByBucket,
       skippedRows: skippedRows,
+    );
+  }
+
+  void _addImportedUnitsToQuoteBucketMap(
+    Product product,
+    int importedQtyMoq,
+    Map<String, int> importedQuantityByBucket,
+  ) {
+    final bucket = _resolveQuoteBucketForProduct(product);
+    final label = bucket.displayLabel.trim().isEmpty
+        ? 'EVERYDAY'
+        : bucket.displayLabel.trim().toUpperCase();
+    importedQuantityByBucket.update(
+      label,
+      (value) => value + importedQtyMoq,
+      ifAbsent: () => importedQtyMoq,
     );
   }
 
@@ -3746,25 +4197,90 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
+  /// Import merge only: normalized UPC (when both meaningful), else item/SKU;
+  /// if only one side has UPC, still merge when normalized item numbers match.
+  bool _productsMatchForOrderImportMerge(Product a, Product b) {
+    String? normalizedUpcForMerge(String raw) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) return null;
+      final compact = trimmed.replaceAll(RegExp(r'\s+'), '');
+      final digits = digitsOnly(compact);
+      if (digits.isNotEmpty) {
+        if (RegExp(r'^0+$').hasMatch(digits)) return null;
+        return digits;
+      }
+      final upper = compact.toUpperCase();
+      if (upper.isEmpty) return null;
+      if (RegExp(r'^0+$').hasMatch(upper)) return null;
+      return upper;
+    }
+
+    String? normalizedItemForMerge(String raw) {
+      final n = normalizeItemNumber(raw);
+      return n.isEmpty ? null : n;
+    }
+
+    bool upcDigitsEquivalent(String x, String y) {
+      if (x == y) return true;
+      if (x.length == 12 && x.startsWith('0') && x.substring(1) == y) {
+        return true;
+      }
+      if (y.length == 12 && y.startsWith('0') && y.substring(1) == x) {
+        return true;
+      }
+      if (x.length == 11 && y == '0$x') return true;
+      if (y.length == 11 && x == '0$y') return true;
+      return false;
+    }
+
+    final aUpc = normalizedUpcForMerge(a.upc);
+    final bUpc = normalizedUpcForMerge(b.upc);
+    final aItem = normalizedItemForMerge(a.itemNumber);
+    final bItem = normalizedItemForMerge(b.itemNumber);
+
+    if (aUpc != null && bUpc != null) {
+      return upcDigitsEquivalent(aUpc, bUpc);
+    }
+    // At least one side lacks a usable UPC: merge on item/SKU when both present.
+    return aItem != null && bItem != null && aItem == bItem;
+  }
+
   void _mergeImportedProductIntoOrder(Product product, int addQty) {
-    final key = _orderLineKeyForProduct(product);
-    late final OrderLine line;
-    final bool isExistingLine = _orderLineByKey.containsKey(key);
-    if (isExistingLine) {
-      line = _orderLineByKey[key]!;
-      line.quantity += addQty;
-      line.scans += 1;
-      _orderLines.remove(line);
-      _orderLines.insert(0, line);
-    } else {
-      line = OrderLine(
+    final matching = <OrderLine>[];
+    for (final line in _orderLines) {
+      if (_productsMatchForOrderImportMerge(line.product, product)) {
+        matching.add(line);
+      }
+    }
+
+    if (matching.isEmpty) {
+      final key = _orderLineKeyForProduct(product);
+      final line = OrderLine(
         product: product,
         quantity: addQty,
         scans: 1,
       );
       _orderLines.insert(0, line);
       _orderLineByKey[key] = line;
+      return;
     }
+
+    final primary = matching.first;
+    var qtyToAdd = addQty;
+    for (var i = 1; i < matching.length; i++) {
+      final dup = matching[i];
+      qtyToAdd += dup.quantity;
+      _orderLineByKey.remove(_orderLineKeyForProduct(dup.product));
+      _orderLines.remove(dup);
+    }
+    primary.quantity += qtyToAdd;
+    primary.scans += 1;
+    _orderLines.remove(primary);
+    _orderLines.insert(0, primary);
+
+    final key = _orderLineKeyForProduct(product);
+    _orderLineByKey.removeWhere((_, v) => identical(v, primary));
+    _orderLineByKey[key] = primary;
   }
 
   void _syncItemsScannedFromOrderLines() {
@@ -3785,6 +4301,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         type: FileType.custom,
         allowedExtensions: ['csv'],
         withData: true,
+        allowMultiple: true,
       );
       _editDialogOpen = false;
 
@@ -3792,32 +4309,55 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return;
       }
 
-      final file = result.files.single;
-      String? raw;
-      if (file.bytes != null) {
-        raw = utf8.decode(file.bytes!);
-      } else if (file.path != null) {
-        raw = await File(file.path!).readAsString();
+      final combinedRows = <OrderImportCsvRow>[];
+      final allParseSkipped = <OrderImportSkippedRow>[];
+      final contributingFileNames = <String>[];
+
+      for (final file in result.files) {
+        String? raw;
+        if (file.bytes != null) {
+          raw = utf8.decode(file.bytes!);
+        } else if (file.path != null) {
+          raw = await File(file.path!).readAsString();
+        }
+
+        if (raw == null || raw.trim().isEmpty) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Skipped empty file: ${file.name}')),
+            );
+          }
+          continue;
+        }
+
+        try {
+          final outcome = parseOrderImportCsv(raw);
+          combinedRows.addAll(outcome.rows);
+          allParseSkipped.addAll(outcome.skippedRows);
+          contributingFileNames.add(file.name);
+        } on FormatException catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('${file.name}: ${e.message}')),
+          );
+          return;
+        }
       }
 
-      if (raw == null || raw.trim().isEmpty) {
+      if (combinedRows.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Selected file is empty.')),
+          const SnackBar(
+            content: Text('No valid rows to import from selected files.'),
+          ),
         );
         return;
       }
 
-      late final OrderImportCsvParseOutcome outcome;
-      try {
-        outcome = parseOrderImportCsv(raw);
-      } on FormatException catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message)),
-        );
-        return;
-      }
+      final sourceFileLabel = contributingFileNames.length == 1
+          ? contributingFileNames.single
+          : '${contributingFileNames.length} files: '
+              '${contributingFileNames.join(', ')}';
 
       if (_productsByItemNumber.isEmpty && _productsByUpc.isEmpty) {
         if (!mounted) return;
@@ -3841,12 +4381,33 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _quoteImportDebugSession =
           kDebugMode ? 'imp_${DateTime.now().millisecondsSinceEpoch}' : null;
       _quoteImportLoggedBucketKeys.clear();
-      final applyOutcome = await _applyOrderImportRows(outcome.rows);
+      final prepare = _prepareOrderImportLines(combinedRows);
+      final duplicateLines =
+          prepare.lines.where((l) => l.isDuplicate).toList(growable: false);
+      final List<OrderImportDuplicateResolution> dupChoices;
+      if (duplicateLines.isEmpty) {
+        dupChoices = const [];
+      } else {
+        if (!mounted) return;
+        final fromDialog =
+            await showDialog<List<OrderImportDuplicateResolution>>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) =>
+              _OrderImportDuplicateReviewDialog(items: duplicateLines),
+        );
+        if (fromDialog == null) return;
+        dupChoices = fromDialog;
+      }
+      final applyOutcome = await _applyOrderImportPrepareOutcome(
+        prepare: prepare,
+        duplicateChoices: dupChoices,
+      );
       await _saveQuote();
       await _pruneSupersededEmptyDuplicateQuotesForCustomer(_selectedCustomer!);
       await _debugLogQuoteIndexAuditForCustomer('after import (persisted)');
       final skippedRows = <OrderImportSkippedRow>[
-        ...outcome.skippedRows,
+        ...allParseSkipped,
         ...applyOutcome.skippedRows,
       ];
       File? skippedCsvFile;
@@ -3866,7 +4427,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _selectedLine = _orderLines.first;
           _lastAddedUpc = _orderLines.first.product.upc;
         }
-        _status = 'Imported order from ${file.name}';
+        _status = 'Imported order from $sourceFileLabel';
       });
 
       if (!mounted) return;
@@ -3877,7 +4438,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         importedLineCount: applyOutcome.importedRows,
         moqAdjustedRowCount: applyOutcome.moqAdjustedRows,
         skippedRowCount: skippedRows.length,
-        sourceFileName: file.name,
+        sourceFileName: sourceFileLabel,
         itemsNotImportedPath: skippedCsvFile?.path,
       );
     } catch (e, st) {
