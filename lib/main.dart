@@ -1055,6 +1055,16 @@ bool _sameLogicalCustomerQuoteRows({
   return nameA.isNotEmpty && nameA == nameB;
 }
 
+/// Safe quantity read from persisted quote line JSON (avoids cast crashes on bad types).
+/// Missing or unparseable values use 1; explicit zero (including "0") is preserved.
+int _quantityFromJson(dynamic v) {
+  if (v == null) return 1;
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? 1;
+  return 1;
+}
+
 /// Aggregates for archive / read-only quote display (from persisted JSON).
 (int lineCount, int unitCount, double orderTotal) quoteDataLineStatsAndTotal(
   Map<String, dynamic> data,
@@ -1064,7 +1074,7 @@ bool _sameLogicalCustomerQuoteRows({
   var units = 0;
   for (final lineJson in lines) {
     final map = Map<String, dynamic>.from(lineJson as Map);
-    units += (map['quantity'] as int?) ?? 1;
+    units += _quantityFromJson(map['quantity']);
   }
   final total = _orderTotalFromQuoteDataMap(data);
   return (lines.length, units, total);
@@ -1119,7 +1129,7 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
   var sum = 0.0;
   for (final lineJson in lines) {
     final map = Map<String, dynamic>.from(lineJson as Map);
-    final qty = (map['quantity'] as int?) ?? 1;
+    final qty = _quantityFromJson(map['quantity']);
     final price = (map['price'] as num?)?.toDouble() ?? 0.0;
     sum += discountedUnit(map, price) * qty;
   }
@@ -3063,6 +3073,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       await indexFile.writeAsString(jsonEncode(list), flush: true);
 
+      for (final m in list) {
+        try {
+          final info = SavedQuoteInfo.fromJson(
+            Map<String, dynamic>.from(m as Map),
+          );
+          if (info.id.isEmpty) continue;
+          if (archiveIds.contains(info.id)) continue;
+          if (info.status != QuoteLifecycleStatus.active) continue;
+          if (!_savedQuoteInfoMatchesCustomer(info, customer)) continue;
+          await _ensureActiveIndexRowForQuoteFile(info.id);
+        } catch (_) {}
+      }
+
       final removedCurrent =
           _currentQuoteId != null && idsToRemove.contains(_currentQuoteId);
       final rep = replacementIdIfCurrentRemoved;
@@ -3178,6 +3201,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               if (!mounted) return;
             } else {
               _currentQuoteId = emptyReuseId;
+              if (_orderCsvImportInProgress) {
+                _orderImportTouchedQuoteIds.add(emptyReuseId);
+              }
             }
           }
         }
@@ -3837,9 +3863,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final archivedIds = (await _loadArchiveQuoteIndex())
           .map((e) => e.id)
           .toSet();
-      // Reload active index from disk immediately before candidate selection so
-      // post-import quotes are visible without a tab switch.
-      final index = await _loadQuoteIndex();
+      var index = await _loadQuoteIndex();
+      for (final info in index) {
+        if (!_sameLogicalCustomerQuoteRows(
+          customerIdA: customer.id,
+          customerNameA: customer.displayName,
+          customerIdB: info.customerId,
+          customerNameB: info.customerName,
+        )) {
+          continue;
+        }
+        await _ensureActiveIndexRowForQuoteFile(info.id);
+      }
+      // Fresh read immediately before candidate selection — do not rely on earlier snapshots.
+      index = await _loadQuoteIndex();
       if (kDebugMode) {
         final forCustomer = index
             .where(
@@ -4428,13 +4465,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
-  Future<OrderImportApplyOutcome> _applyOrderImportPrepareOutcome({
+  Future<OrderImportApplyOutcome?> _applyOrderImportPrepareOutcome({
     required OrderImportPrepareOutcome prepare,
     required List<OrderImportDuplicateResolution> duplicateChoices,
   }) async {
     final expectedDupes =
         prepare.lines.where((OrderImportPreparedLine l) => l.isDuplicate).length;
-    assert(duplicateChoices.length == expectedDupes);
+    if (duplicateChoices.length != expectedDupes) {
+      debugPrint(
+        '[OrderImport] duplicate choice mismatch: got ${duplicateChoices.length} '
+        'expected $expectedDupes — aborting apply',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Import could not apply duplicate resolutions '
+              '(${duplicateChoices.length} vs $expectedDupes). Try again.',
+            ),
+          ),
+        );
+      }
+      return null;
+    }
 
     var importedRows = 0;
     var moqAdjustedRows = prepare.csvMoqAdjustedRows;
@@ -4883,6 +4936,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         prepare: prepare,
         duplicateChoices: dupChoices,
       );
+      if (applyOutcome == null) {
+        return;
+      }
       await _saveQuote();
       await _pruneSupersededEmptyDuplicateQuotesForCustomer(_selectedCustomer!);
       await _syncOrderImportTouchedQuotesInActiveIndex();
@@ -4920,6 +4976,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           debugPrint('[ImportSync] quote reloaded id=$quoteIdToSync');
         }
       }
+      await _loadQuoteIndex();
 
       if (!mounted) return;
       setState(() {
@@ -6255,6 +6312,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Call when quote/list becomes empty so next scan or manual entry is "first time" (single beep).
   void _resetQuoteDisplayAndScanState() {
+    _ordersTabExpandedLineKey = null;
     _lastAddedUpc = null;
     _lastItem = '-';
     _lastScan = '-';
@@ -7000,6 +7058,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         : '${bucket.displayLabel} $defaultName';
 
     _setStateDebug('routing_start_new_quote', () {
+      _ordersTabExpandedLineKey = null;
       _orderLines.clear();
       _orderLineByKey.clear();
       _recalculateTotals();
@@ -7570,7 +7629,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     final map = Map<String, dynamic>.from(lineJson as Map);
                     final desc = (map['description'] as String?) ?? '';
                     final item = (map['itemNumber'] as String?) ?? '';
-                    final qty = (map['quantity'] as int?) ?? 1;
+                    final qty = _quantityFromJson(map['quantity']);
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 6),
                       child: Text(
@@ -8126,11 +8185,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Future<void> _syncOrderImportTouchedQuotesInActiveIndex() async {
-    if (_orderImportTouchedQuoteIds.isEmpty) return;
-    final touched = List<String>.from(_orderImportTouchedQuoteIds);
+    final touchedIds = <String>{..._orderImportTouchedQuoteIds};
+    final cur = _currentQuoteId;
+    if (cur != null && cur.isNotEmpty) {
+      touchedIds.add(cur);
+    }
+    if (touchedIds.isEmpty) return;
+    final touched = touchedIds.toList();
     for (final id in touched) {
       await _ensureActiveIndexRowForQuoteFile(id);
     }
+    await _loadQuoteIndex();
     if (kDebugMode) {
       final dir = await _getQuotesDirectory();
       for (final id in touched) {
@@ -8435,7 +8500,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     for (final lineJson in lines) {
       final map = Map<String, dynamic>.from(lineJson as Map);
       final itemNumber = (map['itemNumber'] as String?) ?? '';
-      final qty = (map['quantity'] as int?) ?? 1;
+      final qty = _quantityFromJson(map['quantity']);
       final itemEscaped = itemNumber.contains(',') ? '"$itemNumber"' : itemNumber;
       rows.add('$itemEscaped,$qty');
     }
@@ -8499,7 +8564,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     for (final lineJson in lines) {
       final map = Map<String, dynamic>.from(lineJson as Map);
       final desc = (map['description'] as String?) ?? '';
-      final qty = (map['quantity'] as int?) ?? 1;
+      final qty = _quantityFromJson(map['quantity']);
       final price = (map['price'] as num?)?.toDouble() ?? 0.0;
       final du = discountedUnit(map, price);
       final lineRegular = qty * price;
@@ -8643,7 +8708,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final isPs = (map['isPs'] as bool?) ?? _parseYesFlag(psRaw);
         final category = (map['category'] as String?) ?? '';
         final subCategory = (map['subCategory'] as String?) ?? '';
-        final quantity = (map['quantity'] as int?) ?? 1;
+        final quantity = _quantityFromJson(map['quantity']);
         final scans = (map['scans'] as int?) ?? 1;
 
         Product? product = _productsByUpc[_normalizeUpcLookupKey(upc)];
@@ -8701,6 +8766,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       void applyWorkspace() {
+        _ordersTabExpandedLineKey = null;
+        if (_orderCsvImportInProgress) {
+          _orderImportTouchedQuoteIds.add(id);
+        }
         _currentQuoteId = id;
         _quoteNameController.text = name;
         _savedQuoteNameBeforeEdit = name;
