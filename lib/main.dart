@@ -16,7 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 const String _productsCsvUrl =
-  'https://docs.google.com/spreadsheets/d/1yf8cTpjawA2O7M4_N7_C3AV0cEe8Hh0j8uw-2OUo82c/export?format=csv&gid=829058073';
+  'https://docs.google.com/spreadsheets/d/1tXFQwh6OfZSvQcTkuku-sgbWaY8bDcs4gIObF--fMBM/export?format=csv&gid=1350956903';
 
 const String _customersCsvUrl =
   'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
@@ -253,6 +253,7 @@ class Product {
   final String description;
   final String upc;
   final double price;
+  final double listPrice;
   final String productType;
   final String discountRaw;
   final bool discountEligible;
@@ -270,6 +271,7 @@ class Product {
     required this.description,
     required this.upc,
     required this.price,
+    required this.listPrice,
     required this.productType,
     required this.discountRaw,
     required this.discountEligible,
@@ -283,6 +285,10 @@ class Product {
     required this.caseQty,
   });
 }
+
+/// List price for PS "Reg. Price" display when present; otherwise sheet unit price.
+double _displayRegUnitPrice(Product product) =>
+    product.listPrice > 0 ? product.listPrice : product.price;
 
 enum ProductPricingState { regular, discountEligible, net, ps }
 
@@ -5084,6 +5090,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       shouldParseNumbers: false,
     ).convert(rawCsv);
 
+    debugPrint(
+      '[Products][Verify] CSV parse — total rows from parser '
+      '(includes header row): ${rows.length}',
+    );
+
     if (rows.isEmpty) {
       debugPrint(
         '[Products] CSV appears empty after parsing – no header/rows found.',
@@ -5141,6 +5152,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
     final idxNet = _optionalProductColumnIndex(byNorm, const ['net']);
     final idxPs = _optionalProductColumnIndex(byNorm, const ['ps']);
+    final idxListPrice =
+        _optionalProductColumnIndex(byNorm, const ['listprice']);
     final idxProductType = _requireProductColumnIndex(
       byNorm,
       'Product Type',
@@ -5187,7 +5200,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     debugPrint(
       '[Products] Column indices — Item:$idxItemNumber Desc:$idxDescription '
-      'UPC:$idxUpc Price:$idxPrice DISCOUNT:$idxDiscount NET:${idxNet ?? '-'} '
+      'UPC:$idxUpc Price:$idxPrice LIST:${idxListPrice ?? '-'} '
+      'DISCOUNT:$idxDiscount NET:${idxNet ?? '-'} '
       'PS:${idxPs ?? '-'} Type:$idxProductType Cat:$idxCategory '
       'Sub:${idxSubCategory} Min:${idxMinOrderQty} '
       'Case:$idxCaseQty (max:$maxColIndex)',
@@ -5195,6 +5209,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     final Map<String, Product> newProductsByUpc = {};
     final Map<String, Product> newProductsByItemNumber = {};
+
+    final firstFiveLoadedItemNumbers = <String>[];
+    final lastFiveLoadedItemNumbers = <String>[];
 
     final int totalDataRows = rows.length - 1;
     int processedRows = 0;
@@ -5221,6 +5238,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final upc = _productCell(row, idxUpc).trim();
         final upcLookup = _normalizeUpcLookupKey(upc);
         final price = _parsePrice(_productCell(row, idxPrice));
+        final listPrice = idxListPrice == null
+            ? 0.0
+            : _parsePrice(_productCell(row, idxListPrice));
         final discountRaw = _productCell(row, idxDiscount).trim();
         final discountEligible = _parseDiscountEligibility(discountRaw);
         final netRaw = idxNet == null ? '' : _productCell(row, idxNet).trim();
@@ -5244,6 +5264,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           description: description,
           upc: upc,
           price: price,
+          listPrice: listPrice,
           productType: productType,
           discountRaw: discountRaw,
           discountEligible: discountEligible,
@@ -5267,6 +5288,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         newProductsByUpc[upcLookup] = product;
         newProductsByItemNumber[itemNumber] = product;
         processedRows++;
+        if (firstFiveLoadedItemNumbers.length < 5) {
+          firstFiveLoadedItemNumbers.add(itemNumber);
+        }
+        lastFiveLoadedItemNumbers.add(itemNumber);
+        while (lastFiveLoadedItemNumbers.length > 5) {
+          lastFiveLoadedItemNumbers.removeAt(0);
+        }
       } catch (e) {
         skippedParseErrorRows++;
         if (firstErrorMessage == null) {
@@ -5299,6 +5327,36 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     debugPrint('Skipped rows: $skippedRows');
     debugPrint('Duplicate UPC rows: $duplicateUpcCount');
     debugPrint('Duplicate item number rows: $duplicateItemNumberCount');
+
+    debugPrint('[Products][Verify] --- CSV vs loaded (same parse pass) ---');
+    debugPrint(
+      '[Products][Verify] Data rows excluding header: $totalDataRows',
+    );
+    debugPrint(
+      '[Products][Verify] Rows successfully built into Product (processedRows): '
+      '$processedRows',
+    );
+    debugPrint(
+      '[Products][Verify] Unique products in map (_catalogCount / unique UPC): '
+      '$_catalogCount',
+    );
+    debugPrint(
+      '[Products][Verify] Check: processedRows - duplicateUpcCount == '
+      '${processedRows - duplicateUpcCount} (expect $_catalogCount if only UPC '
+      'dedup affects size)',
+    );
+    debugPrint(
+      '[Products][Verify] Skipped missing item/UPC: $skippedMissingKeyRows, '
+      'skipped empty/parse: $skippedParseErrorRows',
+    );
+    debugPrint(
+      '[Products][Verify] First 5 loaded item numbers (iteration order): '
+      '$firstFiveLoadedItemNumbers',
+    );
+    debugPrint(
+      '[Products][Verify] Last 5 loaded item numbers (iteration order): '
+      '$lastFiveLoadedItemNumbers',
+    );
 
     debugPrint(
       '[Products] Parsed $processedRows of $totalDataRows data rows from '
@@ -5470,6 +5528,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
     }
     try {
+      debugPrint(
+        '[Products][Verify] Load from web — full URL: $_productsCsvUrl',
+      );
+      debugPrint(
+        '[Products][Verify] gid query param: '
+        '${Uri.parse(_productsCsvUrl).queryParameters['gid'] ?? '(missing)'}',
+      );
       final response = await http.get(Uri.parse(_productsCsvUrl));
 
       if (response.statusCode != 200) {
@@ -5485,6 +5550,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       final csvString = response.body;
+      debugPrint(
+        '[Products][Verify] HTTP body length (chars): ${csvString.length}',
+      );
       int productCount = 0;
 
       _parseAndStoreProducts(csvString, sourceLabel: 'Google Sheets CSV');
@@ -8720,6 +8788,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             description: description.isEmpty ? 'Unknown' : description,
             upc: upc,
             price: price,
+            listPrice: 0.0,
             productType: productType,
             discountRaw: discountRaw,
             discountEligible: discountEligible,
@@ -9876,13 +9945,14 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                       TextAlign textAlign,
                       CrossAxisAlignment priceCross,
                     ) {
-                      if (lineHasDiscount) {
+                      final p = line.product;
+                      if (p.isPs) {
                         return Column(
                           crossAxisAlignment: priceCross,
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              'Price: \$${line.product.price.toStringAsFixed(2)}',
+                              'Reg. Price: \$${_displayRegUnitPrice(p).toStringAsFixed(2)}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               textAlign: textAlign,
@@ -9893,7 +9963,37 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                               ),
                             ),
                             Text(
-                              'Sale: \$${discountedUnitPrice.toStringAsFixed(2)}',
+                              'Sale: \$${p.price.toStringAsFixed(2)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: textAlign,
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.green.shade800,
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                      if (lineHasDiscount) {
+                        return Column(
+                          crossAxisAlignment: priceCross,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Reg. Price: \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: textAlign,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            Text(
+                              'Your Price: \$${discountedUnitPrice.toStringAsFixed(2)}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               textAlign: textAlign,
@@ -9907,8 +10007,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                         );
                       }
                       return Text(
-                        'Price: \$${line.product.price.toStringAsFixed(2)}'
-                        '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
+                        'Price: \$${line.product.price.toStringAsFixed(2)}',
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         textAlign: textAlign,
@@ -10463,11 +10562,38 @@ class _ScanTabSearchResultTile extends StatelessWidget {
                 ),
               ),
             if (alreadyInOrder) const SizedBox(width: 6),
-            Text(
-              '\$${product.price.toStringAsFixed(2)}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+            if (product.isPs)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Text(
+                    'Sale: \$${product.price.toStringAsFixed(2)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.green.shade800,
+                    ),
+                  ),
+                ],
+              )
+            else
+              Text(
+                '\$${product.price.toStringAsFixed(2)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
           ],
         ),
       ),
@@ -10742,11 +10868,12 @@ class _OrderLineCardRow extends StatelessWidget {
                   ),
                   TextSpan(
                     text:
-                        'Reg \$${line.product.price.toStringAsFixed(2)} → ',
+                        'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} → ',
                   ),
                   TextSpan(
-                    text:
-                        'Sale \$${discountedUnitPrice.toStringAsFixed(2)}',
+                    text: line.product.isPs
+                        ? 'Sale \$${line.product.price.toStringAsFixed(2)}'
+                        : 'Your Price \$${discountedUnitPrice.toStringAsFixed(2)}',
                     style: TextStyle(
                       color: Colors.green.shade800,
                       fontWeight: FontWeight.w700,
@@ -10757,14 +10884,22 @@ class _OrderLineCardRow extends StatelessWidget {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             )
-          : Text(
-              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-              'Price \$${line.product.price.toStringAsFixed(2)}'
-              '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: line3BaseStyle,
-            );
+          : line.product.isPs
+              ? Text(
+                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+                  'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
+                  'Sale \$${line.product.price.toStringAsFixed(2)}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: line3BaseStyle,
+                )
+              : Text(
+                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+                  'Price \$${line.product.price.toStringAsFixed(2)}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: line3BaseStyle,
+                );
 
       final Widget line3Expanded = lineHasDiscount
           ? Text.rich(
@@ -10777,11 +10912,12 @@ class _OrderLineCardRow extends StatelessWidget {
                   ),
                   TextSpan(
                     text:
-                        'Reg \$${line.product.price.toStringAsFixed(2)} → ',
+                        'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} → ',
                   ),
                   TextSpan(
-                    text:
-                        'Sale \$${discountedUnitPrice.toStringAsFixed(2)}',
+                    text: line.product.isPs
+                        ? 'Sale \$${line.product.price.toStringAsFixed(2)}'
+                        : 'Your Price \$${discountedUnitPrice.toStringAsFixed(2)}',
                     style: TextStyle(
                       color: Colors.green.shade800,
                       fontWeight: FontWeight.w700,
@@ -10790,12 +10926,18 @@ class _OrderLineCardRow extends StatelessWidget {
                 ],
               ),
             )
-          : Text(
-              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-              'Price \$${line.product.price.toStringAsFixed(2)}'
-              '${priceIndicator == null ? '' : ' (${priceIndicator!})'}',
-              style: line3BaseStyle,
-            );
+          : line.product.isPs
+              ? Text(
+                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+                  'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
+                  'Sale \$${line.product.price.toStringAsFixed(2)}',
+                  style: line3BaseStyle,
+                )
+              : Text(
+                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+                  'Price \$${line.product.price.toStringAsFixed(2)}',
+                  style: line3BaseStyle,
+                );
 
       final Widget compactProductBlock = expandedOrdersCompact
           ? Column(
