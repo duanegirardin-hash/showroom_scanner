@@ -1876,7 +1876,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _goodScanPlayer2 = AudioPlayer();
     _errorScanPlayer = AudioPlayer();
 
-    _loadProductsFromAssets();
+    unawaited(
+      _loadProductsFromAssets().then((_) => _loadProductsFromWeb()),
+    );
     _loadCustomersFromAssets();
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
