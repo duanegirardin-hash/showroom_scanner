@@ -16,7 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 const String _productsCsvUrl =
-  'https://docs.google.com/spreadsheets/d/1tXFQwh6OfZSvQcTkuku-sgbWaY8bDcs4gIObF--fMBM/export?format=csv&gid=1350956903';
+  'https://docs.google.com/spreadsheets/d/1CLwgK91aqM4orQjCj9C1JZH9SP2FeRdFht9znz5jJDY/export?format=csv&gid=1450539292';
 
 const String _customersCsvUrl =
   'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
@@ -261,6 +261,7 @@ class Product {
   final bool isNet;
   final String psRaw;
   final bool isPs;
+  final bool isNewRelease;
   final String category;
   final String subCategory;
   final int minOrderQty;
@@ -279,11 +280,58 @@ class Product {
     required this.isNet,
     required this.psRaw,
     required this.isPs,
+    required this.isNewRelease,
     required this.category,
     required this.subCategory,
     required this.minOrderQty,
     required this.caseQty,
   });
+}
+
+/// Order line title: description with an optional blue NEW badge (catalog column).
+Widget _orderLineTitleWithOptionalNewBadge({
+  required String description,
+  required bool isNewRelease,
+  required TextStyle style,
+  TextAlign textAlign = TextAlign.start,
+  int maxLines = 2,
+}) {
+  final title = Text(
+    description,
+    maxLines: maxLines,
+    overflow: TextOverflow.ellipsis,
+    textAlign: textAlign,
+    style: style,
+  );
+  if (!isNewRelease) return title;
+  return Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Expanded(child: title),
+      const SizedBox(width: 6),
+      Padding(
+        padding: const EdgeInsets.only(top: 1),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.blue,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            child: Text(
+              'NEW',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 11,
+                height: 1.1,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ],
+  );
 }
 
 /// List price for PS "Reg. Price" display when present; otherwise sheet unit price.
@@ -553,19 +601,6 @@ String _orderImportOptionalCsvCell(List<dynamic> row, int? columnIndex) {
   return (descriptionCol: descriptionCol, priceCol: priceCol);
 }
 
-void _orderImportMergeOptionalFieldByItemKey(
-  Map<String, String> byKey,
-  String itemKey,
-  String value,
-) {
-  final existing = byKey[itemKey];
-  if (existing == null) {
-    byKey[itemKey] = value;
-  } else if (existing.isEmpty && value.isNotEmpty) {
-    byKey[itemKey] = value;
-  }
-}
-
 String _orderImportNormalizeUpcLookupKey(String value) {
   final trimmed = value.trim();
   final digits = trimmed.replaceAll(RegExp(r'[^0-9]'), '').trim();
@@ -696,6 +731,26 @@ Product? matchOrderImportProduct(
 
   final byItem = productsByItemNumber[itemKey];
   if (byItem != null) return byItem;
+
+  final isNumericItemLabel = RegExp(r'^\d+$').hasMatch(itemKey);
+  if (isNumericItemLabel) {
+    final candidateWidths = productsByItemNumber.keys
+        .where((k) => k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k))
+        .map((k) => k.length)
+        .toSet()
+        .toList()
+      ..sort();
+    for (final width in candidateWidths) {
+      final padded = itemKey.padLeft(width, '0');
+      final byPaddedItem = productsByItemNumber[padded];
+      if (byPaddedItem != null) {
+        debugPrint(
+          '[ImportMatch] item-number leading-zero fallback matched "$itemKey" -> "$padded"',
+        );
+        return byPaddedItem;
+      }
+    }
+  }
 
   final upc = _orderImportNormalizeUpcLookupKey(itemLabel);
   if (upc.isEmpty) return null;
@@ -1876,9 +1931,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _goodScanPlayer2 = AudioPlayer();
     _errorScanPlayer = AudioPlayer();
 
-    unawaited(
-      _loadProductsFromAssets().then((_) => _loadProductsFromWeb()),
-    );
+    unawaited(_loadProductsOnStartup());
     _loadCustomersFromAssets();
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -2349,6 +2402,27 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       SystemChannels.textInput.invokeMethod('TextInput.hide');
     });
+  }
+
+  /// Scanner-only focus recovery used after scan processing paths where
+  /// rebuilds/snackbars can briefly steal focus from the hidden scanner field.
+  void _restoreScanFieldFocus() {
+    if (!mounted) return;
+
+    void reclaim() {
+      if (!mounted) return;
+      if (!_scanTabActive || _editDialogOpen) return;
+      if (!_shouldReclaimScannerFocus()) return;
+      if (!_scannerFocusNode.canRequestFocus) return;
+      FocusScope.of(context).requestFocus(_scannerFocusNode);
+    }
+
+    // First restore after the current frame settles.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      reclaim();
+    });
+    // Then add one small delayed pulse for snackbar/rebuild races.
+    Future.delayed(const Duration(milliseconds: 60), reclaim);
   }
 
   Future<void> _stopAllSounds() async {
@@ -3843,16 +3917,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       return;
     }
-    final quoteIdForExportReload = _currentQuoteId;
-    if (quoteIdForExportReload != null) {
-      await _loadQuoteById(quoteIdForExportReload);
-    }
-    if (kDebugMode && quoteIdForExportReload != null) {
-      debugPrint(
-        '[Export] using quote id=$quoteIdForExportReload lines=${_orderLines.length}',
-      );
-    }
-
     if (_orderLines.isEmpty && _currentQuoteId == null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3864,6 +3928,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final customerName = customer.displayName.trim();
     try {
       // Persist the in-memory quote so export reads all routed quotes consistently.
+      debugPrint(
+        '[ExportAll] preSave id=$_currentQuoteId lines=${_orderLines.length}',
+      );
       await _saveQuote(notifyOnArchiveSideSave: false);
 
       await _debugLogActiveIndexSnapshot('ExportAll after save+loadIndex');
@@ -4004,6 +4071,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           final quoteData = Map<String, dynamic>.from(
             jsonDecode(quoteRaw) as Map,
           );
+          debugPrint(
+            '[ExportAll] disk lines=${quoteDataLineStatsAndTotal(quoteData).$1}',
+          );
           if (persistedQuoteDataIsEmptyForReuse(quoteData)) {
             if (kDebugMode) {
               debugPrint(
@@ -4130,16 +4200,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       return;
     }
-    final quoteIdForExportReload = _currentQuoteId;
-    if (quoteIdForExportReload != null) {
-      await _loadQuoteById(quoteIdForExportReload);
-    }
-    if (kDebugMode && quoteIdForExportReload != null) {
-      debugPrint(
-        '[Export] using quote id=$quoteIdForExportReload lines=${_orderLines.length}',
-      );
-    }
-
     if (_orderLines.isEmpty && _currentQuoteId == null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -4149,6 +4209,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     try {
+      debugPrint(
+        '[ExportCurrent] preSave id=$_currentQuoteId lines=${_orderLines.length}',
+      );
       await _saveQuote(notifyOnArchiveSideSave: false);
       final currentId = _currentQuoteId;
       if (currentId == null) {
@@ -4204,6 +4267,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final quoteRaw = await quoteFile.readAsString();
       final quoteData = Map<String, dynamic>.from(jsonDecode(quoteRaw) as Map);
+      debugPrint(
+        '[ExportCurrent] disk lines=${quoteDataLineStatsAndTotal(quoteData).$1}',
+      );
       if (kDebugMode) {
         final stats = quoteDataLineStatsAndTotal(quoteData);
         debugPrint(
@@ -4385,7 +4451,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _orderLineByKey[key] = primary;
   }
 
-  /// Groups CSV rows, resolves catalog products, applies file-side MOQ rounding, and
+  /// Resolves catalog products per CSV row, applies file-side MOQ rounding, and
   /// tags lines that already exist on the order (import merge identity).
   OrderImportPrepareOutcome _prepareOrderImportLines(
     List<OrderImportCsvRow> rows, {
@@ -4393,21 +4459,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }) {
     var csvMoqAdjustedRows = 0;
     final skippedRows = <OrderImportSkippedRow>[];
-    final groupedQuantityByItemKey = <String, int>{};
-    final displayItemByItemKey = <String, String>{};
-    final descriptionByItemKey = <String, String>{};
-    final priceByItemKey = <String, String>{};
-    for (final r in rows) {
-      final key = _orderImportNormalizeItemKey(r.item);
-      groupedQuantityByItemKey.update(
-        key,
-        (value) => value + r.quantity,
-        ifAbsent: () => r.quantity,
-      );
-      displayItemByItemKey.putIfAbsent(key, () => r.item);
-      _orderImportMergeOptionalFieldByItemKey(descriptionByItemKey, key, r.description);
-      _orderImportMergeOptionalFieldByItemKey(priceByItemKey, key, r.price);
-    }
 
     final workingOrderLines = <OrderLine>[
       for (final l in _orderLines)
@@ -4419,9 +4470,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     ];
 
     final lines = <OrderImportPreparedLine>[];
-    for (final entry in groupedQuantityByItemKey.entries) {
-      final item = displayItemByItemKey[entry.key] ?? entry.key;
-      final combinedQuantity = entry.value;
+    for (final r in rows) {
+      final item = r.item;
+      final rowQuantity = r.quantity;
       final product = matchOrderImportProduct(
         item,
         _productsByItemNumber,
@@ -4431,19 +4482,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         skippedRows.add(
           OrderImportSkippedRow(
             item: item,
-            quantity: combinedQuantity.toString(),
-            description: descriptionByItemKey[entry.key] ?? '',
-            price: priceByItemKey[entry.key] ?? '',
+            quantity: rowQuantity.toString(),
+            description: r.description,
+            price: r.price,
             reason: 'Item not found',
           ),
         );
         continue;
       }
       final importedQty = _nearestValidMoqMultiple(
-        requestedQty: combinedQuantity,
+        requestedQty: rowQuantity,
         minOrderQty: product.minOrderQty,
       );
-      if (importedQty != combinedQuantity) {
+      if (importedQty != rowQuantity) {
         csvMoqAdjustedRows++;
       }
       final existingSum =
@@ -4453,10 +4504,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           displayItem: item,
           product: product,
           importedQtyMoq: importedQty,
-          rawCsvCombinedQty: combinedQuantity,
+          rawCsvCombinedQty: rowQuantity,
           existingOrderQtySum: existingSum,
-          sourceDescription: descriptionByItemKey[entry.key] ?? '',
-          sourcePrice: priceByItemKey[entry.key] ?? '',
+          sourceDescription: r.description,
+          sourcePrice: r.price,
         ),
       );
       _mergeImportedProductIntoOrderLinesSnapshot(
@@ -5092,40 +5143,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       shouldParseNumbers: false,
     ).convert(rawCsv);
 
-    debugPrint(
-      '[Products][Verify] CSV parse — total rows from parser '
-      '(includes header row): ${rows.length}',
-    );
-
     if (rows.isEmpty) {
-      debugPrint(
-        '[Products] CSV appears empty after parsing – no header/rows found.',
-      );
       _productsByUpc.clear();
       _productsByItemNumber.clear();
       _catalogCount = 0;
       _catalogSource = '$sourceLabel (empty)';
       setProductsDebugLine('Products Loaded: 0 (empty file)');
-      debugPrint('----- PRODUCT LOAD REPORT -----');
-      debugPrint('Total rows read: 0');
-      debugPrint('Products loaded: 0');
-      debugPrint('Discount-eligible products: 0');
-      debugPrint('Skipped rows: 0');
-      debugPrint('Duplicate UPC rows: 0');
-      debugPrint('Duplicate item number rows: 0');
       return;
     }
 
     final header =
         rows.first.map((e) => e.toString().trim()).toList(growable: false);
-    debugPrint(
-      '[Products] Headers found (${header.length} cols): ${header.join(', ')}',
-    );
-
     final byNorm = _productHeaderIndexMap(header);
-    debugPrint(
-      '[Products] Normalized header keys: ${byNorm.keys.toList()..sort()}',
-    );
 
     final idxItemNumber = _requireProductColumnIndex(
       byNorm,
@@ -5156,6 +5185,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final idxPs = _optionalProductColumnIndex(byNorm, const ['ps']);
     final idxListPrice =
         _optionalProductColumnIndex(byNorm, const ['listprice']);
+    final idxNewRelease =
+        _optionalProductColumnIndex(byNorm, const ['newrelease']);
     final idxProductType = _requireProductColumnIndex(
       byNorm,
       'Product Type',
@@ -5198,22 +5229,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       idxSubCategory,
       idxMinOrderQty,
       idxCaseQty,
+      if (idxNet != null) idxNet,
+      if (idxPs != null) idxPs,
+      if (idxListPrice != null) idxListPrice,
+      if (idxNewRelease != null) idxNewRelease,
     ].reduce((a, b) => a > b ? a : b);
-
-    debugPrint(
-      '[Products] Column indices — Item:$idxItemNumber Desc:$idxDescription '
-      'UPC:$idxUpc Price:$idxPrice LIST:${idxListPrice ?? '-'} '
-      'DISCOUNT:$idxDiscount NET:${idxNet ?? '-'} '
-      'PS:${idxPs ?? '-'} Type:$idxProductType Cat:$idxCategory '
-      'Sub:${idxSubCategory} Min:${idxMinOrderQty} '
-      'Case:$idxCaseQty (max:$maxColIndex)',
-    );
 
     final Map<String, Product> newProductsByUpc = {};
     final Map<String, Product> newProductsByItemNumber = {};
-
-    final firstFiveLoadedItemNumbers = <String>[];
-    final lastFiveLoadedItemNumbers = <String>[];
 
     final int totalDataRows = rows.length - 1;
     int processedRows = 0;
@@ -5249,6 +5272,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final isNet = _parseYesFlag(netRaw);
         final psRaw = idxPs == null ? '' : _productCell(row, idxPs).trim();
         final isPs = _parseYesFlag(psRaw);
+        final isNewRelease = idxNewRelease == null
+            ? false
+            : _parseYesFlag(_productCell(row, idxNewRelease).trim());
         if (discountEligible) discountEligibleCount++;
         final productType = _productCell(row, idxProductType).trim();
         final category = _productCell(row, idxCategory).trim();
@@ -5274,6 +5300,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           isNet: isNet,
           psRaw: psRaw,
           isPs: isPs,
+          isNewRelease: isNewRelease,
           category: category,
           subCategory: subCategory,
           minOrderQty: minOrderQty == 0 ? 1 : minOrderQty,
@@ -5290,18 +5317,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         newProductsByUpc[upcLookup] = product;
         newProductsByItemNumber[itemNumber] = product;
         processedRows++;
-        if (firstFiveLoadedItemNumbers.length < 5) {
-          firstFiveLoadedItemNumbers.add(itemNumber);
-        }
-        lastFiveLoadedItemNumbers.add(itemNumber);
-        while (lastFiveLoadedItemNumbers.length > 5) {
-          lastFiveLoadedItemNumbers.removeAt(0);
-        }
       } catch (e) {
         skippedParseErrorRows++;
         if (firstErrorMessage == null) {
-          firstErrorMessage =
-              'Row ${i + 1} parse error: $e (raw: ${row.map((c) => c.toString()).toList()})';
+          firstErrorMessage = 'Row ${i + 1} parse error: $e';
         }
       }
     }
@@ -5322,57 +5341,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     setProductsDebugLine('Products Loaded: $_catalogCount');
 
-    debugPrint('----- PRODUCT LOAD REPORT -----');
-    debugPrint('Total rows read: $totalDataRows');
-    debugPrint('Products loaded: $_catalogCount');
-    debugPrint('Discount-eligible products: $discountEligibleCount');
-    debugPrint('Skipped rows: $skippedRows');
-    debugPrint('Duplicate UPC rows: $duplicateUpcCount');
-    debugPrint('Duplicate item number rows: $duplicateItemNumberCount');
-
-    debugPrint('[Products][Verify] --- CSV vs loaded (same parse pass) ---');
-    debugPrint(
-      '[Products][Verify] Data rows excluding header: $totalDataRows',
-    );
-    debugPrint(
-      '[Products][Verify] Rows successfully built into Product (processedRows): '
-      '$processedRows',
-    );
-    debugPrint(
-      '[Products][Verify] Unique products in map (_catalogCount / unique UPC): '
-      '$_catalogCount',
-    );
-    debugPrint(
-      '[Products][Verify] Check: processedRows - duplicateUpcCount == '
-      '${processedRows - duplicateUpcCount} (expect $_catalogCount if only UPC '
-      'dedup affects size)',
-    );
-    debugPrint(
-      '[Products][Verify] Skipped missing item/UPC: $skippedMissingKeyRows, '
-      'skipped empty/parse: $skippedParseErrorRows',
-    );
-    debugPrint(
-      '[Products][Verify] First 5 loaded item numbers (iteration order): '
-      '$firstFiveLoadedItemNumbers',
-    );
-    debugPrint(
-      '[Products][Verify] Last 5 loaded item numbers (iteration order): '
-      '$lastFiveLoadedItemNumbers',
-    );
-
-    debugPrint(
-      '[Products] Parsed $processedRows of $totalDataRows data rows from '
-      '$sourceLabel. Loaded $_catalogCount products. '
-      'Skipped missing key rows: $skippedMissingKeyRows, '
-      'skipped other: $skippedParseErrorRows, '
-      'duplicate UPCs: $duplicateUpcCount, '
-      'duplicate item numbers: $duplicateItemNumberCount.',
-    );
-    if (firstErrorMessage != null) {
-      debugPrint('[Products] First row parse error: $firstErrorMessage');
-    }
-
     _debugLogMissingProductTypeMappings();
+  }
+
+  Future<void> _loadProductsOnStartup() async {
+    await _initAudio();
+    await _loadQuoteBucketConfig();
+    final ok = await _loadProductsFromWeb();
+    if (ok) {
+      if (mounted) {
+        setState(() {
+          _loadingProducts = false;
+          _readyToScan = true;
+          _status = 'Ready to scan';
+        });
+        _requestScannerFocus();
+      }
+      return;
+    }
+    await _loadProductsFromAssets();
   }
 
   Future<void> _loadProductsFromAssets() async {
@@ -5518,8 +5505,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _requestScannerFocus();
   }
 
-  Future<void> _loadProductsFromWeb() async {
-    if (_loadingProductsFromWeb) return;
+  Future<bool> _loadProductsFromWeb() async {
+    if (_loadingProductsFromWeb) return false;
     setState(() => _loadingProductsFromWeb = true);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -5541,14 +5528,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       if (response.statusCode != 200) {
         print('Failed to download products CSV');
-        if (!mounted) return;
+        if (!mounted) return false;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to download products'),
             duration: Duration(seconds: 2),
           ),
         );
-        return;
+        return false;
       }
 
       final csvString = response.body;
@@ -5559,7 +5546,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       _parseAndStoreProducts(csvString, sourceLabel: 'Google Sheets CSV');
       productCount = _catalogCount;
-      if (!mounted) return;
+      if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -5570,15 +5557,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
 
       print('Products successfully updated from Google Sheets');
+      return true;
     } catch (e) {
       print('Error loading products: $e');
-      if (!mounted) return;
+      if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error updating products'),
           duration: Duration(seconds: 2),
         ),
       );
+      return false;
     } finally {
       if (mounted) {
         setState(() => _loadingProductsFromWeb = false);
@@ -6406,7 +6395,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   GlobalKey _globalKeyForScanTabOrderRow(String lineKey) =>
       _scanTabOrderRowKeys.putIfAbsent(lineKey, GlobalKey.new);
 
-  /// Scan tab only: scroll parent [ListView] so the row is visible and flash-highlight briefly.
+  /// Scan tab only: scroll parent Scan panel [Scrollable] so the row is visible and flash-highlight briefly.
   /// Does not alter order data or scan processing.
   void _revealScanTabOrderRowAfterScan(String lineKey) {
     _scanTabHighlightClearTimer?.cancel();
@@ -6525,7 +6514,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final upc = digitsOnly(raw);
 
       if (raw.isEmpty || upc.isEmpty) {
-        _requestScannerFocus();
+        _restoreScanFieldFocus();
         return;
       }
 
@@ -6543,7 +6532,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _finishScanPerfSample(sampleId, outcome: 'duplicate-dropped');
           _currentScanSampleId = 0;
         }
-        _requestScannerFocus();
+        _restoreScanFieldFocus();
         return;
       }
       _lastProcessedScanUpc = upc;
@@ -6575,7 +6564,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           });
         }
         _triggerScanFeedback(ScanFeedbackType.notFound);
-        _requestScannerFocus();
+        _restoreScanFieldFocus();
         if (sampleId > 0) {
           _logScanPerfStep(sampleId, 'app ready for next scan');
           _finishScanPerfSample(sampleId, outcome: 'not-found');
@@ -6591,7 +6580,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         bucket: bucket,
         scheduleScanTabOrderRowReveal: true,
       );
-      _requestScannerFocus();
+      _restoreScanFieldFocus();
       if (sampleId > 0) {
         _logScanPerfStep(sampleId, 'app ready for next scan');
         _finishScanPerfSample(sampleId, outcome: 'item-added');
@@ -6606,7 +6595,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ),
       );
       _quickEntryController.clear();
-      _requestScannerFocus();
+      _restoreScanFieldFocus();
       if (sampleId > 0) {
         _finishScanPerfSample(sampleId, outcome: 'exception');
       }
@@ -6725,7 +6714,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final cleaned = source.replaceAll('\n', '').replaceAll('\r', '').trim();
     if (cleaned.isEmpty) {
       _scannerController.clear();
-      _requestScannerFocus();
+      _restoreScanFieldFocus();
       return;
     }
     // Capture-and-clear at commit time so queued processing cannot erase
@@ -8340,6 +8329,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'isNet': line.product.isNet,
         'psRaw': line.product.psRaw,
         'isPs': line.product.isPs,
+        'isNewRelease': line.product.isNewRelease,
         'category': line.product.category,
         'subCategory': line.product.subCategory,
         'quoteBucketKey': bucket.bucketKey,
@@ -8776,6 +8766,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final isNet = (map['isNet'] as bool?) ?? _parseYesFlag(netRaw);
         final psRaw = (map['psRaw'] as String?)?.trim() ?? '';
         final isPs = (map['isPs'] as bool?) ?? _parseYesFlag(psRaw);
+        final isNewRelease = (map['isNewRelease'] as bool?) ?? false;
         final category = (map['category'] as String?) ?? '';
         final subCategory = (map['subCategory'] as String?) ?? '';
         final quantity = _quantityFromJson(map['quantity']);
@@ -8798,6 +8789,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             isNet: isNet,
             psRaw: psRaw,
             isPs: isPs,
+            isNewRelease: isNewRelease,
             category: category,
             subCategory: subCategory,
             minOrderQty: 1,
@@ -9172,7 +9164,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   /// Item # / UPC field and optional status — fixed bottom block above Load/Create.
-  /// Search hits live in [_buildScanTabSearchResultsList] inside the single ListView.
+  /// Search hits live in [_buildScanTabSearchResultsList] inside the Scan panel [CustomScrollView].
   Widget _buildScanTabItemSearchBlock() {
     return _ScanTabItemSearchBlock(
       quickEntryTextFieldKey: _quickEntryTextFieldKey,
@@ -9225,18 +9217,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
-  /// Order lines for Scan tab as a single column of cards (parent [ListView] scrolls).
-  Widget _buildScanTabOrderListContent() {
+  /// Order lines for Scan tab — lazy [SliverList] segment in the Scan panel
+  /// [CustomScrollView] (no nested shrink-wrapped list).
+  Widget _buildScanTabOrderListSliver() {
     _orderListBuildCount++;
     if (_orderLines.isEmpty) {
-      return const _ScanTabOrderListEmpty();
+      return SliverToBoxAdapter(
+        child: RepaintBoundary(
+          child: const _ScanTabOrderListEmpty(),
+        ),
+      );
     }
-    return _ScanTabOrderLinesColumn(
-      listKey: ValueKey('order_list_${_orderListVersion}_${_orderLines.length}'),
-      children: [
-        for (final line in _orderLines)
-          _buildScanTabOrderLineSubtree(line),
-      ],
+    return SliverList(
+      key: ValueKey<String>('order_list_${_orderListVersion}'),
+      delegate: SliverChildBuilderDelegate(
+        (context, index) =>
+            _buildScanTabOrderLineSubtree(_orderLines[index]),
+        childCount: _orderLines.length,
+      ),
     );
   }
 
@@ -9364,7 +9362,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       loadingProducts: _loadingProducts,
       scanPanelScrollController: _scanPanelScrollController,
       liveOrderControlPanel: _buildScanLiveOrderControlPanel(),
-      orderListContent: _buildScanTabOrderListContent(),
+      orderListSliver: _buildScanTabOrderListSliver(),
       searchResultsList: _buildScanTabSearchResultsList(),
       itemSearchBlock: _buildScanTabItemSearchBlock(),
       quickEntryFloatAboveKeyboard: quickEntryFloatAboveKeyboard,
@@ -9375,7 +9373,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Widget _buildSetupTab() {
     return _SetupTab(
-      onLoadProducts: _loadProductsFromWeb,
+      onLoadProducts: () {
+        unawaited(_loadProductsFromWeb());
+      },
       onLoadCustomers: _loadCustomersFromSheet,
       onAddCustomer: _showAddCustomerDialog,
       loadingProductsFromWeb: _loadingProductsFromWeb,
@@ -9453,7 +9453,7 @@ class _ScanTabLayout extends StatelessWidget {
     required this.loadingProducts,
     required this.scanPanelScrollController,
     required this.liveOrderControlPanel,
-    required this.orderListContent,
+    required this.orderListSliver,
     required this.searchResultsList,
     required this.itemSearchBlock,
     required this.quickEntryFloatAboveKeyboard,
@@ -9478,7 +9478,8 @@ class _ScanTabLayout extends StatelessWidget {
   final bool loadingProducts;
   final ScrollController scanPanelScrollController;
   final Widget liveOrderControlPanel;
-  final Widget orderListContent;
+  /// Must be a sliver widget (e.g. [SliverList], [SliverToBoxAdapter]).
+  final Widget orderListSliver;
   final Widget searchResultsList;
   final Widget itemSearchBlock;
   /// When true, the real [_ScanTabItemSearchBlock] is only in the floating bar;
@@ -9514,19 +9515,24 @@ class _ScanTabLayout extends StatelessWidget {
         Expanded(
           child: loadingProducts
               ? _loadingProductsIndicator
-              : Padding(
-                  padding: _scrollListPadding,
-                  child: ListView(
-                    controller: scanPanelScrollController,
-                    keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
-                    children: [
-                      RepaintBoundary(child: orderListContent),
-                      const SizedBox(height: 8),
-                      RepaintBoundary(child: searchResultsList),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
+              : CustomScrollView(
+                  controller: scanPanelScrollController,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  slivers: [
+                    SliverPadding(
+                      padding: _scrollListPadding,
+                      sliver: orderListSliver,
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                    SliverPadding(
+                      padding: _scrollListPadding,
+                      sliver: SliverToBoxAdapter(
+                        child: RepaintBoundary(child: searchResultsList),
+                      ),
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                  ],
                 ),
         ),
         Padding(
@@ -10025,10 +10031,9 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                       CrossAxisAlignment priceCross,
                     ) {
                       return [
-                        Text(
-                          line.product.description,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                        _orderLineTitleWithOptionalNewBadge(
+                          description: line.product.description,
+                          isNewRelease: line.product.isNewRelease,
                           textAlign: textAlign,
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
@@ -10643,26 +10648,6 @@ class _ScanTabOrderListEmpty extends StatelessWidget {
   }
 }
 
-class _ScanTabOrderLinesColumn extends StatelessWidget {
-  const _ScanTabOrderLinesColumn({
-    required this.listKey,
-    required this.children,
-  });
-
-  final Key listKey;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      key: listKey,
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: children,
-    );
-  }
-}
-
 /// Qty + scans + line total column shared by [_OrderLineCardRow] and [_OrderLineCard].
 class _OrderLineQtyColumn extends StatelessWidget {
   const _OrderLineQtyColumn({
@@ -10948,8 +10933,9 @@ class _OrderLineCardRow extends StatelessWidget {
               children: [
                 _productNetworkImage(expandedImageSize, 14),
                 SizedBox(height: imageGutter + 2),
-                Text(
-                  line.product.description,
+                _orderLineTitleWithOptionalNewBadge(
+                  description: line.product.description,
+                  isNewRelease: line.product.isNewRelease,
                   style: const TextStyle(
                     fontWeight: FontWeight.w700,
                     fontSize: 13,
@@ -10992,10 +10978,9 @@ class _OrderLineCardRow extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          line.product.description,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                        _orderLineTitleWithOptionalNewBadge(
+                          description: line.product.description,
+                          isNewRelease: line.product.isNewRelease,
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 13,
@@ -11052,10 +11037,9 @@ class _OrderLineCardRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                line.product.description,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+              _orderLineTitleWithOptionalNewBadge(
+                description: line.product.description,
+                isNewRelease: line.product.isNewRelease,
                 style: const TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 13,
