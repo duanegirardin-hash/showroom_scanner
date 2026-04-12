@@ -335,9 +335,27 @@ Widget _orderLineTitleWithOptionalNewBadge({
   );
 }
 
+/// Cent-rounded money — single source of truth for quote line and order totals.
+double _roundMoney(num value) {
+  return (value * 100).roundToDouble() / 100.0;
+}
+
+double _roundedUnitPrice(double rawUnitPrice) {
+  return _roundMoney(rawUnitPrice);
+}
+
+double _lineTotalFromRoundedUnitPrice({
+  required double rawUnitPrice,
+  required num qty,
+}) {
+  final unit = _roundedUnitPrice(rawUnitPrice);
+  return _roundMoney(unit * qty);
+}
+
 /// List price for PS "Reg. Price" display when present; otherwise sheet unit price.
-double _displayRegUnitPrice(Product product) =>
-    product.listPrice > 0 ? product.listPrice : product.price;
+double _displayRegUnitPrice(Product product) => _roundedUnitPrice(
+      product.listPrice > 0 ? product.listPrice : product.price,
+    );
 
 enum ProductPricingState { regular, discountEligible, net, ps }
 
@@ -1193,9 +1211,13 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
     final map = Map<String, dynamic>.from(lineJson as Map);
     final qty = _quantityFromJson(map['quantity']);
     final price = (map['price'] as num?)?.toDouble() ?? 0.0;
-    sum += discountedUnit(map, price) * qty;
+    final effectiveUnit = discountedUnit(map, price);
+    sum += _lineTotalFromRoundedUnitPrice(
+      rawUnitPrice: effectiveUnit,
+      qty: qty,
+    );
   }
-  return sum;
+  return _roundMoney(sum);
 }
 
 /// Customer from customers.csv (headers: Id, CompanyName, Address, ...).
@@ -1590,127 +1612,188 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
           // Allow the content to shrink for few items but never overflow screen.
           maxHeight: maxHeight,
         ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color:
-                          Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-              ),
-              const SizedBox(height: 4),
-              TextField(
-                controller: _searchController,
-                focusNode: widget.searchQuotesFocusNode,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Search quotes',
-                  hintText: 'Type quote name',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.search),
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-              const SizedBox(height: 4),
-              if (filtered.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Center(
-                    child: Text(
-                      'No matching quotes',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
-                )
-              else
-                ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: filtered.length,
-                  itemBuilder: (_, i) {
-                    final info = filtered[i];
-                    final String customerName = info.customerName.trim().isEmpty
-                        ? 'No customer'
-                        : info.customerName.trim();
-                    final String quoteName =
-                        info.name.isEmpty ? 'Unnamed quote' : info.name;
-                    final rawBucketKey = info.quoteBucketKey.trim().toLowerCase();
-                    final rawBucketLabel = info.quoteBucketLabel.trim();
-                    final String bucketLabel = rawBucketLabel.isEmpty
-                        ? 'EVERYDAY'
-                        : (rawBucketKey == 'every_day'
+            ),
+            const SizedBox(height: 4),
+            TextField(
+              controller: _searchController,
+              focusNode: widget.searchQuotesFocusNode,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Search quotes',
+                hintText: 'Type quote name',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.search),
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: filtered.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No matching quotes',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: filtered.length,
+                      itemBuilder: (_, i) {
+                        final info = filtered[i];
+                        final String customerName =
+                            info.customerName.trim().isEmpty
+                                ? 'No customer'
+                                : info.customerName.trim();
+                        final String quoteName = info.name.isEmpty
+                            ? 'Unnamed quote'
+                            : info.name;
+                        final rawBucketKey =
+                            info.quoteBucketKey.trim().toLowerCase();
+                        final rawBucketLabel = info.quoteBucketLabel.trim();
+                        final String bucketLabel = rawBucketLabel.isEmpty
                             ? 'EVERYDAY'
-                            : rawBucketLabel);
-                    return ListTile(
-                      title: Text(
-                        'Customer: $customerName – Quote: $quoteName',
-                      ),
-                      subtitle: Text(
-                        '$bucketLabel • ${widget.formatDate(info.updatedAt)}',
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.email_outlined),
-                            tooltip: 'Email / Share quote',
-                            onPressed: () =>
-                                widget.onShareQuote(info.id, info.name),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline),
-                            tooltip:
-                                'Remove from list (after emailing or saving)',
-                            onPressed: () async {
-                              final confirm = await showDialog<bool>(
-                                context: context,
-                                builder: (c) => AlertDialog(
-                                  title: const Text('Remove quote?'),
-                                  content: const Text(
-                                    'Remove this quote from the list? The file will be deleted.\n\n'
-                                    'Only do this after you have emailed or saved the quote elsewhere. This cannot be undone.',
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.pop(c, false),
-                                      child: const Text('Cancel'),
+                            : (rawBucketKey == 'every_day'
+                                ? 'EVERYDAY'
+                                : rawBucketLabel);
+                        final theme = Theme.of(context);
+                        return SizedBox(
+                          key: ValueKey(info.id),
+                          height: 88,
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: () => Navigator.of(widget.dialogContext)
+                                  .pop(info.id),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Customer: $customerName – Quote: $quoteName',
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: theme.textTheme.titleMedium,
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            '$bucketLabel • ${widget.formatDate(info.updatedAt)}',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: theme.textTheme.bodySmall
+                                                ?.copyWith(
+                                              color: theme
+                                                  .colorScheme.onSurfaceVariant,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.pop(c, true),
-                                      child: const Text('Remove'),
+                                    SizedBox(
+                                      width: 112,
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.end,
+                                        children: [
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.email_outlined,
+                                            ),
+                                            tooltip: 'Email / Share quote',
+                                            onPressed: () => widget.onShareQuote(
+                                              info.id,
+                                              info.name,
+                                            ),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.delete_outline,
+                                            ),
+                                            tooltip:
+                                                'Remove from list (after emailing or saving)',
+                                            onPressed: () async {
+                                              final confirm =
+                                                  await showDialog<bool>(
+                                                context: context,
+                                                builder: (c) => AlertDialog(
+                                                  title: const Text(
+                                                    'Remove quote?',
+                                                  ),
+                                                  content: const Text(
+                                                    'Remove this quote from the list? The file will be deleted.\n\n'
+                                                    'Only do this after you have emailed or saved the quote elsewhere. This cannot be undone.',
+                                                  ),
+                                                  actions: [
+                                                    TextButton(
+                                                      onPressed: () =>
+                                                          Navigator.pop(
+                                                        c,
+                                                        false,
+                                                      ),
+                                                      child: const Text(
+                                                        'Cancel',
+                                                      ),
+                                                    ),
+                                                    TextButton(
+                                                      onPressed: () =>
+                                                          Navigator.pop(
+                                                        c,
+                                                        true,
+                                                      ),
+                                                      child: const Text(
+                                                        'Remove',
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              );
+
+                                              if (confirm == true && mounted) {
+                                                await widget.onRemoveQuote(
+                                                  info.id,
+                                                );
+                                                widget.allQuotes.removeWhere(
+                                                  (e) => e.id == info.id,
+                                                );
+                                                if (mounted) {
+                                                  Navigator.of(
+                                                    widget.dialogContext,
+                                                  ).pop('removed:${info.id}');
+                                                }
+                                              }
+                                            },
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ],
                                 ),
-                              );
-
-                              if (confirm == true && mounted) {
-                                await widget.onRemoveQuote(info.id);
-                                widget.allQuotes
-                                    .removeWhere((e) => e.id == info.id);
-                                if (mounted) {
-                                  Navigator.of(widget.dialogContext)
-                                      .pop('removed:${info.id}');
-                                }
-                              }
-                            },
+                              ),
+                            ),
                           ),
-                        ],
-                      ),
-                      onTap: () =>
-                          Navigator.of(widget.dialogContext).pop(info.id),
-                    );
-                  },
-                ),
-            ],
-          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
         ),
       ),
     );
@@ -6336,10 +6419,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   double _getRegularLineTotal(OrderLine line) =>
-      line.product.price * line.quantity;
+      _lineTotalFromRoundedUnitPrice(
+        rawUnitPrice: line.product.price,
+        qty: line.quantity,
+      );
 
   double _getDiscountedLineTotal(OrderLine line) =>
-      _getDiscountedUnitPrice(line) * line.quantity;
+      _lineTotalFromRoundedUnitPrice(
+        rawUnitPrice: _getDiscountedUnitPrice(line),
+        qty: line.quantity,
+      );
 
   double _getLineDiscountAmount(OrderLine line) =>
       _getRegularLineTotal(line) - _getDiscountedLineTotal(line);
@@ -6365,9 +6454,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     _totalUnits = units;
-    _regularOrderTotal = regularSum;
-    _orderTotal = discountedSum;
-    _orderDiscountAmount = regularSum - discountedSum;
+    _regularOrderTotal = _roundMoney(regularSum);
+    _orderTotal = _roundMoney(discountedSum);
+    _orderDiscountAmount = _roundMoney(regularSum - discountedSum);
   }
 
   /// Call when quote/list becomes empty so next scan or manual entry is "first time" (single beep).
@@ -8607,14 +8696,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final desc = (map['description'] as String?) ?? '';
       final qty = _quantityFromJson(map['quantity']);
       final listUnit = (map['price'] as num?)?.toDouble() ?? 0.0;
-      final unit = discountedUnit(map, listUnit);
+      final unitRaw = discountedUnit(map, listUnit);
       yield (
         itemNumber: itemNumber,
         description: desc,
-        listUnit: listUnit,
-        unit: unit,
+        listUnit: _roundedUnitPrice(listUnit),
+        unit: _roundedUnitPrice(unitRaw),
         qty: qty,
-        lineTotal: unit * qty,
+        lineTotal: _lineTotalFromRoundedUnitPrice(
+          rawUnitPrice: unitRaw,
+          qty: qty,
+        ),
       );
     }
   }
@@ -8774,15 +8866,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final qty = _quantityFromJson(map['quantity']);
       final price = (map['price'] as num?)?.toDouble() ?? 0.0;
       final du = discountedUnit(map, price);
-      final lineRegular = qty * price;
-      final linePay = qty * du;
+      final lineRegular = _lineTotalFromRoundedUnitPrice(
+        rawUnitPrice: price,
+        qty: qty,
+      );
+      final linePay = _lineTotalFromRoundedUnitPrice(
+        rawUnitPrice: du,
+        qty: qty,
+      );
       regularOrderSum += lineRegular;
       discountedOrderSum += linePay;
 
       final shortDesc = desc.length > 32 ? '${desc.substring(0, 32)}..' : desc;
-      final unitCol = (price - du).abs() > 0.005
-          ? '\$${price.toStringAsFixed(2)}→\$${du.toStringAsFixed(2)}'
-          : '\$${du.toStringAsFixed(2)}';
+      final ru = _roundedUnitPrice(price);
+      final rdu = _roundedUnitPrice(du);
+      final unitCol = (ru - rdu).abs() > 0.005
+          ? '\$${ru.toStringAsFixed(2)}→\$${rdu.toStringAsFixed(2)}'
+          : '\$${rdu.toStringAsFixed(2)}';
 
       buffer.writeln(
         '${shortDesc.padRight(34)} ${qty.toString().padLeft(3)}  '
@@ -8791,7 +8891,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     buffer.writeln('-' * 62);
-    final orderDiscountAmt = regularOrderSum - discountedOrderSum;
+    regularOrderSum = _roundMoney(regularOrderSum);
+    discountedOrderSum = _roundMoney(discountedOrderSum);
+    final orderDiscountAmt = _roundMoney(regularOrderSum - discountedOrderSum);
     if (orderDiscountAmt > 0.005) {
       buffer.writeln(
         'Regular Total: \$${regularOrderSum.toStringAsFixed(2)}',
@@ -9307,8 +9409,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       selectedLine: line,
       lineTotal: line != null ? _getDiscountedLineTotal(line) : 0,
       lineHasDiscount: line != null && _lineHasDiscount(line),
-      discountedUnitPrice:
-          line != null ? _getDiscountedUnitPrice(line) : 0,
+      discountedUnitPrice: line != null
+          ? _roundedUnitPrice(_getDiscountedUnitPrice(line))
+          : 0,
       priceIndicator:
           line != null ? _productPricingIndicator(line.product) : null,
       onDecreaseQty: _decreaseSelectedLineQty,
@@ -9433,7 +9536,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       expandedOrdersCompact: ordersExpanded,
       restrictCardTapToProductArea: compactLayout,
       lineHasDiscount: _lineHasDiscount(line),
-      discountedUnitPrice: _getDiscountedUnitPrice(line),
+      discountedUnitPrice: _roundedUnitPrice(_getDiscountedUnitPrice(line)),
       priceIndicator: _productPricingIndicator(line.product),
       lineTotal: _getDiscountedLineTotal(line),
       onSwipeDeletePrompt: () => _confirmDeleteLine(line),
@@ -10135,7 +10238,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                               ),
                             ),
                             Text(
-                              'Sale: \$${p.price.toStringAsFixed(2)}',
+                              'Sale: \$${_roundedUnitPrice(p.price).toStringAsFixed(2)}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               textAlign: textAlign,
@@ -10179,7 +10282,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                         );
                       }
                       return Text(
-                        'Price: \$${line.product.price.toStringAsFixed(2)}',
+                        'Price: \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         textAlign: textAlign,
@@ -10748,7 +10851,7 @@ class _ScanTabSearchResultTile extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    'Sale: \$${product.price.toStringAsFixed(2)}',
+                    'Sale: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -10761,7 +10864,7 @@ class _ScanTabSearchResultTile extends StatelessWidget {
               )
             else
               Text(
-                '\$${product.price.toStringAsFixed(2)}',
+                '\$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -11023,7 +11126,7 @@ class _OrderLineCardRow extends StatelessWidget {
                   ),
                   TextSpan(
                     text: line.product.isPs
-                        ? 'Sale \$${line.product.price.toStringAsFixed(2)}'
+                        ? 'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}'
                         : 'Your Price \$${discountedUnitPrice.toStringAsFixed(2)}',
                     style: TextStyle(
                       color: Colors.green.shade800,
@@ -11039,14 +11142,14 @@ class _OrderLineCardRow extends StatelessWidget {
               ? Text(
                   'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
                   'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
-                  'Sale \$${line.product.price.toStringAsFixed(2)}',
+                  'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: line3BaseStyle,
                 )
               : Text(
                   'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-                  'Price \$${line.product.price.toStringAsFixed(2)}',
+                  'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: line3BaseStyle,
@@ -11067,7 +11170,7 @@ class _OrderLineCardRow extends StatelessWidget {
                   ),
                   TextSpan(
                     text: line.product.isPs
-                        ? 'Sale \$${line.product.price.toStringAsFixed(2)}'
+                        ? 'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}'
                         : 'Your Price \$${discountedUnitPrice.toStringAsFixed(2)}',
                     style: TextStyle(
                       color: Colors.green.shade800,
@@ -11081,12 +11184,12 @@ class _OrderLineCardRow extends StatelessWidget {
               ? Text(
                   'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
                   'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
-                  'Sale \$${line.product.price.toStringAsFixed(2)}',
+                  'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
                   style: line3BaseStyle,
                 )
               : Text(
                   'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-                  'Price \$${line.product.price.toStringAsFixed(2)}',
+                  'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
                   style: line3BaseStyle,
                 );
 
