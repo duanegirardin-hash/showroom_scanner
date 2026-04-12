@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:csv/csv.dart';
+import 'package:excel/excel.dart' as xlsx;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
@@ -16,7 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 const String _productsCsvUrl =
-  'https://docs.google.com/spreadsheets/d/1CLwgK91aqM4orQjCj9C1JZH9SP2FeRdFht9znz5jJDY/export?format=csv&gid=1450539292';
+  'https://docs.google.com/spreadsheets/d/1BiHkuPIJ_xJN5HS-7BydPtnsrSCo2xKG-i4f3ZZc0ho/export?format=csv&gid=1600457475';
 
 const String _customersCsvUrl =
   'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
@@ -8550,22 +8551,168 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } catch (_) {}
   }
 
-  /// Build CSV with Item Number and Quantity for website upload.
-  String _formatQuoteAsCsv(Map<String, dynamic> data) {
-    const header = 'Item,Quantity';
+  /// Shared line iteration for email/share CSV + XLSX attachments.
+  /// [listUnit] is persisted line [`price`] (pre–customer-discount unit); [unit] matches
+  /// [_formatQuoteAsText] / order totals (customer discount on eligible lines only).
+  Iterable<
+      ({
+        String itemNumber,
+        String description,
+        double listUnit,
+        double unit,
+        int qty,
+        double lineTotal,
+      })> _iterQuoteShareAttachmentLines(Map<String, dynamic> data) sync* {
     final lines =
         data['lines'] as List<dynamic>? ?? data['items'] as List<dynamic>? ?? [];
-    final rows = <String>[header];
+
+    var customerDiscPct = 0.0;
+    final customerMap = data['customer'];
+    if (customerMap is Map<String, dynamic>) {
+      customerDiscPct =
+          Customer.fromJson(Map<String, dynamic>.from(customerMap))
+              .discountPercent;
+    }
+
+    ProductPricingState linePricingState(Map<String, dynamic> map) {
+      final psFlag = map['isPs'];
+      final psRaw = (map['psRaw'] as String?) ?? '';
+      final isPs = (psFlag is bool) ? psFlag : _parseYesFlag(psRaw);
+      if (isPs) return ProductPricingState.ps;
+      final netFlag = map['isNet'];
+      final netRaw = (map['netRaw'] as String?) ?? '';
+      final isNet = (netFlag is bool) ? netFlag : _parseYesFlag(netRaw);
+      if (isNet) return ProductPricingState.net;
+      final b = map['discountEligible'];
+      if (b is bool) {
+        return b ? ProductPricingState.discountEligible : ProductPricingState.regular;
+      }
+      final raw = (map['discountRaw'] as String?) ?? '';
+      return _parseYesFlag(raw)
+          ? ProductPricingState.discountEligible
+          : ProductPricingState.regular;
+    }
+
+    double discountedUnit(Map<String, dynamic> map, double regularUnit) {
+      if (linePricingState(map) != ProductPricingState.discountEligible ||
+          customerDiscPct <= 0) {
+        return regularUnit;
+      }
+      return regularUnit * (1 - customerDiscPct / 100.0);
+    }
 
     for (final lineJson in lines) {
       final map = Map<String, dynamic>.from(lineJson as Map);
       final itemNumber = (map['itemNumber'] as String?) ?? '';
+      final desc = (map['description'] as String?) ?? '';
       final qty = _quantityFromJson(map['quantity']);
-      final itemEscaped = itemNumber.contains(',') ? '"$itemNumber"' : itemNumber;
-      rows.add('$itemEscaped,$qty');
+      final listUnit = (map['price'] as num?)?.toDouble() ?? 0.0;
+      final unit = discountedUnit(map, listUnit);
+      yield (
+        itemNumber: itemNumber,
+        description: desc,
+        listUnit: listUnit,
+        unit: unit,
+        qty: qty,
+        lineTotal: unit * qty,
+      );
+    }
+  }
+
+  String _formatQuoteShareAttachmentCurrency(double amount) =>
+      '\$${amount.toStringAsFixed(2)}';
+
+  /// [richEmailShareAttachments]: full line detail for Email/Share only (see [_shareQuoteById]).
+  /// Default: compact `Item,Quantity` for website upload and other quote CSV exports.
+  String _formatQuoteAsCsv(
+    Map<String, dynamic> data, {
+    bool richEmailShareAttachments = false,
+  }) {
+    if (!richEmailShareAttachments) {
+      const header = 'Item,Quantity';
+      final lines = data['lines'] as List<dynamic>? ??
+          data['items'] as List<dynamic>? ??
+          [];
+      final rows = <String>[header];
+
+      for (final lineJson in lines) {
+        final map = Map<String, dynamic>.from(lineJson as Map);
+        final itemNumber = (map['itemNumber'] as String?) ?? '';
+        final qty = _quantityFromJson(map['quantity']);
+        final itemEscaped =
+            itemNumber.contains(',') ? '"$itemNumber"' : itemNumber;
+        rows.add('$itemEscaped,$qty');
+      }
+
+      return rows.join('\n');
     }
 
+    const header =
+        'Item Number,Description,List Price,Price,Qty Ordered,Line Total';
+    final rows = <String>[header];
+    for (final r in _iterQuoteShareAttachmentLines(data)) {
+      rows.add(
+        [
+          _csvEscape(r.itemNumber),
+          _csvEscape(r.description),
+          _formatQuoteShareAttachmentCurrency(r.listUnit),
+          _formatQuoteShareAttachmentCurrency(r.unit),
+          '${r.qty}',
+          _formatQuoteShareAttachmentCurrency(r.lineTotal),
+        ].join(','),
+      );
+    }
     return rows.join('\n');
+  }
+
+  /// Email/share attachment: .xlsx with one row per order line (same columns as rich CSV).
+  /// Pricing matches [_formatQuoteAsText] (customer discount on eligible lines).
+  List<int> _buildQuoteEmailExcelBytes(Map<String, dynamic> data) {
+    final excel = xlsx.Excel.createExcel();
+    final sheetName = excel.getDefaultSheet() ?? excel.tables.keys.first;
+    final sheet = excel[sheetName];
+
+    sheet.appendRow([
+      xlsx.TextCellValue('Item Number'),
+      xlsx.TextCellValue('Description'),
+      xlsx.TextCellValue('List Price'),
+      xlsx.TextCellValue('Price'),
+      xlsx.TextCellValue('Qty Ordered'),
+      xlsx.TextCellValue('Line Total'),
+    ]);
+
+    final currencyStyle = xlsx.CellStyle(
+      numberFormat: xlsx.NumFormat.custom(formatCode: r'"$"#,##0.00'),
+    );
+
+    var rowIndex = 1;
+    for (final line in _iterQuoteShareAttachmentLines(data)) {
+      sheet.appendRow([
+        xlsx.TextCellValue(line.itemNumber),
+        xlsx.TextCellValue(line.description),
+        xlsx.DoubleCellValue(line.listUnit),
+        xlsx.DoubleCellValue(line.unit),
+        xlsx.IntCellValue(line.qty),
+        xlsx.DoubleCellValue(line.lineTotal),
+      ]);
+      for (final col in [2, 3, 5]) {
+        sheet
+            .cell(
+              xlsx.CellIndex.indexByColumnRow(
+                columnIndex: col,
+                rowIndex: rowIndex,
+              ),
+            )
+            .cellStyle = currencyStyle;
+      }
+      rowIndex++;
+    }
+
+    final out = excel.save(fileName: 'quote.xlsx');
+    if (out == null) {
+      throw StateError('Excel save returned no bytes');
+    }
+    return out;
   }
 
   /// Build shareable text for a quote from its JSON data.
@@ -8661,7 +8808,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return buffer.toString();
   }
 
-  /// Share quote by id: attaches CSV (Item Number, Quantity) for website upload and optional text summary.
+  /// Share quote by id: attaches line-detail CSV + .xlsx (same columns) and text summary.
   Future<void> _shareQuoteById(String id, String name) async {
     try {
       if (!await _quoteIdHasActiveEligibleRowInActiveIndexStorage(id)) {
@@ -8673,7 +8820,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final content = await file.readAsString();
       final data = Map<String, dynamic>.from(jsonDecode(content) as Map);
-      final csv = _formatQuoteAsCsv(data);
+      final csv = _formatQuoteAsCsv(data, richEmailShareAttachments: true);
 
       final tempDir = await getTemporaryDirectory();
       final safeName = name
@@ -8688,8 +8835,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final text = _formatQuoteAsText(data);
 
+      final attachments = <XFile>[
+        XFile(csvPath, mimeType: 'text/csv'),
+      ];
+      try {
+        final xlsxPath =
+            '${tempDir.path}/quote_${safeName.isEmpty ? id : safeName}.xlsx';
+        final xlsxBytes = _buildQuoteEmailExcelBytes(data);
+        await File(xlsxPath).writeAsBytes(xlsxBytes, flush: true);
+        attachments.add(
+          XFile(
+            xlsxPath,
+            mimeType:
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          ),
+        );
+      } catch (_) {}
+
       await Share.shareXFiles(
-        [XFile(csvPath, mimeType: 'text/csv')],
+        attachments,
         text: text,
         subject: 'Quote: $name',
       );
