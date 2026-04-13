@@ -1883,6 +1883,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   List<Product> _searchResults = [];
   Timer? _searchDebounce;
 
+  /// E-Catalog tab (V1): filters over [_productsByItemNumber] only; no extra CSV load.
+  final TextEditingController _catalogSearchController = TextEditingController();
+  String _catalogSearchQuery = '';
+  /// null means "All Categories".
+  String? _selectedCatalogCategory;
+  /// null means "All Subcategories".
+  String? _selectedCatalogSubCategory;
+  String _catalogFilteredCacheKey = '';
+  List<Product>? _catalogFilteredProductsCache;
+  List<String>? _catalogDistinctCategories;
+  int? _catalogDistinctCategoriesProductCount;
+  String? _catalogSubcategoryOptionsCacheKey;
+  List<String>? _catalogSubcategoryOptionsCache;
+
   late final AudioPlayer _goodScanPlayer;
   late final AudioPlayer _goodScanPlayer2;
   late final AudioPlayer _errorScanPlayer;
@@ -2093,8 +2107,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     });
 
     _quoteNameController.addListener(_onQuoteNameChanged);
+    _catalogSearchController.addListener(_onCatalogSearchChanged);
 
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _activeTabIndex = _tabController.index;
     _scanTabActive = _tabController.index == 0;
     _tabController.addListener(() {
@@ -2159,6 +2174,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _perfLog(
       '#$seq total=${sw.elapsedMilliseconds}ms outcome=$outcome raw="$raw" buildDeltas(scanTab=$scanTabBuildDelta orderListTab=$orderListTabBuildDelta orderList=$orderListBuildDelta)',
     );
+  }
+
+  void _onCatalogSearchChanged() {
+    final next = _catalogSearchController.text;
+    if (next == _catalogSearchQuery) return;
+    setState(() => _catalogSearchQuery = next);
   }
 
   void _onQuoteNameChanged() {
@@ -2273,6 +2294,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _quoteNameController.dispose();
 
     _searchController.dispose();
+
+    _catalogSearchController.removeListener(_onCatalogSearchChanged);
+    _catalogSearchController.dispose();
 
     _orderListScrollController.dispose();
     _orderListTabScrollController.dispose();
@@ -7973,8 +7997,355 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
+  List<String> _catalogCategories() {
+    final n = _productsByItemNumber.length;
+    if (_catalogDistinctCategories != null &&
+        _catalogDistinctCategoriesProductCount == n) {
+      return _catalogDistinctCategories!;
+    }
+    final set = <String>{};
+    for (final p in _productsByItemNumber.values) {
+      final c = p.category.trim();
+      if (c.isNotEmpty) set.add(c);
+    }
+    final list = set.toList()..sort();
+    _catalogDistinctCategories = list;
+    _catalogDistinctCategoriesProductCount = n;
+    return list;
+  }
+
+  /// Distinct non-empty subcategories, optionally scoped to [selectedCategory].
+  List<String> _catalogSubcategoriesForSelectedCategory() {
+    final n = _productsByItemNumber.length;
+    final cat = _selectedCatalogCategory;
+    final key = '$n|${cat ?? ''}';
+    if (_catalogSubcategoryOptionsCacheKey == key &&
+        _catalogSubcategoryOptionsCache != null) {
+      return _catalogSubcategoryOptionsCache!;
+    }
+    final set = <String>{};
+    for (final p in _productsByItemNumber.values) {
+      if (cat != null && p.category.trim() != cat) continue;
+      final s = p.subCategory.trim();
+      if (s.isNotEmpty) set.add(s);
+    }
+    final list = set.toList()..sort();
+    _catalogSubcategoryOptionsCacheKey = key;
+    _catalogSubcategoryOptionsCache = list;
+    return list;
+  }
+
+  bool _catalogSubcategoryValidForCategorySelection(
+    String sub,
+    String? categorySelection,
+  ) {
+    for (final p in _productsByItemNumber.values) {
+      if (categorySelection != null && p.category.trim() != categorySelection) {
+        continue;
+      }
+      if (p.subCategory.trim() == sub) return true;
+    }
+    return false;
+  }
+
+  List<Product> _filteredCatalogProducts() {
+    final q = _catalogSearchQuery.trim().toLowerCase();
+    final cat = _selectedCatalogCategory;
+    final subcats = _catalogSubcategoriesForSelectedCategory();
+    final subRaw = _selectedCatalogSubCategory;
+    final sub =
+        subRaw != null && subcats.contains(subRaw) ? subRaw : null;
+    final key =
+        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${sub ?? ''}';
+    if (_catalogFilteredCacheKey == key && _catalogFilteredProductsCache != null) {
+      return _catalogFilteredProductsCache!;
+    }
+    final out = <Product>[];
+    for (final p in _productsByItemNumber.values) {
+      if (cat != null && p.category.trim() != cat) continue;
+      if (sub != null && p.subCategory.trim() != sub) continue;
+      final matchesQuery = q.isEmpty ||
+          p.itemNumber.toLowerCase().contains(q) ||
+          p.description.toLowerCase().contains(q);
+      if (!matchesQuery) continue;
+      out.add(p);
+    }
+    out.sort((a, b) => a.itemNumber.compareTo(b.itemNumber));
+    _catalogFilteredCacheKey = key;
+    _catalogFilteredProductsCache = out;
+    return out;
+  }
+
+  int _qtyInCurrentQuoteForProduct(Product product) {
+    final key = _orderLineKeyForProduct(product);
+    return _orderLineByKey[key]?.quantity ?? 0;
+  }
+
+  void _incrementCatalogProductQty(Product product) {
+    unawaited(_addCatalogProductToCurrentQuote(product));
+  }
+
+  void _decrementCatalogProductQty(Product product) {
+    final line = _orderLineByKey[_orderLineKeyForProduct(product)];
+    if (line == null) return;
+    _decreaseLineQty(line);
+  }
+
+  Future<void> _addCatalogProductToCurrentQuote(Product product) async {
+    await _ensureRoutingForProduct(product);
+    final bucket = _resolveQuoteBucketForProduct(product);
+    _addProduct(product, 'ECATALOG', bucket: bucket);
+  }
+
+  Widget _buildECatalogTab() {
+    if (_activeTabIndex != 1) {
+      return const SizedBox.shrink();
+    }
+    if (_loadingProducts) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    final filtered = _filteredCatalogProducts();
+    final categories = _catalogCategories();
+    final subcategories = _catalogSubcategoriesForSelectedCategory();
+    final validatedCatalogSubcategory =
+        _selectedCatalogSubCategory != null &&
+                subcategories.contains(_selectedCatalogSubCategory)
+            ? _selectedCatalogSubCategory
+            : null;
+    if (_selectedCatalogSubCategory != null &&
+        !subcategories.contains(_selectedCatalogSubCategory!)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _selectedCatalogSubCategory = null);
+      });
+    }
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: _catalogSearchController,
+            decoration: const InputDecoration(
+              labelText: 'Search',
+              hintText: 'Item # or description',
+            ),
+            textInputAction: TextInputAction.search,
+          ),
+          const SizedBox(height: 8),
+          InputDecorator(
+            decoration: const InputDecoration(
+              labelText: 'Category',
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String?>(
+                isExpanded: true,
+                value: _selectedCatalogCategory,
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('All Categories'),
+                  ),
+                  for (final c in categories)
+                    DropdownMenuItem<String?>(
+                      value: c,
+                      child: Text(
+                        c,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: (v) {
+                  setState(() {
+                    _selectedCatalogCategory = v;
+                    final sub = _selectedCatalogSubCategory;
+                    if (sub != null &&
+                        !_catalogSubcategoryValidForCategorySelection(
+                          sub,
+                          v,
+                        )) {
+                      _selectedCatalogSubCategory = null;
+                    }
+                  });
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          InputDecorator(
+            decoration: const InputDecoration(
+              labelText: 'Subcategory',
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String?>(
+                isExpanded: true,
+                value: validatedCatalogSubcategory,
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('All Subcategories'),
+                  ),
+                  for (final s in subcategories)
+                    DropdownMenuItem<String?>(
+                      value: s,
+                      child: Text(
+                        s,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: (v) {
+                  setState(() => _selectedCatalogSubCategory = v);
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: filtered.isEmpty
+                ? Center(
+                    child: Text(
+                      'No products match',
+                      style: textTheme.bodyLarge?.copyWith(
+                        color: _kSecondaryText,
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: filtered.length,
+                    itemBuilder: (context, index) {
+                      final product = filtered[index];
+                      final qtyInQuote = _qtyInCurrentQuoteForProduct(product);
+                      final catLabel = product.category.trim().isEmpty
+                          ? '—'
+                          : product.category.trim();
+                      final subLabel = product.subCategory.trim().isEmpty
+                          ? '—'
+                          : product.subCategory.trim();
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Material(
+                          type: MaterialType.card,
+                          elevation: 0.5,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                            child: Row(
+                              key: ValueKey(product.itemNumber),
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _ECatalogProductThumbnail(product: product),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        product.itemNumber,
+                                        style: textTheme.titleSmall?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        product.description,
+                                        style: textTheme.bodyMedium,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '$catLabel / $subLabel',
+                                        style: textTheme.bodySmall?.copyWith(
+                                          color: _kSecondaryText,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        '\$${product.price.toStringAsFixed(2)}',
+                                        style: textTheme.titleSmall?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 132,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 40,
+                                          minHeight: 40,
+                                        ),
+                                        onPressed: qtyInQuote > 0
+                                            ? () => _decrementCatalogProductQty(
+                                                  product,
+                                                )
+                                            : null,
+                                        icon: const Icon(
+                                          Icons.remove_circle_outline,
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 28,
+                                        child: Text(
+                                          '$qtyInQuote',
+                                          textAlign: TextAlign.center,
+                                          style: textTheme.titleSmall
+                                              ?.copyWith(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                      IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 40,
+                                          minHeight: 40,
+                                        ),
+                                        onPressed: () =>
+                                            _incrementCatalogProductQty(
+                                              product,
+                                            ),
+                                        icon: const Icon(
+                                          Icons.add_circle_outline,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildArchiveTab() {
-    if (_activeTabIndex != 2) {
+    if (_activeTabIndex != 3) {
       return const SizedBox.shrink();
     }
     return _ArchiveQuotesTab(
@@ -8764,20 +9135,69 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final sheetName = excel.getDefaultSheet() ?? excel.tables.keys.first;
     final sheet = excel[sheetName];
 
+    xlsx.TextCellValue cell(String v) => xlsx.TextCellValue(v);
+
+    void appendMeta(String label, String value) {
+      sheet.appendRow([
+        cell(label),
+        cell(value),
+        cell(''),
+        cell(''),
+        cell(''),
+        cell(''),
+      ]);
+    }
+
+    final quoteName = (data['name'] as String?)?.trim() ?? '';
+    final bucketLabel = (data['quoteBucketLabel'] as String?)?.trim() ?? '';
+    final bucketKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
+    final productType = bucketLabel.isNotEmpty
+        ? bucketLabel
+        : (bucketKey.isNotEmpty ? bucketKey : '');
+
+    var customerNumber = '';
+    var customerName = '';
+    final customerMap = data['customer'];
+    if (customerMap is Map<String, dynamic>) {
+      final c = Customer.fromJson(Map<String, dynamic>.from(customerMap));
+      customerNumber = c.id.trim();
+      customerName = c.displayName.trim();
+    }
+
+    appendMeta('Quote Name', quoteName);
+    appendMeta('Product Type', productType);
+    appendMeta('Customer Number', customerNumber);
+    appendMeta('Customer Name', customerName);
+
+    final updatedAt = DateTime.tryParse((data['updatedAt'] as String?) ?? '');
+    if (updatedAt != null) {
+      final y = updatedAt.year.toString().padLeft(4, '0');
+      final m = updatedAt.month.toString().padLeft(2, '0');
+      final d = updatedAt.day.toString().padLeft(2, '0');
+      appendMeta('Generated Date', '$y-$m-$d');
+    }
+
+    sheet.appendRow([cell(''), cell(''), cell(''), cell(''), cell(''), cell('')]);
+
     sheet.appendRow([
-      xlsx.TextCellValue('Item Number'),
-      xlsx.TextCellValue('Description'),
-      xlsx.TextCellValue('List Price'),
-      xlsx.TextCellValue('Price'),
-      xlsx.TextCellValue('Qty Ordered'),
-      xlsx.TextCellValue('Line Total'),
+      cell('Item Number'),
+      cell('Description'),
+      cell('List Price'),
+      cell('Price'),
+      cell('Qty Ordered'),
+      cell('Line Total'),
     ]);
+
+    var metaRows = 4;
+    if (updatedAt != null) metaRows++;
+    const blankRows = 1;
+    const headerRows = 1;
+    var rowIndex = metaRows + blankRows + headerRows;
 
     final currencyStyle = xlsx.CellStyle(
       numberFormat: xlsx.NumFormat.custom(formatCode: r'"$"#,##0.00'),
     );
 
-    var rowIndex = 1;
     for (final line in _iterQuoteShareAttachmentLines(data)) {
       sheet.appendRow([
         xlsx.TextCellValue(line.itemNumber),
@@ -8929,6 +9349,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           .replaceAll(RegExp(r'[^\w\s-]'), '_')
           .replaceAll(RegExp(r'\s+'), '_');
 
+      String safeFileToken(String raw) {
+        final t = raw
+            .replaceAll(RegExp(r'[^\w\s-]'), '_')
+            .replaceAll(RegExp(r'\s+'), '_')
+            .replaceAll(RegExp(r'_+'), '_')
+            .trim();
+        return t.length > 80 ? t.substring(0, 80) : t;
+      }
+
       final csvPath =
           '${tempDir.path}/quote_${safeName.isEmpty ? id : safeName}.csv';
 
@@ -8941,8 +9370,43 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         XFile(csvPath, mimeType: 'text/csv'),
       ];
       try {
-        final xlsxPath =
-            '${tempDir.path}/quote_${safeName.isEmpty ? id : safeName}.xlsx';
+        final bucketLabel = (data['quoteBucketLabel'] as String?)?.trim() ?? '';
+        final bucketKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
+        final productTypeRaw =
+            bucketLabel.isNotEmpty ? bucketLabel : bucketKey;
+        final productToken = safeFileToken(
+          productTypeRaw.isNotEmpty ? productTypeRaw : 'Unknown',
+        );
+
+        var customerToken = '';
+        final cm = data['customer'];
+        if (cm is Map<String, dynamic>) {
+          final cust = Customer.fromJson(Map<String, dynamic>.from(cm));
+          final company = cust.companyName.trim();
+          final identifyingCustomer =
+              company.isNotEmpty ? company : cust.id.trim();
+          customerToken = safeFileToken(identifyingCustomer);
+        }
+        if (customerToken.isEmpty) {
+          customerToken = 'Unknown';
+        }
+
+        final quoteNameOptional = safeFileToken(
+          (data['name'] as String?)?.trim() ?? name,
+        );
+        final updated = DateTime.tryParse((data['updatedAt'] as String?) ?? '');
+        final dateToken = updated != null
+            ? '${updated.year}-${updated.month.toString().padLeft(2, '0')}-${updated.day.toString().padLeft(2, '0')}'
+            : '';
+
+        final xlsxBase = [
+          'Quote',
+          productToken,
+          customerToken,
+          if (quoteNameOptional.isNotEmpty) quoteNameOptional,
+          if (dateToken.isNotEmpty) dateToken,
+        ].join('_');
+        final xlsxPath = '${tempDir.path}/$xlsxBase.xlsx';
         final xlsxBytes = _buildQuoteEmailExcelBytes(data);
         await File(xlsxPath).writeAsBytes(xlsxBytes, flush: true);
         attachments.add(
@@ -9586,7 +10050,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Widget _buildOrderListTab() {
     _orderListTabBuildCount++;
-    if (_activeTabIndex != 1) {
+    if (_activeTabIndex != 2) {
       return const SizedBox.shrink();
     }
     return _OrderListTab(
@@ -9674,6 +10138,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             controller: _tabController,
             tabs: const [
               Tab(text: 'Scan'),
+              Tab(text: 'E-Catalog'),
               Tab(text: 'Orders'),
               Tab(text: 'Archive'),
               Tab(text: 'Setup'),
@@ -9690,6 +10155,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                   physics: const NeverScrollableScrollPhysics(),
                   children: [
                     _buildScanTab(),
+                    _buildECatalogTab(),
                     _buildOrderListTab(),
                     _buildArchiveTab(),
                     _buildSetupTab(),
@@ -10795,6 +11261,59 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
   }
 }
 
+/// Same JPEG URL as [_OrderLineCardRow]; small decode bounds for list scrolling.
+class _ECatalogProductThumbnail extends StatelessWidget {
+  const _ECatalogProductThumbnail({required this.product});
+
+  final Product product;
+
+  static const double size = 48;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final url =
+        'https://showroom-images.netlify.app/images/${product.itemNumber.trim()}.jpeg';
+    return SizedBox(
+      width: size,
+      height: size,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Image.network(
+          url,
+          fit: BoxFit.cover,
+          width: size,
+          height: size,
+          cacheWidth: 128,
+          cacheHeight: 128,
+          filterQuality: FilterQuality.low,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return ColoredBox(
+              color: colorScheme.surfaceContainerHighest,
+              child: Icon(
+                Icons.image_outlined,
+                size: 22,
+                color: colorScheme.outline,
+              ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) {
+            return ColoredBox(
+              color: colorScheme.surfaceContainerHighest,
+              child: Icon(
+                Icons.image_not_supported_outlined,
+                size: 20,
+                color: colorScheme.outline,
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
 class _ScanTabSearchResultTile extends StatelessWidget {
   const _ScanTabSearchResultTile({
     required this.product,
@@ -11646,7 +12165,7 @@ class _OrderListTab extends StatelessWidget {
           Expanded(
             child: loadingProducts
                 ? const Center(child: CircularProgressIndicator())
-                : (activeTabIndex == 1
+                : (activeTabIndex == 2
                     ? orderList
                     : const SizedBox.shrink()),
           ),
