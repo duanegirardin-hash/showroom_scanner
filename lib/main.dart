@@ -17,7 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 const String _productsCsvUrl =
-  'https://docs.google.com/spreadsheets/d/1BiHkuPIJ_xJN5HS-7BydPtnsrSCo2xKG-i4f3ZZc0ho/export?format=csv&gid=1600457475';
+  'https://docs.google.com/spreadsheets/d/1JXn_5iwfVESL8laul5Q3IEdQQ6cHwph6yY5ojKnPZ6I/export?format=csv&gid=1299110245';
 
 const String _customersCsvUrl =
   'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
@@ -1735,10 +1735,10 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                                 context: context,
                                                 builder: (c) => AlertDialog(
                                                   title: const Text(
-                                                    'Remove quote?',
+                                                    'Delete Quote',
                                                   ),
                                                   content: const Text(
-                                                    'Remove this quote from the list? The file will be deleted.\n\n'
+                                                    'Delete this quote from the list? The file will be deleted.\n\n'
                                                     'Only do this after you have emailed or saved the quote elsewhere. This cannot be undone.',
                                                   ),
                                                   actions: [
@@ -1759,7 +1759,7 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                                         true,
                                                       ),
                                                       child: const Text(
-                                                        'Remove',
+                                                        'Delete',
                                                       ),
                                                     ),
                                                   ],
@@ -6618,7 +6618,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
-  Future<void> _processScan(String value) async {
+  Future<Product?> _processScan(String value) async {
     try {
       final int sampleId = _currentScanSampleId;
       if (sampleId > 0) {
@@ -6629,7 +6629,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       if (raw.isEmpty || upc.isEmpty) {
         _restoreScanFieldFocus();
-        return;
+        return null;
       }
 
       // Prevent double beep: scanner or focus can deliver same barcode twice in quick succession.
@@ -6647,7 +6647,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _currentScanSampleId = 0;
         }
         _restoreScanFieldFocus();
-        return;
+        return null;
       }
       _lastProcessedScanUpc = upc;
       _lastProcessedScanTime = now;
@@ -6684,7 +6684,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _finishScanPerfSample(sampleId, outcome: 'not-found');
           _currentScanSampleId = 0;
         }
-        return;
+        return null;
       }
       await _ensureRoutingForProduct(product);
       final bucket = _resolveQuoteBucketForProduct(product);
@@ -6700,9 +6700,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _finishScanPerfSample(sampleId, outcome: 'item-added');
         _currentScanSampleId = 0;
       }
+      return product;
     } catch (e) {
       final int sampleId = _currentScanSampleId;
-      if (!mounted) return;
+      if (!mounted) return null;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('No match — try again'),
@@ -6714,6 +6715,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _finishScanPerfSample(sampleId, outcome: 'exception');
       }
       _currentScanSampleId = 0;
+      return null;
     }
   }
 
@@ -6731,16 +6733,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     unawaited(_drainScanQueue());
   }
 
+  _CameraScanOverlayUpdate _cameraOverlayUpdateForProduct(Product product) {
+    return _CameraScanOverlayUpdate(
+      itemNumber: product.itemNumber,
+      quantity: _qtyInCurrentQuoteForProduct(product),
+    );
+  }
+
   Future<void> _openCameraScanner() async {
     _editDialogOpen = true;
 
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _CameraScannerPage(
-          onDetect: (rawValue) {
+          onDetect: (rawValue) async {
             final value = rawValue.trim();
-            if (value.isEmpty) return;
-            _enqueueScan(value);
+            if (value.isEmpty) return null;
+            final product = await _processScan(value);
+            if (product == null) return null;
+            return _cameraOverlayUpdateForProduct(product);
           },
         ),
       ),
@@ -8240,7 +8251,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                               key: ValueKey(product.itemNumber),
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                _ECatalogProductThumbnail(product: product),
+                                _ECatalogProductThumbnail(
+                                  product: product,
+                                  isInQuote: qtyInQuote > 0,
+                                ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Column(
@@ -9011,14 +9025,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } catch (_) {}
   }
 
+  /// List Price column for email/share attachments: persisted line [listPrice], else
+  /// [Product.listPrice] from [upc]/[itemNumber]. Never uses line [price].
+  double? _listUnitForQuoteShareAttachmentLine(Map<String, dynamic> map) {
+    final lp = map['listPrice'];
+    if (lp is num) {
+      return _roundedUnitPrice(lp.toDouble());
+    }
+    final upc = (map['upc'] as String?)?.trim() ?? '';
+    final itemNumber = (map['itemNumber'] as String?)?.trim() ?? '';
+    Product? product = _productsByUpc[_normalizeUpcLookupKey(upc)];
+    product ??= _productsByItemNumber[itemNumber];
+    if (product == null) return null;
+    return _roundedUnitPrice(product.listPrice);
+  }
+
   /// Shared line iteration for email/share CSV + XLSX attachments.
-  /// [listUnit] is persisted line [`price`] (pre–customer-discount unit); [unit] matches
-  /// [_formatQuoteAsText] / order totals (customer discount on eligible lines only).
+  /// [listUnit] from [_listUnitForQuoteShareAttachmentLine] (never line [price]).
+  /// [unit] is persisted line [price] after [_formatQuoteAsText]-style customer discount.
   Iterable<
       ({
         String itemNumber,
         String description,
-        double listUnit,
+        double? listUnit,
         double unit,
         int qty,
         double lineTotal,
@@ -9066,12 +9095,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final itemNumber = (map['itemNumber'] as String?) ?? '';
       final desc = (map['description'] as String?) ?? '';
       final qty = _quantityFromJson(map['quantity']);
-      final listUnit = (map['price'] as num?)?.toDouble() ?? 0.0;
-      final unitRaw = discountedUnit(map, listUnit);
+      final shelfUnit = (map['price'] as num?)?.toDouble() ?? 0.0;
+      final unitRaw = discountedUnit(map, shelfUnit);
       yield (
         itemNumber: itemNumber,
         description: desc,
-        listUnit: _roundedUnitPrice(listUnit),
+        listUnit: _listUnitForQuoteShareAttachmentLine(map),
         unit: _roundedUnitPrice(unitRaw),
         qty: qty,
         lineTotal: _lineTotalFromRoundedUnitPrice(
@@ -9084,6 +9113,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   String _formatQuoteShareAttachmentCurrency(double amount) =>
       '\$${amount.toStringAsFixed(2)}';
+
+  String _formatQuoteShareAttachmentListPriceCell(double? listUnit) =>
+      listUnit == null ? '' : _formatQuoteShareAttachmentCurrency(listUnit);
 
   /// [richEmailShareAttachments]: full line detail for Email/Share only (see [_shareQuoteById]).
   /// Default: compact `Item,Quantity` for website upload and other quote CSV exports.
@@ -9118,7 +9150,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         [
           _csvEscape(r.itemNumber),
           _csvEscape(r.description),
-          _formatQuoteShareAttachmentCurrency(r.listUnit),
+          _csvEscape(_formatQuoteShareAttachmentListPriceCell(r.listUnit)),
           _formatQuoteShareAttachmentCurrency(r.unit),
           '${r.qty}',
           _formatQuoteShareAttachmentCurrency(r.lineTotal),
@@ -9199,15 +9231,28 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
 
     for (final line in _iterQuoteShareAttachmentLines(data)) {
+      final listPriceCell = line.listUnit == null
+          ? cell('')
+          : xlsx.DoubleCellValue(line.listUnit!);
       sheet.appendRow([
         xlsx.TextCellValue(line.itemNumber),
         xlsx.TextCellValue(line.description),
-        xlsx.DoubleCellValue(line.listUnit),
+        listPriceCell,
         xlsx.DoubleCellValue(line.unit),
         xlsx.IntCellValue(line.qty),
         xlsx.DoubleCellValue(line.lineTotal),
       ]);
-      for (final col in [2, 3, 5]) {
+      if (line.listUnit != null) {
+        sheet
+            .cell(
+              xlsx.CellIndex.indexByColumnRow(
+                columnIndex: 2,
+                rowIndex: rowIndex,
+              ),
+            )
+            .cellStyle = currencyStyle;
+      }
+      for (final col in [3, 5]) {
         sheet
             .cell(
               xlsx.CellIndex.indexByColumnRow(
@@ -11263,9 +11308,13 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
 
 /// Same JPEG URL as [_OrderLineCardRow]; small decode bounds for list scrolling.
 class _ECatalogProductThumbnail extends StatelessWidget {
-  const _ECatalogProductThumbnail({required this.product});
+  const _ECatalogProductThumbnail({
+    required this.product,
+    this.isInQuote = false,
+  });
 
   final Product product;
+  final bool isInQuote;
 
   static const double size = 48;
 
@@ -11277,38 +11326,60 @@ class _ECatalogProductThumbnail extends StatelessWidget {
     return SizedBox(
       width: size,
       height: size,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(6),
-        child: Image.network(
-          url,
-          fit: BoxFit.cover,
-          width: size,
-          height: size,
-          cacheWidth: 128,
-          cacheHeight: 128,
-          filterQuality: FilterQuality.low,
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            return ColoredBox(
-              color: colorScheme.surfaceContainerHighest,
-              child: Icon(
-                Icons.image_outlined,
-                size: 22,
-                color: colorScheme.outline,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Image.network(
+                url,
+                fit: BoxFit.cover,
+                width: size,
+                height: size,
+                cacheWidth: 128,
+                cacheHeight: 128,
+                filterQuality: FilterQuality.low,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return ColoredBox(
+                    color: colorScheme.surfaceContainerHighest,
+                    child: Icon(
+                      Icons.image_outlined,
+                      size: 22,
+                      color: colorScheme.outline,
+                    ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  return ColoredBox(
+                    color: colorScheme.surfaceContainerHighest,
+                    child: Icon(
+                      Icons.image_not_supported_outlined,
+                      size: 20,
+                      color: colorScheme.outline,
+                    ),
+                  );
+                },
               ),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            return ColoredBox(
-              color: colorScheme.surfaceContainerHighest,
-              child: Icon(
-                Icons.image_not_supported_outlined,
-                size: 20,
-                color: colorScheme.outline,
+            ),
+          ),
+          if (isInQuote)
+            const Positioned(
+              top: -2,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
+                  ),
+                  child: SizedBox(width: 10, height: 10),
+                ),
               ),
-            );
-          },
-        ),
+            ),
+        ],
       ),
     );
   }
@@ -12248,7 +12319,7 @@ class _SetupTab extends StatelessWidget {
 }
 
 class _CameraScannerPage extends StatefulWidget {
-  final ValueChanged<String> onDetect;
+  final Future<_CameraScanOverlayUpdate?> Function(String) onDetect;
 
   const _CameraScannerPage({
     required this.onDetect,
@@ -12258,12 +12329,34 @@ class _CameraScannerPage extends StatefulWidget {
   State<_CameraScannerPage> createState() => _CameraScannerPageState();
 }
 
+class _CameraScanOverlayUpdate {
+  final String itemNumber;
+  final int quantity;
+
+  const _CameraScanOverlayUpdate({
+    required this.itemNumber,
+    required this.quantity,
+  });
+}
+
 class _CameraScannerPageState extends State<_CameraScannerPage> {
   final MobileScannerController _controller = MobileScannerController();
   static const Duration _duplicateScanCooldown = Duration(milliseconds: 1200);
   String? _lastScannedValue;
   DateTime? _lastScannedAt;
   bool _torchEnabled = false;
+  String _cameraOverlayText = 'Qty: 0';
+  String? _cameraOverlayItemNumber;
+
+  String _cameraScanQtyLabel() => _cameraOverlayText;
+
+  void _updateCameraOverlayQtyForScanResult(_CameraScanOverlayUpdate result) {
+    if (!mounted) return;
+    setState(() {
+      _cameraOverlayItemNumber = result.itemNumber;
+      _cameraOverlayText = 'Qty: ${result.quantity}';
+    });
+  }
 
   Future<void> _toggleTorch() async {
     final state = _controller.value;
@@ -12281,7 +12374,7 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
     super.dispose();
   }
 
-  void _handleBarcode(BarcodeCapture capture) {
+  Future<void> _handleBarcode(BarcodeCapture capture) async {
     for (final barcode in capture.barcodes) {
       final rawValue = barcode.rawValue;
       if (rawValue == null) continue;
@@ -12296,9 +12389,12 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
 
       _lastScannedValue = raw;
       _lastScannedAt = now;
-      widget.onDetect(raw);
+      final overlayUpdate = await widget.onDetect(raw);
       if (mounted) {
         setState(() {});
+      }
+      if (overlayUpdate != null) {
+        _updateCameraOverlayQtyForScanResult(overlayUpdate);
       }
       return;
     }
@@ -12333,6 +12429,27 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
           MobileScanner(
             controller: _controller,
             onDetect: _handleBarcode,
+          ),
+          Positioned(
+            top: 12,
+            right: 12,
+            child: IgnorePointer(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _cameraScanQtyLabel(),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ),
           ),
           Align(
             alignment: Alignment.bottomCenter,
