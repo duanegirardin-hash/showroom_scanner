@@ -8092,20 +8092,36 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return _orderLineByKey[key]?.quantity ?? 0;
   }
 
+  /// Value passed to [_enqueueScan] / [_processScan]: prefer UPC, else item #.
+  /// Must contain at least one digit (same gate as [_processScan]).
+  String? _ecatalogScanPayloadForProduct(Product product) {
+    final upc = product.upc.trim();
+    if (upc.isNotEmpty && digitsOnly(upc).isNotEmpty) {
+      return upc;
+    }
+    final item = product.itemNumber.trim();
+    if (item.isNotEmpty && digitsOnly(item).isNotEmpty) {
+      return item;
+    }
+    return null;
+  }
+
   void _incrementCatalogProductQty(Product product) {
-    unawaited(_addCatalogProductToCurrentQuote(product));
+    final payload = _ecatalogScanPayloadForProduct(product);
+    if (payload == null) {
+      debugPrint(
+        '[ECatalog] add skipped: no scannable digits in UPC or item # '
+        '(item=${product.itemNumber})',
+      );
+      return;
+    }
+    _enqueueScan(payload);
   }
 
   void _decrementCatalogProductQty(Product product) {
     final line = _orderLineByKey[_orderLineKeyForProduct(product)];
     if (line == null) return;
     _decreaseLineQty(line);
-  }
-
-  Future<void> _addCatalogProductToCurrentQuote(Product product) async {
-    await _ensureRoutingForProduct(product);
-    final bucket = _resolveQuoteBucketForProduct(product);
-    _addProduct(product, 'ECATALOG', bucket: bucket);
   }
 
   Widget _buildECatalogTab() {
