@@ -1537,10 +1537,12 @@ class _LoadQuoteDialogContent extends StatefulWidget {
 
 class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
   late final TextEditingController _searchController;
+  late final List<SavedQuoteInfo> _quotes;
 
   @override
   void initState() {
     super.initState();
+    _quotes = List<SavedQuoteInfo>.from(widget.allQuotes);
     _searchController = TextEditingController();
     _searchController.addListener(() => setState(() {}));
 
@@ -1573,7 +1575,7 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
   @override
   Widget build(BuildContext context) {
     final q = _searchController.text.trim().toLowerCase();
-    final filtered = widget.allQuotes.where((info) {
+    final filtered = _quotes.where((info) {
       // Use raw fields for searching so user can type either
       // quote name, customer name, date text, or even pieces
       // of the combined "Customer: X – Quote: Y" label.
@@ -1597,13 +1599,9 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
     }).toList();
 
     final media = MediaQuery.of(context);
-    // Keep dialog comfortably within view in both orientations and when the
-    // on-screen keyboard is visible by respecting viewInsets (e.g. keyboard).
-    final availableHeight =
-        media.size.height - media.viewInsets.vertical - 32; // safety margin
-    final double maxHeight = availableHeight > 0
-        ? availableHeight * 0.75
-        : media.size.height * 0.6;
+    // Keep panel size stable while typing/searching: do not resize with
+    // keyboard insets; use an internal list scroll area instead.
+    final double maxHeight = media.size.height * 0.75;
 
     return SizedBox(
       width: double.maxFinite,
@@ -1770,13 +1768,19 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                                 await widget.onRemoveQuote(
                                                   info.id,
                                                 );
-                                                widget.allQuotes.removeWhere(
-                                                  (e) => e.id == info.id,
-                                                );
                                                 if (mounted) {
-                                                  Navigator.of(
-                                                    widget.dialogContext,
-                                                  ).pop('removed:${info.id}');
+                                                  bool becameEmpty = false;
+                                                  setState(() {
+                                                    _quotes.removeWhere(
+                                                      (e) => e.id == info.id,
+                                                    );
+                                                    becameEmpty = _quotes.isEmpty;
+                                                  });
+                                                  if (becameEmpty) {
+                                                    FocusScope.of(context)
+                                                        .unfocus();
+                                                    _searchController.clear();
+                                                  }
                                                 }
                                               }
                                             },
@@ -1888,14 +1892,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   String _catalogSearchQuery = '';
   /// null means "All Categories".
   String? _selectedCatalogCategory;
-  /// null means "All Subcategories".
-  String? _selectedCatalogSubCategory;
+  /// null means "All Product Types".
+  String? _selectedCatalogProductType;
+  bool _catalogNewReleaseOnly = false;
+  bool _catalogPsOnly = false;
   String _catalogFilteredCacheKey = '';
   List<Product>? _catalogFilteredProductsCache;
   List<String>? _catalogDistinctCategories;
   int? _catalogDistinctCategoriesProductCount;
-  String? _catalogSubcategoryOptionsCacheKey;
-  List<String>? _catalogSubcategoryOptionsCache;
+  String? _catalogProductTypeOptionsCacheKey;
+  List<String>? _catalogProductTypeOptionsCache;
 
   late final AudioPlayer _goodScanPlayer;
   late final AudioPlayer _goodScanPlayer2;
@@ -1987,7 +1993,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Serialize rapid-fire scans so they are processed one at a time in order.
   bool _isProcessingScan = false;
-  final Queue<String> _pendingScans = Queue<String>();
+  final Queue<({String value, String source})> _pendingScans =
+      Queue<({String value, String source})>();
 
   List<Customer> _customers = [];
   final Map<String, Customer> _customersByKey = {};
@@ -2047,6 +2054,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       } catch (e, st) {
         debugPrint('[Startup] prune-all failed: $e\n$st');
       }
+      _discardWorkingOrderIfNoCustomerSelected();
     });
 
     // Keep startup focus recovery reliable, but avoid a long chain of delayed
@@ -2547,7 +2555,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Future<void> _deliverScanFeedbackSounds(
     ScanFeedbackType type,
     int sampleId,
+    String source,
   ) async {
+    if (source == 'ecatalog') {
+      await _playEcatalogClick();
+      if (sampleId > 0) {
+        _logScanPerfStep(sampleId, 'click triggered (ecatalog)');
+      }
+      HapticFeedback.selectionClick();
+      return;
+    }
+
     await _stopAllSounds();
     if (!mounted) return;
     if (type == ScanFeedbackType.successNewItem ||
@@ -2567,7 +2585,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  void _triggerScanFeedback(ScanFeedbackType type) {
+  Future<void> _playEcatalogClick() async {
+    try {
+      await SystemSound.play(SystemSoundType.click);
+    } catch (_) {
+      // No-op fallback: ECatalog flow should remain beep-free if click is unavailable.
+    }
+  }
+
+  void _triggerScanFeedback(
+    ScanFeedbackType type, {
+    String source = 'scanner',
+  }) {
     final int sampleId = _currentScanSampleId;
     _scanFeedbackTimer?.cancel();
 
@@ -2579,7 +2608,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     // Ensure only one sound plays per scan / entry: finish pause on the error
     // player before seek/resume, or pause races with replay on the same native player.
-    unawaited(_deliverScanFeedbackSounds(type, sampleId));
+    unawaited(_deliverScanFeedbackSounds(type, sampleId, source));
 
     if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
       debugPrint(
@@ -3351,7 +3380,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         );
       } else {
         _debugLogQuoteRouting(
-          '[Routing] No customer selected — routing/switch skipped (item still added to current quote)',
+          '[Routing] No customer selected — routing/switch skipped (no order line added)',
         );
       }
       return;
@@ -5545,6 +5574,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _selectedCustomer = null;
       }
       scheduleMicrotask(() => _reapplyLocalAddedCustomers());
+      _discardWorkingOrderIfNoCustomerSelected();
     }
   }
 
@@ -6074,6 +6104,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _selectedCustomer = null;
       }
       scheduleMicrotask(() => _reapplyLocalAddedCustomers());
+      _discardWorkingOrderIfNoCustomerSelected();
     }
 
     final trimmed = rawCsv.trim();
@@ -6466,6 +6497,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   double _getRegularOrderTotal() => _regularOrderTotal;
 
+  String _formatCurrency(double amount) {
+    final negative = amount < 0;
+    final absolute = amount.abs();
+    final fixed = absolute.toStringAsFixed(2);
+    final dotIndex = fixed.indexOf('.');
+    final whole = dotIndex >= 0 ? fixed.substring(0, dotIndex) : fixed;
+    final cents = dotIndex >= 0 ? fixed.substring(dotIndex) : '.00';
+    final withCommas = whole.replaceAllMapped(
+      RegExp(r'\B(?=(\d{3})+(?!\d))'),
+      (_) => ',',
+    );
+    return '${negative ? '-' : ''}\$$withCommas$cents';
+  }
+
   void _recalculateTotals() {
     int units = 0;
     double regularSum = 0.0;
@@ -6534,13 +6579,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     });
   }
 
-  void _addProduct(
+  /// Returns false when the add was blocked (e.g. no customer selected).
+  bool _addProduct(
     Product product,
     String source, {
     required QuoteBucketDefinition bucket,
     /// When true (scanner path only): reveal/highlight the row instead of [_scrollToTopSoon].
     bool scheduleScanTabOrderRowReveal = false,
+    String feedbackSource = 'scanner',
   }) {
+    if (!_requireSelectedCustomerForWorkingOrder()) return false;
+
     OrderLine line;
     final String key = _orderLineKeyForProduct(product);
     final bool isExistingLine = _orderLineByKey.containsKey(key);
@@ -6615,10 +6664,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       isExistingLine
           ? ScanFeedbackType.successExistingItem
           : ScanFeedbackType.successNewItem,
+      source: feedbackSource,
     );
+    return true;
   }
 
-  Future<Product?> _processScan(String value) async {
+  Future<Product?> _processScan(
+    String value, {
+    String source = 'scanner',
+  }) async {
     try {
       final int sampleId = _currentScanSampleId;
       if (sampleId > 0) {
@@ -6677,7 +6731,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             _logScanPerfStep(sampleId, 'UI refresh triggered');
           });
         }
-        _triggerScanFeedback(ScanFeedbackType.notFound);
+        _triggerScanFeedback(ScanFeedbackType.notFound, source: source);
         _restoreScanFieldFocus();
         if (sampleId > 0) {
           _logScanPerfStep(sampleId, 'app ready for next scan');
@@ -6688,19 +6742,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       await _ensureRoutingForProduct(product);
       final bucket = _resolveQuoteBucketForProduct(product);
-      _addProduct(
+      final added = _addProduct(
         product,
         raw,
         bucket: bucket,
         scheduleScanTabOrderRowReveal: true,
+        feedbackSource: source,
       );
       _restoreScanFieldFocus();
       if (sampleId > 0) {
         _logScanPerfStep(sampleId, 'app ready for next scan');
-        _finishScanPerfSample(sampleId, outcome: 'item-added');
+        _finishScanPerfSample(
+          sampleId,
+          outcome: added ? 'item-added' : 'no-customer',
+        );
         _currentScanSampleId = 0;
       }
-      return product;
+      return added ? product : null;
     } catch (e) {
       final int sampleId = _currentScanSampleId;
       if (!mounted) return null;
@@ -6719,14 +6777,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  void _enqueueScan(String value) {
+  void _enqueueScan(
+    String value, {
+    String source = 'scanner',
+  }) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return;
     if (_currentScanSampleId > 0) {
       _logScanPerfStep(_currentScanSampleId, 'scan received');
     }
 
-    _pendingScans.addLast(trimmed);
+    _pendingScans.addLast((value: trimmed, source: source));
     if (_isProcessingScan) {
       return;
     }
@@ -6768,7 +6829,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     try {
       while (_pendingScans.isNotEmpty && mounted) {
         final next = _pendingScans.removeFirst();
-        await _processScan(next);
+        await _processScan(next.value, source: next.source);
       }
     } finally {
       _isProcessingScan = false;
@@ -6931,10 +6992,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return;
       }
 
-      _quickEntryController.clear();
       await _ensureRoutingForProduct(product);
       final bucket = _resolveQuoteBucketForProduct(product);
-      _addProduct(product, input, bucket: bucket);
+      final added = _addProduct(product, input, bucket: bucket);
+      if (!added) return;
+
+      _quickEntryController.clear();
 
       if (_searchResults.isNotEmpty) {
         _setStateDebug('quick_entry_clear_search_after_add', () {
@@ -7153,13 +7216,98 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _requestScannerFocus();
   }
 
+  /// Shared gate for any path that builds or mutates the working order (scan,
+  /// quick entry, search add, eCatalog add, qty changes). Browsing/search without
+  /// a customer stays allowed; order work requires selection first.
+  bool _requireSelectedCustomerForWorkingOrder() {
+    if (_selectedCustomer != null) return true;
+    if (!mounted) return false;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Please select a customer first.')),
+    );
+    return false;
+  }
+
+  /// Clears persisted in-memory workspace when no customer is selected (invalid
+  /// state from older builds or bad restores). Optional snackbar when user-facing.
+  void _discardWorkingOrderIfNoCustomerSelected({bool showMessage = false}) {
+    if (_selectedCustomer != null) return;
+    if (_currentQuoteId == null && _orderLines.isEmpty) return;
+
+    void clear() {
+      _currentQuoteId = null;
+      _activeQuoteBucketKey = _defaultQuoteBucketDefinition.bucketKey;
+      _activeQuoteBucketLabel = _defaultQuoteBucketDefinition.displayLabel;
+      _orderLines.clear();
+      _orderLineByKey.clear();
+      _orderListVersion += 1;
+      _recalculateTotals();
+      _quoteNameController.text = 'NEW QUOTE';
+      _savedQuoteNameBeforeEdit = 'NEW QUOTE';
+      _quoteNameUserEdited = false;
+      _selectedLine = null;
+      _resetQuoteDisplayAndScanState();
+      _quickEntryStatus = '-';
+      _status = 'Select a customer to start an order';
+    }
+
+    if (mounted) {
+      _setStateDebug('discard_workspace_no_customer', clear);
+    } else {
+      clear();
+    }
+    if (showMessage && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a customer first.')),
+      );
+    }
+  }
+
+  Future<Customer?> _resolveCustomerForActiveQuoteIndexRow(String quoteId) async {
+    final idx = await _loadQuoteIndex();
+    SavedQuoteInfo? row;
+    for (final q in idx) {
+      if (q.id == quoteId) {
+        row = q;
+        break;
+      }
+    }
+    if (row == null) return null;
+    final wantId = row.customerId.trim();
+    final wantName = row.customerName.trim().toLowerCase();
+    if (wantId.isNotEmpty) {
+      for (final c in _customers) {
+        if (c.id.trim() == wantId) return c;
+      }
+    }
+    if (wantName.isNotEmpty) {
+      for (final c in _customers) {
+        final dn = c.displayName.trim().toLowerCase();
+        final cn = c.companyName.trim().toLowerCase();
+        if (dn == wantName || cn == wantName) return c;
+      }
+    }
+    return null;
+  }
+
   Future<void> _confirmNewQuote() async {
     if (!mounted) return;
+    // Create Quote must not require a pre-selected customer: open the picker first,
+    // then continue into the same quote flow. Working-order paths still use
+    // [_requireSelectedCustomerForWorkingOrder].
+    if (_selectedCustomer == null) {
+      if (_customers.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Load customers CSV first.')),
+        );
+        return;
+      }
+      await _showSelectCustomerDialog();
+      if (!mounted || _selectedCustomer == null) return;
+    }
 
     final hasItems = _orderLines.isNotEmpty;
-
-    final customerForNewQuote = await _ensureCustomerForNewQuote();
-    if (customerForNewQuote == null || !mounted) return;
+    final customerForNewQuote = _selectedCustomer!;
 
     // Only after a customer is assigned do we ask whether to proceed.
     final confirm = await showDialog<bool>(
@@ -7192,41 +7340,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (!mounted) return;
 
     await _startNewQuote(customerForNewQuote);
-  }
-
-  Future<Customer?> _ensureCustomerForNewQuote() async {
-    if (_selectedCustomer != null) return _selectedCustomer;
-
-    final continueToSelect = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Select Customer'),
-          content: const Text(
-            'A customer is required before creating a quote.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Continue'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (continueToSelect != true || !mounted) return null;
-
-    await _showSelectCustomerDialog();
-    if (!mounted) return null;
-    if (_selectedCustomer == null) {
-      setState(() => _status = 'Create quote canceled: customer required');
-    }
-    return _selectedCustomer;
   }
 
   Future<void> _startNewQuote(
@@ -8025,56 +8138,47 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return list;
   }
 
-  /// Distinct non-empty subcategories, optionally scoped to [selectedCategory].
-  List<String> _catalogSubcategoriesForSelectedCategory() {
+  /// Distinct non-empty product types, optionally scoped to selected category.
+  List<String> _catalogProductTypesForSelectedCategory() {
     final n = _productsByItemNumber.length;
     final cat = _selectedCatalogCategory;
     final key = '$n|${cat ?? ''}';
-    if (_catalogSubcategoryOptionsCacheKey == key &&
-        _catalogSubcategoryOptionsCache != null) {
-      return _catalogSubcategoryOptionsCache!;
+    if (_catalogProductTypeOptionsCacheKey == key &&
+        _catalogProductTypeOptionsCache != null) {
+      return _catalogProductTypeOptionsCache!;
     }
     final set = <String>{};
     for (final p in _productsByItemNumber.values) {
       if (cat != null && p.category.trim() != cat) continue;
-      final s = p.subCategory.trim();
-      if (s.isNotEmpty) set.add(s);
+      final productType = p.productType.trim();
+      if (productType.isNotEmpty) set.add(productType);
     }
     final list = set.toList()..sort();
-    _catalogSubcategoryOptionsCacheKey = key;
-    _catalogSubcategoryOptionsCache = list;
+    _catalogProductTypeOptionsCacheKey = key;
+    _catalogProductTypeOptionsCache = list;
     return list;
-  }
-
-  bool _catalogSubcategoryValidForCategorySelection(
-    String sub,
-    String? categorySelection,
-  ) {
-    for (final p in _productsByItemNumber.values) {
-      if (categorySelection != null && p.category.trim() != categorySelection) {
-        continue;
-      }
-      if (p.subCategory.trim() == sub) return true;
-    }
-    return false;
   }
 
   List<Product> _filteredCatalogProducts() {
     final q = _catalogSearchQuery.trim().toLowerCase();
     final cat = _selectedCatalogCategory;
-    final subcats = _catalogSubcategoriesForSelectedCategory();
-    final subRaw = _selectedCatalogSubCategory;
-    final sub =
-        subRaw != null && subcats.contains(subRaw) ? subRaw : null;
+    final productTypes = _catalogProductTypesForSelectedCategory();
+    final typeRaw = _selectedCatalogProductType;
+    final productType =
+        typeRaw != null && productTypes.contains(typeRaw) ? typeRaw : null;
+    final newOnly = _catalogNewReleaseOnly;
+    final psOnly = _catalogPsOnly;
     final key =
-        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${sub ?? ''}';
+        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${productType ?? ''}|$newOnly|$psOnly';
     if (_catalogFilteredCacheKey == key && _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
     }
     final out = <Product>[];
     for (final p in _productsByItemNumber.values) {
       if (cat != null && p.category.trim() != cat) continue;
-      if (sub != null && p.subCategory.trim() != sub) continue;
+      if (productType != null && p.productType.trim() != productType) continue;
+      if (newOnly && !p.isNewRelease) continue;
+      if (psOnly && !p.isPs) continue;
       final matchesQuery = q.isEmpty ||
           p.itemNumber.toLowerCase().contains(q) ||
           p.description.toLowerCase().contains(q);
@@ -8115,7 +8219,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       return;
     }
-    _enqueueScan(payload);
+    _enqueueScan(payload, source: 'ecatalog');
   }
 
   void _decrementCatalogProductQty(Product product) {
@@ -8131,7 +8235,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       useSafeArea: true,
       showDragHandle: true,
       builder: (context) {
+        final safeBottom = MediaQuery.of(context).padding.bottom;
         return SingleChildScrollView(
+          padding: EdgeInsets.only(bottom: safeBottom + 16),
           child: _ECatalogProductDetailSheet(product: product),
         );
       },
@@ -8147,20 +8253,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     final filtered = _filteredCatalogProducts();
     final categories = _catalogCategories();
-    final subcategories = _catalogSubcategoriesForSelectedCategory();
-    final validatedCatalogSubcategory =
-        _selectedCatalogSubCategory != null &&
-                subcategories.contains(_selectedCatalogSubCategory)
-            ? _selectedCatalogSubCategory
+    final productTypes = _catalogProductTypesForSelectedCategory();
+    final validatedCatalogProductType =
+        _selectedCatalogProductType != null &&
+                productTypes.contains(_selectedCatalogProductType)
+            ? _selectedCatalogProductType
             : null;
-    if (_selectedCatalogSubCategory != null &&
-        !subcategories.contains(_selectedCatalogSubCategory!)) {
+    if (_selectedCatalogProductType != null &&
+        !productTypes.contains(_selectedCatalogProductType!)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        setState(() => _selectedCatalogSubCategory = null);
+        setState(() => _selectedCatalogProductType = null);
       });
     }
     final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    final int quoteItemCount = _orderLines.length;
     return Padding(
       padding: const EdgeInsets.all(8),
       child: Column(
@@ -8173,6 +8281,45 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               hintText: 'Item # or description',
             ),
             textInputAction: TextInputAction.search,
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              FilterChip(
+                label: const Text('New Release'),
+                selected: _catalogNewReleaseOnly,
+                onSelected: (selected) {
+                  setState(() => _catalogNewReleaseOnly = selected);
+                },
+              ),
+              FilterChip(
+                label: const Text('PS'),
+                selected: _catalogPsOnly,
+                onSelected: (selected) {
+                  setState(() => _catalogPsOnly = selected);
+                },
+              ),
+              TextButton.icon(
+                onPressed: (_catalogNewReleaseOnly ||
+                        _catalogPsOnly ||
+                        _selectedCatalogCategory != null ||
+                        _selectedCatalogProductType != null)
+                    ? () {
+                        setState(() {
+                          _catalogNewReleaseOnly = false;
+                          _catalogPsOnly = false;
+                          _selectedCatalogCategory = null;
+                          _selectedCatalogProductType = null;
+                        });
+                      }
+                    : null,
+                icon: const Icon(Icons.clear),
+                label: const Text('Clear Filters'),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
           InputDecorator(
@@ -8201,13 +8348,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                 onChanged: (v) {
                   setState(() {
                     _selectedCatalogCategory = v;
-                    final sub = _selectedCatalogSubCategory;
-                    if (sub != null &&
-                        !_catalogSubcategoryValidForCategorySelection(
-                          sub,
-                          v,
+                    final selectedType = _selectedCatalogProductType;
+                    if (selectedType != null &&
+                        !_catalogProductTypesForSelectedCategory().contains(
+                          selectedType,
                         )) {
-                      _selectedCatalogSubCategory = null;
+                      _selectedCatalogProductType = null;
                     }
                   });
                 },
@@ -8217,29 +8363,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           const SizedBox(height: 8),
           InputDecorator(
             decoration: const InputDecoration(
-              labelText: 'Subcategory',
+              labelText: 'Product Type',
             ),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String?>(
                 isExpanded: true,
-                value: validatedCatalogSubcategory,
+                value: validatedCatalogProductType,
                 items: [
                   const DropdownMenuItem<String?>(
                     value: null,
-                    child: Text('All Subcategories'),
+                    child: Text('All Product Types'),
                   ),
-                  for (final s in subcategories)
+                  for (final productType in productTypes)
                     DropdownMenuItem<String?>(
-                      value: s,
+                      value: productType,
                       child: Text(
-                        s,
+                        productType,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
                 ],
                 onChanged: (v) {
-                  setState(() => _selectedCatalogSubCategory = v);
+                  setState(() => _selectedCatalogProductType = v);
                 },
               ),
             ),
@@ -8259,7 +8405,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     itemCount: filtered.length,
                     itemBuilder: (context, index) {
                       final product = filtered[index];
+                      final line = _orderLineByKey[_orderLineKeyForProduct(product)];
                       final qtyInQuote = _qtyInCurrentQuoteForProduct(product);
+                      final lineTotal = line != null
+                          ? _getDiscountedLineTotal(line)
+                          : 0.0;
+                      final pricingIndicator = _productPricingIndicator(product);
                       final catLabel = product.category.trim().isEmpty
                           ? '—'
                           : product.category.trim();
@@ -8300,14 +8451,36 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                             crossAxisAlignment:
                                                 CrossAxisAlignment.start,
                                             children: [
-                                              Text(
-                                                product.itemNumber,
-                                                style: textTheme.titleSmall
-                                                    ?.copyWith(
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                                              Row(
+                                                children: [
+                                                  Expanded(
+                                                    child: Text(
+                                                      product.itemNumber,
+                                                      style: textTheme.titleSmall
+                                                          ?.copyWith(
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                  ),
+                                                  if (pricingIndicator == 'PS')
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                        left: 6,
+                                                      ),
+                                                      child:
+                                                          _ECatalogProductDetailSheet
+                                                              ._flagChip(
+                                                        context,
+                                                        'PS',
+                                                        colorScheme.primary,
+                                                      ),
+                                                    ),
+                                                ],
                                               ),
                                               const SizedBox(height: 2),
                                               Text(
@@ -8328,10 +8501,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                               ),
                                               const SizedBox(height: 2),
                                               Text(
-                                                '\$${product.price.toStringAsFixed(2)}',
+                                                'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: textTheme.bodySmall
+                                                    ?.copyWith(
+                                                  fontWeight: FontWeight.w500,
+                                                  color: colorScheme
+                                                      .onSurfaceVariant,
+                                                ),
+                                              ),
+                                              Text(
+                                                'Sale: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
                                                 style: textTheme.titleSmall
                                                     ?.copyWith(
-                                                  fontWeight: FontWeight.w600,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: Colors.green.shade800,
                                                 ),
                                               ),
                                             ],
@@ -8343,50 +8530,102 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                 ),
                                 SizedBox(
                                   width: 132,
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
                                     children: [
-                                      IconButton(
-                                        visualDensity: VisualDensity.compact,
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(
-                                          minWidth: 40,
-                                          minHeight: 40,
-                                        ),
-                                        onPressed: qtyInQuote > 0
-                                            ? () => _decrementCatalogProductQty(
-                                                  product,
+                                      SizedBox(
+                                        height: 40,
+                                        child: Align(
+                                          alignment: Alignment.centerRight,
+                                          child: qtyInQuote > 0
+                                              ? Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  children: [
+                                                    IconButton(
+                                                      visualDensity:
+                                                          VisualDensity.compact,
+                                                      padding: EdgeInsets.zero,
+                                                      constraints:
+                                                          const BoxConstraints(
+                                                            minWidth: 40,
+                                                            minHeight: 40,
+                                                          ),
+                                                      onPressed: () =>
+                                                          _decrementCatalogProductQty(
+                                                            product,
+                                                          ),
+                                                      icon: const Icon(
+                                                        Icons
+                                                            .remove_circle_outline,
+                                                      ),
+                                                    ),
+                                                    SizedBox(
+                                                      width: 28,
+                                                      child: Text(
+                                                        '$qtyInQuote',
+                                                        textAlign:
+                                                            TextAlign.center,
+                                                        style: textTheme
+                                                            .titleSmall
+                                                            ?.copyWith(
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .w600,
+                                                            ),
+                                                      ),
+                                                    ),
+                                                    IconButton(
+                                                      visualDensity:
+                                                          VisualDensity.compact,
+                                                      padding: EdgeInsets.zero,
+                                                      constraints:
+                                                          const BoxConstraints(
+                                                            minWidth: 40,
+                                                            minHeight: 40,
+                                                          ),
+                                                      onPressed: () =>
+                                                          _incrementCatalogProductQty(
+                                                            product,
+                                                          ),
+                                                      icon: const Icon(
+                                                        Icons.add_circle_outline,
+                                                      ),
+                                                    ),
+                                                  ],
                                                 )
-                                            : null,
-                                        icon: const Icon(
-                                          Icons.remove_circle_outline,
+                                              : IconButton(
+                                                  visualDensity:
+                                                      VisualDensity.compact,
+                                                  padding: EdgeInsets.zero,
+                                                  constraints:
+                                                      const BoxConstraints(
+                                                        minWidth: 40,
+                                                        minHeight: 40,
+                                                      ),
+                                                  onPressed: () =>
+                                                      _incrementCatalogProductQty(
+                                                        product,
+                                                      ),
+                                                  icon: const Icon(
+                                                    Icons.add_circle_outline,
+                                                  ),
+                                                ),
                                         ),
                                       ),
                                       SizedBox(
-                                        width: 28,
-                                        child: Text(
-                                          '$qtyInQuote',
-                                          textAlign: TextAlign.center,
-                                          style: textTheme.titleSmall
-                                              ?.copyWith(
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ),
-                                      IconButton(
-                                        visualDensity: VisualDensity.compact,
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(
-                                          minWidth: 40,
-                                          minHeight: 40,
-                                        ),
-                                        onPressed: () =>
-                                            _incrementCatalogProductQty(
-                                              product,
-                                            ),
-                                        icon: const Icon(
-                                          Icons.add_circle_outline,
-                                        ),
+                                        height: 16,
+                                        child: qtyInQuote > 0
+                                            ? Text(
+                                                _formatCurrency(lineTotal),
+                                                textAlign: TextAlign.right,
+                                                style: textTheme.bodySmall
+                                                    ?.copyWith(
+                                                  fontWeight: FontWeight.w700,
+                                                  color: colorScheme.primary,
+                                                ),
+                                              )
+                                            : const SizedBox.shrink(),
                                       ),
                                     ],
                                   ),
@@ -8398,6 +8637,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                       );
                     },
                   ),
+          ),
+          const SizedBox(height: 8),
+          Material(
+            color: colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: SafeArea(
+                top: false,
+                minimum: EdgeInsets.zero,
+                child: Text(
+                  '$quoteItemCount items | $_totalUnits qty | ${_formatCurrency(_orderTotal)}',
+                  style: textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -8828,6 +9085,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     bool notifyOnArchiveSideSave = true,
     bool rebindWorkspaceIfArchiveSideSave = false,
   }) async {
+    if (_selectedCustomer == null) {
+      if (_orderLines.isEmpty && _currentQuoteId == null) {
+        return;
+      }
+      _discardWorkingOrderIfNoCustomerSelected();
+      return;
+    }
+
     final name = _quoteNameController.text.trim().isEmpty
         ? 'NEW QUOTE'
         : _quoteNameController.text.trim().toUpperCase();
@@ -9645,6 +9910,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               Customer.fromJson(Map<String, dynamic>.from(customerMap));
         }
       }
+      loadedCustomer ??= await _resolveCustomerForActiveQuoteIndexRow(id);
 
       final newOrderLines = <OrderLine>[];
       final newOrderLineByKey = <String, OrderLine>{};
@@ -9722,6 +9988,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       if (_logicalQuoteBucketKey(activeBucketKey) == _defaultQuoteBucketKey) {
         activeBucketLabel = _defaultQuoteBucketDefinition.displayLabel;
+      }
+
+      if (loadedCustomer == null) {
+        if (!mounted) return;
+        _setStateDebug('load_quote_no_resolved_customer', () {
+          _status = 'Cannot load quote: no matching customer.';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please select a customer first.')),
+        );
+        _requestScannerFocus();
+        return;
       }
 
       void applyWorkspace() {
@@ -9836,31 +10114,42 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final selectedId = await showDialog<String>(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
-          title: const Text('Load Quote'),
-          content: _LoadQuoteDialogContent(
-            allQuotes: allQuotes,
-            formatDate: _formatSavedQuoteDate,
-            dialogContext: ctx,
-            onRemoveQuote: _removeQuoteFromIndex,
-            onShareQuote: _shareQuoteById,
-            searchQuotesFocusNode: _searchQuotesFocusNode,
-          ),
-          actionsAlignment: MainAxisAlignment.start,
-          actionsPadding: const EdgeInsets.fromLTRB(12, 0, 12, 2),
-          buttonPadding: EdgeInsets.zero,
-          actions: [
-            TextButton(
-              style: TextButton.styleFrom(
-                minimumSize: const Size(0, 28),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
+        return MediaQuery.removeViewInsets(
+          removeLeft: true,
+          removeTop: true,
+          removeRight: true,
+          removeBottom: true,
+          context: ctx,
+          child: AlertDialog(
+            insetPadding: const EdgeInsets.symmetric(
+              horizontal: 24,
+              vertical: 24,
             ),
-          ],
+            title: const Text('Load Quote'),
+            content: _LoadQuoteDialogContent(
+              allQuotes: allQuotes,
+              formatDate: _formatSavedQuoteDate,
+              dialogContext: ctx,
+              onRemoveQuote: _removeQuoteFromIndex,
+              onShareQuote: _shareQuoteById,
+              searchQuotesFocusNode: _searchQuotesFocusNode,
+            ),
+            actionsAlignment: MainAxisAlignment.start,
+            actionsPadding: const EdgeInsets.fromLTRB(12, 0, 12, 2),
+            buttonPadding: EdgeInsets.zero,
+            actions: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 28),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -9908,6 +10197,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   void _increaseSelectedLineQty() {
     if (_selectedLine == null) return;
+    if (!_requireSelectedCustomerForWorkingOrder()) return;
 
     setState(() {
       _selectedLine!.quantity += _selectedLine!.product.minOrderQty;
@@ -9920,6 +10210,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   void _decreaseSelectedLineQty() {
     if (_selectedLine == null) return;
+    if (!_requireSelectedCustomerForWorkingOrder()) return;
 
     final line = _selectedLine!;
     final step = line.product.minOrderQty;
@@ -9950,6 +10241,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   void _increaseLineQty(OrderLine line) {
+    if (!_requireSelectedCustomerForWorkingOrder()) return;
     setState(() {
       line.quantity += line.product.minOrderQty;
       _recalculateTotals();
@@ -9959,6 +10251,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   void _decreaseLineQty(OrderLine line) {
+    if (!_requireSelectedCustomerForWorkingOrder()) return;
     final step = line.product.minOrderQty;
     final newQty = line.quantity - step;
 
@@ -10094,7 +10387,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       onTap: () async {
         await _ensureRoutingForProduct(product);
         final bucket = _resolveQuoteBucketForProduct(product);
-        _addProduct(product, 'SEARCH', bucket: bucket);
+        final added = _addProduct(product, 'SEARCH', bucket: bucket);
+        if (!added) return;
         _quickEntryController.clear();
         _setStateDebug('scan_search_tap_clear_results', () {
           _searchResults = [];
@@ -11474,8 +11768,6 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
         _flagChip(context, 'NEW', Colors.blue),
       if (product.isPs) _flagChip(context, 'PS', colorScheme.primary),
       if (product.isNet) _flagChip(context, 'NET', colorScheme.tertiary),
-      if (product.discountEligible)
-        _flagChip(context, 'Discount eligible', _kSuccessGreen),
     ];
 
     return Padding(
