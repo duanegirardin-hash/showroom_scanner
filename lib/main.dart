@@ -8124,6 +8124,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _decreaseLineQty(line);
   }
 
+  void _showECatalogProductDetail(Product product) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) {
+        return SingleChildScrollView(
+          child: _ECatalogProductDetailSheet(product: product),
+        );
+      },
+    );
+  }
+
   Widget _buildECatalogTab() {
     if (_activeTabIndex != 1) {
       return const SizedBox.shrink();
@@ -8267,48 +8281,64 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                               key: ValueKey(product.itemNumber),
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                _ECatalogProductThumbnail(
-                                  product: product,
-                                  isInQuote: qtyInQuote > 0,
-                                ),
-                                const SizedBox(width: 8),
                                 Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        product.itemNumber,
-                                        style: textTheme.titleSmall?.copyWith(
-                                          fontWeight: FontWeight.w600,
+                                  child: InkWell(
+                                    onTap: () =>
+                                        _showECatalogProductDetail(product),
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        _ECatalogProductThumbnail(
+                                          product: product,
+                                          isInQuote: qtyInQuote > 0,
                                         ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        product.description,
-                                        style: textTheme.bodyMedium,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        '$catLabel / $subLabel',
-                                        style: textTheme.bodySmall?.copyWith(
-                                          color: _kSecondaryText,
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                product.itemNumber,
+                                                style: textTheme.titleSmall
+                                                    ?.copyWith(
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                product.description,
+                                                style: textTheme.bodyMedium,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                '$catLabel / $subLabel',
+                                                style: textTheme.bodySmall
+                                                    ?.copyWith(
+                                                  color: _kSecondaryText,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                '\$${product.price.toStringAsFixed(2)}',
+                                                style: textTheme.titleSmall
+                                                    ?.copyWith(
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        '\$${product.price.toStringAsFixed(2)}',
-                                        style: textTheme.titleSmall?.copyWith(
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
+                                      ],
+                                    ),
                                   ),
                                 ),
                                 SizedBox(
@@ -9133,11 +9163,45 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   String _formatQuoteShareAttachmentListPriceCell(double? listUnit) =>
       listUnit == null ? '' : _formatQuoteShareAttachmentCurrency(listUnit);
 
+  num? _parseSortableItemNumber(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    return num.tryParse(trimmed);
+  }
+
+  int _compareItemNumberAscending(String a, String b) {
+    final aTrimmed = a.trim();
+    final bTrimmed = b.trim();
+    final aNumeric = _parseSortableItemNumber(aTrimmed);
+    final bNumeric = _parseSortableItemNumber(bTrimmed);
+    if (aNumeric != null && bNumeric != null) {
+      return aNumeric.compareTo(bNumeric);
+    }
+    if (aNumeric != null && bNumeric == null) return -1;
+    if (aNumeric == null && bNumeric != null) return 1;
+    return aTrimmed.compareTo(bTrimmed);
+  }
+
+  List<T> _sortByItemNumberAscending<T>(
+    Iterable<T> rows,
+    String Function(T row) itemNumberOf,
+  ) {
+    final sorted = rows.toList();
+    sorted.sort(
+      (a, b) => _compareItemNumberAscending(
+        itemNumberOf(a),
+        itemNumberOf(b),
+      ),
+    );
+    return sorted;
+  }
+
   /// [richEmailShareAttachments]: full line detail for Email/Share only (see [_shareQuoteById]).
   /// Default: compact `Item,Quantity` for website upload and other quote CSV exports.
   String _formatQuoteAsCsv(
     Map<String, dynamic> data, {
     bool richEmailShareAttachments = false,
+    bool sortByItemNumberAsc = false,
   }) {
     if (!richEmailShareAttachments) {
       const header = 'Item,Quantity';
@@ -9145,14 +9209,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           data['items'] as List<dynamic>? ??
           [];
       final rows = <String>[header];
+      final csvLines = <({String itemNumber, int qty})>[];
 
       for (final lineJson in lines) {
         final map = Map<String, dynamic>.from(lineJson as Map);
         final itemNumber = (map['itemNumber'] as String?) ?? '';
         final qty = _quantityFromJson(map['quantity']);
-        final itemEscaped =
-            itemNumber.contains(',') ? '"$itemNumber"' : itemNumber;
-        rows.add('$itemEscaped,$qty');
+        csvLines.add((itemNumber: itemNumber, qty: qty));
+      }
+
+      final orderedCsvLines = sortByItemNumberAsc
+          ? _sortByItemNumberAscending(csvLines, (r) => r.itemNumber)
+          : csvLines;
+
+      for (final line in orderedCsvLines) {
+        final itemEscaped = _csvEscape(line.itemNumber);
+        rows.add('$itemEscaped,${line.qty}');
       }
 
       return rows.join('\n');
@@ -9161,7 +9233,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     const header =
         'Item Number,Description,List Price,Price,Qty Ordered,Line Total';
     final rows = <String>[header];
-    for (final r in _iterQuoteShareAttachmentLines(data)) {
+    final richLines = _iterQuoteShareAttachmentLines(data).toList();
+    final orderedRichLines = sortByItemNumberAsc
+        ? _sortByItemNumberAscending(richLines, (r) => r.itemNumber)
+        : richLines;
+    for (final r in orderedRichLines) {
       rows.add(
         [
           _csvEscape(r.itemNumber),
@@ -9178,7 +9254,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Email/share attachment: .xlsx with one row per order line (same columns as rich CSV).
   /// Pricing matches [_formatQuoteAsText] (customer discount on eligible lines).
-  List<int> _buildQuoteEmailExcelBytes(Map<String, dynamic> data) {
+  List<int> _buildQuoteEmailExcelBytes(
+    Map<String, dynamic> data, {
+    bool sortByItemNumberAsc = false,
+  }) {
     final excel = xlsx.Excel.createExcel();
     final sheetName = excel.getDefaultSheet() ?? excel.tables.keys.first;
     final sheet = excel[sheetName];
@@ -9245,8 +9324,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final currencyStyle = xlsx.CellStyle(
       numberFormat: xlsx.NumFormat.custom(formatCode: r'"$"#,##0.00'),
     );
+    final leftAlignStyle = xlsx.CellStyle(
+      horizontalAlign: xlsx.HorizontalAlign.Left,
+    );
+    sheet
+        .cell(
+          xlsx.CellIndex.indexByColumnRow(
+            columnIndex: 0,
+            rowIndex: rowIndex - 1,
+          ),
+        )
+        .cellStyle = leftAlignStyle;
 
-    for (final line in _iterQuoteShareAttachmentLines(data)) {
+    final richLines = _iterQuoteShareAttachmentLines(data).toList();
+    final orderedRichLines = sortByItemNumberAsc
+        ? _sortByItemNumberAscending(richLines, (r) => r.itemNumber)
+        : richLines;
+    for (final line in orderedRichLines) {
       final listPriceCell = line.listUnit == null
           ? cell('')
           : xlsx.DoubleCellValue(line.listUnit!);
@@ -9258,6 +9352,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         xlsx.IntCellValue(line.qty),
         xlsx.DoubleCellValue(line.lineTotal),
       ]);
+      sheet
+          .cell(
+            xlsx.CellIndex.indexByColumnRow(
+              columnIndex: 0,
+              rowIndex: rowIndex,
+            ),
+          )
+          .cellStyle = leftAlignStyle;
       if (line.listUnit != null) {
         sheet
             .cell(
@@ -9403,7 +9505,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final content = await file.readAsString();
       final data = Map<String, dynamic>.from(jsonDecode(content) as Map);
-      final csv = _formatQuoteAsCsv(data, richEmailShareAttachments: true);
+      final csv = _formatQuoteAsCsv(data, sortByItemNumberAsc: true);
 
       final tempDir = await getTemporaryDirectory();
       final safeName = name
@@ -9468,7 +9570,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           if (dateToken.isNotEmpty) dateToken,
         ].join('_');
         final xlsxPath = '${tempDir.path}/$xlsxBase.xlsx';
-        final xlsxBytes = _buildQuoteEmailExcelBytes(data);
+        final xlsxBytes = _buildQuoteEmailExcelBytes(
+          data,
+          sortByItemNumberAsc: true,
+        );
         await File(xlsxPath).writeAsBytes(xlsxBytes, flush: true);
         attachments.add(
           XFile(
@@ -11318,6 +11423,171 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Read-only ECatalog product detail (bottom sheet body).
+class _ECatalogProductDetailSheet extends StatelessWidget {
+  const _ECatalogProductDetailSheet({required this.product});
+
+  final Product product;
+
+  static Widget _labeledRow(
+    BuildContext context, {
+    required String label,
+    required String value,
+  }) {
+    final textTheme = Theme.of(context).textTheme;
+    final v = value.trim();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 120,
+            child: Text(
+              label,
+              style: textTheme.bodySmall?.copyWith(color: _kSecondaryText),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              v.isEmpty ? '—' : v,
+              style: textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    final url =
+        'https://showroom-images.netlify.app/images/${product.itemNumber.trim()}.jpeg';
+    final flags = <Widget>[
+      if (product.isNewRelease)
+        _flagChip(context, 'NEW', Colors.blue),
+      if (product.isPs) _flagChip(context, 'PS', colorScheme.primary),
+      if (product.isNet) _flagChip(context, 'NET', colorScheme.tertiary),
+      if (product.discountEligible)
+        _flagChip(context, 'Discount eligible', _kSuccessGreen),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Product details',
+            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: AspectRatio(
+              aspectRatio: 4 / 3,
+              child: Image.network(
+                url,
+                fit: BoxFit.cover,
+                cacheWidth: 800,
+                cacheHeight: 600,
+                filterQuality: FilterQuality.low,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return ColoredBox(
+                    color: colorScheme.surfaceContainerHighest,
+                    child: Icon(
+                      Icons.image_outlined,
+                      size: 48,
+                      color: colorScheme.outline,
+                    ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  return ColoredBox(
+                    color: colorScheme.surfaceContainerHighest,
+                    child: Icon(
+                      Icons.image_not_supported_outlined,
+                      size: 48,
+                      color: colorScheme.outline,
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          _labeledRow(context, label: 'Item #', value: product.itemNumber),
+          _labeledRow(context, label: 'Description', value: product.description),
+          _labeledRow(context, label: 'UPC', value: product.upc),
+          _labeledRow(
+            context,
+            label: 'List price',
+            value: product.listPrice > 0
+                ? '\$${product.listPrice.toStringAsFixed(2)}'
+                : '',
+          ),
+          _labeledRow(
+            context,
+            label: 'Price',
+            value: '\$${product.price.toStringAsFixed(2)}',
+          ),
+          _labeledRow(context, label: 'Product type', value: product.productType),
+          _labeledRow(context, label: 'Category', value: product.category),
+          _labeledRow(context, label: 'Sub-category', value: product.subCategory),
+          _labeledRow(
+            context,
+            label: 'Min order qty',
+            value: product.minOrderQty > 0
+                ? '${product.minOrderQty}'
+                : '',
+          ),
+          _labeledRow(
+            context,
+            label: 'Case qty',
+            value: product.caseQty > 0 ? '${product.caseQty}' : '',
+          ),
+          if (flags.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Flags',
+              style: textTheme.bodySmall?.copyWith(color: _kSecondaryText),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: flags,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static Widget _flagChip(BuildContext context, String text, Color color) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Text(
+          text,
+          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
+        ),
+      ),
     );
   }
 }
