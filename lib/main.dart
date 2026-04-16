@@ -1826,6 +1826,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Temporary: starter quote + import reuse + export-empty skips (set false to silence).
   static const bool _quoteImportExportEmptyDebug = true;
 
+  /// ECatalog list price column: set `true` briefly to log branch selection per row (debug builds only).
+  static const bool _ecatalogListPriceColumnDebug = false;
+
   final FocusNode _scannerFocusNode = FocusNode();
   final TextEditingController _scannerController = TextEditingController();
 
@@ -8228,6 +8231,112 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _decreaseLineQty(line);
   }
 
+  /// ECatalog catalog row only. Branch order: (1) PS → Reg.+Sale; (2) NET → Price;
+  /// (3) discount-eligible + customer discount → Reg.+Your Price; (4) Price.
+  /// Uses [Product.isPs] / [Product.isNet] (same source as chips and [_productPricingState]).
+  Widget _buildECatalogListPriceColumn({
+    required Product product,
+    required TextTheme textTheme,
+    required ColorScheme colorScheme,
+  }) {
+    final isPs = product.isPs;
+    final isNet = product.isNet;
+    final discountEligible = product.discountEligible;
+    final customerDiscountPct = _getCustomerDiscountPercent();
+    final hasCustomerDiscount = customerDiscountPct > 0;
+    final showRegAndYourPrice = discountEligible && hasCustomerDiscount;
+
+    if (kDebugMode && _ecatalogListPriceColumnDebug) {
+      final branch = isPs
+          ? 'PS'
+          : isNet
+              ? 'NET'
+              : showRegAndYourPrice
+                  ? 'DISCOUNT'
+                  : 'PRICE_ONLY';
+      debugPrint(
+        '[ECatalog price] #${product.itemNumber} | "${product.description}" '
+        '| psRaw="${product.psRaw}" isPs=$isPs | isNet=$isNet '
+        '| discountEligible=$discountEligible | custDiscPct=$customerDiscountPct '
+        '| branch=$branch',
+      );
+    }
+
+    if (isPs) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: textTheme.bodySmall?.copyWith(
+              fontWeight: FontWeight.w500,
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+          Text(
+            'Sale: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+              color: Colors.green.shade800,
+            ),
+          ),
+        ],
+      );
+    }
+    if (isNet) {
+      return Text(
+        'Price: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: textTheme.titleSmall?.copyWith(
+          fontWeight: FontWeight.w700,
+        ),
+      );
+    }
+    if (showRegAndYourPrice) {
+      final catalogLine = OrderLine(product: product, quantity: 1, scans: 0);
+      final yourPrice =
+          _roundedUnitPrice(_getDiscountedUnitPrice(catalogLine));
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: textTheme.bodySmall?.copyWith(
+              fontWeight: FontWeight.w500,
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+          Text(
+            'Your Price: \$${yourPrice.toStringAsFixed(2)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+              color: Colors.green.shade800,
+            ),
+          ),
+        ],
+      );
+    }
+    return Text(
+      'Price: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: textTheme.titleSmall?.copyWith(
+        fontWeight: FontWeight.w700,
+      ),
+    );
+  }
+
   void _showECatalogProductDetail(Product product) {
     showModalBottomSheet<void>(
       context: context,
@@ -8500,26 +8609,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                 overflow: TextOverflow.ellipsis,
                                               ),
                                               const SizedBox(height: 2),
-                                              Text(
-                                                'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: textTheme.bodySmall
-                                                    ?.copyWith(
-                                                  fontWeight: FontWeight.w500,
-                                                  color: colorScheme
-                                                      .onSurfaceVariant,
-                                                ),
-                                              ),
-                                              Text(
-                                                'Sale: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: textTheme.titleSmall
-                                                    ?.copyWith(
-                                                  fontWeight: FontWeight.w700,
-                                                  color: Colors.green.shade800,
-                                                ),
+                                              _buildECatalogListPriceColumn(
+                                                product: product,
+                                                textTheme: textTheme,
+                                                colorScheme: colorScheme,
                                               ),
                                             ],
                                           ),
