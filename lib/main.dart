@@ -1899,6 +1899,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   String? _selectedCatalogProductType;
   bool _catalogNewReleaseOnly = false;
   bool _catalogPsOnly = false;
+  bool _catalogGcOnly = false;
+  bool _catalogInOrderOnly = false;
   String _catalogFilteredCacheKey = '';
   List<Product>? _catalogFilteredProductsCache;
   List<String>? _catalogDistinctCategories;
@@ -8171,8 +8173,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         typeRaw != null && productTypes.contains(typeRaw) ? typeRaw : null;
     final newOnly = _catalogNewReleaseOnly;
     final psOnly = _catalogPsOnly;
+    final gcOnly = _catalogGcOnly;
+    final inOrderOnly = _catalogInOrderOnly;
     final key =
-        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${productType ?? ''}|$newOnly|$psOnly';
+        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${productType ?? ''}|$newOnly|$psOnly|$gcOnly|$inOrderOnly|${_orderLineByKey.length}';
     if (_catalogFilteredCacheKey == key && _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
     }
@@ -8182,6 +8186,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (productType != null && p.productType.trim() != productType) continue;
       if (newOnly && !p.isNewRelease) continue;
       if (psOnly && !p.isPs) continue;
+      if (gcOnly && !_isGiftcraftProduct(p)) continue;
+      if (inOrderOnly && !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
+        continue;
+      }
       final matchesQuery = q.isEmpty ||
           p.itemNumber.toLowerCase().contains(q) ||
           p.description.toLowerCase().contains(q);
@@ -8192,6 +8200,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _catalogFilteredCacheKey = key;
     _catalogFilteredProductsCache = out;
     return out;
+  }
+
+  bool _isGiftcraftProduct(Product product) {
+    final productType = product.productType.trim().toUpperCase();
+    if (productType == 'GIFTCRAFT' || productType == 'GC') return true;
+    final category = product.category.trim().toUpperCase();
+    if (category == 'GIFTCRAFT' || category == 'GC') return true;
+    return product.itemNumber.trim().toUpperCase().startsWith('GC');
   }
 
   int _qtyInCurrentQuoteForProduct(Product product) {
@@ -8411,15 +8427,33 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                   setState(() => _catalogPsOnly = selected);
                 },
               ),
+              FilterChip(
+                label: const Text('GC'),
+                selected: _catalogGcOnly,
+                onSelected: (selected) {
+                  setState(() => _catalogGcOnly = selected);
+                },
+              ),
+              FilterChip(
+                label: const Text('In Order'),
+                selected: _catalogInOrderOnly,
+                onSelected: (selected) {
+                  setState(() => _catalogInOrderOnly = selected);
+                },
+              ),
               TextButton.icon(
                 onPressed: (_catalogNewReleaseOnly ||
                         _catalogPsOnly ||
+                        _catalogGcOnly ||
+                        _catalogInOrderOnly ||
                         _selectedCatalogCategory != null ||
                         _selectedCatalogProductType != null)
                     ? () {
                         setState(() {
                           _catalogNewReleaseOnly = false;
                           _catalogPsOnly = false;
+                          _catalogGcOnly = false;
+                          _catalogInOrderOnly = false;
                           _selectedCatalogCategory = null;
                           _selectedCatalogProductType = null;
                         });
@@ -8504,7 +8538,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             child: filtered.isEmpty
                 ? Center(
                     child: Text(
-                      'No products match',
+                      _catalogInOrderOnly
+                          ? 'No items from this order match the current filter.'
+                          : 'No products match',
                       style: textTheme.bodyLarge?.copyWith(
                         color: _kSecondaryText,
                       ),
