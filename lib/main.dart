@@ -1658,49 +1658,47 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-              Text(
-                'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 4),
-              TextField(
-                controller: _searchController,
-                focusNode: widget.searchQuotesFocusNode,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Search quotes',
-                  hintText: 'Type quote name',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.search),
-                ),
-                onChanged: (_) => setState(() {}),
-                onTapOutside: (_) {
+          Text(
+            'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 4),
+          TextField(
+            controller: _searchController,
+            focusNode: widget.searchQuotesFocusNode,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Search quotes',
+              hintText: 'Type quote name',
+              border: OutlineInputBorder(),
+              prefixIcon: Icon(Icons.search),
+            ),
+            onChanged: (_) => setState(() {}),
+            onTapOutside: (_) {
+              widget.searchQuotesFocusNode.unfocus();
+            },
+          ),
+          const SizedBox(height: 4),
+          Expanded(
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (ScrollNotification n) {
+                if (n is UserScrollNotification) {
                   widget.searchQuotesFocusNode.unfocus();
-                },
-              ),
-              const SizedBox(height: 4),
-              Expanded(
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (ScrollNotification n) {
-                    if (n is UserScrollNotification) {
-                      widget.searchQuotesFocusNode.unfocus();
-                    }
-                    return false;
-                  },
-                  child: filtered.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No matching quotes',
-                            style: TextStyle(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                          ),
-                        )
-                      : ListView.builder(
+                }
+                return false;
+              },
+              child: filtered.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No matching quotes',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
                       itemCount: filtered.length,
                       itemBuilder: (_, i) {
                         final info = filtered[i];
@@ -1859,10 +1857,101 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                         );
                       },
                     ),
-                  ),
-                ),
-              ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Minimal customer picker for full-catalog test/export diagnostics only.
+/// Intentionally avoids shared picker helpers, focus management, and [StatefulBuilder].
+class _SimpleCatalogTestCustomerPickerDialog extends StatefulWidget {
+  const _SimpleCatalogTestCustomerPickerDialog({required this.customers});
+
+  final List<Customer> customers;
+
+  @override
+  State<_SimpleCatalogTestCustomerPickerDialog> createState() =>
+      _SimpleCatalogTestCustomerPickerDialogState();
+}
+
+class _SimpleCatalogTestCustomerPickerDialogState
+    extends State<_SimpleCatalogTestCustomerPickerDialog> {
+  String _searchText = '';
+
+  List<Customer> _filteredCustomers() {
+    final q = _searchText.trim().toLowerCase();
+    if (q.isEmpty) {
+      return widget.customers;
+    }
+    return widget.customers
+        .where(
+          (c) =>
+              c.displayName.toLowerCase().contains(q) ||
+              c.contact.toLowerCase().contains(q) ||
+              c.email.toLowerCase().contains(q) ||
+              c.companyName.toLowerCase().contains(q) ||
+              c.city.toLowerCase().contains(q) ||
+              c.state.toLowerCase().contains(q),
+        )
+        .toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _filteredCustomers();
+    return AlertDialog(
+      title: const Text('Select Customer'),
+      content: SizedBox(
+        width: 400,
+        height: 400,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              autofocus: false,
+              decoration: const InputDecoration(
+                labelText: 'Search customers',
+                hintText: 'Name, contact, email...',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.search),
+              ),
+              onChanged: (v) => setState(() => _searchText = v),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: filtered.isEmpty
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(18),
+                        child: Text('No matching customers'),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: filtered.length,
+                      itemBuilder: (context, i) {
+                        final c = filtered[i];
+                        return ListTile(
+                          title: Text(c.displayName),
+                          subtitle: c.contact.isEmpty
+                              ? null
+                              : Text(c.contact),
+                          onTap: () => Navigator.of(context).pop(c),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
     );
   }
 }
@@ -2022,9 +2111,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   bool _loadingProductsFromWeb = false;
   bool _isLoadingCustomers = false;
 
+  /// Debug Setup: full-catalog Excel export (does not touch quote workspace state).
+  bool _exportingFullCatalogExcel = false;
+
   /// After a CSV/sheet customer reload, used to re-select a locally added customer.
   Customer? _pendingRestoreCustomerAfterLocalMerge;
   bool _editDialogOpen = false;
+
+  /// When true, [_requestScannerFocus] and [_restoreScanFieldFocus] no-op (full catalog test / export flows).
+  bool _suspendScannerFocusRecovery = false;
 
   /// Prevents overlapping order-CSV imports (second tap while apply/write still runs → duplicate ITEMS_NOT_IMPORTED writes).
   bool _orderCsvImportInProgress = false;
@@ -2297,7 +2392,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   bool _onECatalogScrollDismissKeyboard(ScrollNotification notification) {
-    final userInitiated = notification is UserScrollNotification ||
+    final userInitiated =
+        notification is UserScrollNotification ||
         (notification is ScrollStartNotification &&
             notification.dragDetails != null);
     if (!userInitiated) return false;
@@ -2581,10 +2677,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   void _requestScannerFocus() {
+    if (_suspendScannerFocusRecovery) return;
+    debugPrint(
+      '[DependentsDiag] _requestScannerFocus: enter mounted=$mounted '
+      'editDialogOpen=$_editDialogOpen',
+    );
     final primary = FocusManager.instance.primaryFocus;
     final scannerAlreadyFocused = _scannerFocusNode.hasFocus;
     if (scannerAlreadyFocused && !_editDialogOpen && _scanTabActive) {
       _perfLog('focus restore skipped (scanner already focused)');
+      debugPrint(
+        '[DependentsDiag] _requestScannerFocus: early return (scanner already focused)',
+      );
       return;
     }
 
@@ -2599,6 +2703,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           'primaryFocusMatchesScanner=${primary == _scannerFocusNode}',
         );
       }
+      debugPrint(
+        '[DependentsDiag] _requestScannerFocus: early return (!shouldReclaim)',
+      );
       return;
     }
 
@@ -2609,26 +2716,61 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
     }
 
+    debugPrint(
+      '[DependentsDiag] _requestScannerFocus: before FocusScope.of(context).requestFocus(scanner)',
+    );
     FocusScope.of(context).requestFocus(_scannerFocusNode);
+    debugPrint(
+      '[DependentsDiag] _requestScannerFocus: after FocusScope.of(context).requestFocus(scanner)',
+    );
+
+    if (_suspendScannerFocusRecovery) return;
 
     // Only schedule retry pulses when we are actively recovering lost focus.
     // This avoids repeated delayed focus work during normal scan flow.
     if (!scannerAlreadyFocused) {
       const delays = [30, 120];
       for (final ms in delays) {
+        debugPrint(
+          '[DependentsDiag] _requestScannerFocus: before Future.delayed(${ms}ms) retry pulse',
+        );
         Future.delayed(Duration(milliseconds: ms), () {
+          if (_suspendScannerFocusRecovery) return;
+          debugPrint(
+            '[DependentsDiag] _requestScannerFocus: Future.delayed(${ms}ms) retry fired '
+            'mounted=$mounted editDialogOpen=$_editDialogOpen',
+          );
           if (!_shouldReclaimScannerFocus()) return;
           if (!_scannerFocusNode.hasFocus) {
+            debugPrint(
+              '[DependentsDiag] _requestScannerFocus: before FocusScope retry ${ms}ms requestFocus(scanner)',
+            );
             FocusScope.of(context).requestFocus(_scannerFocusNode);
+            debugPrint(
+              '[DependentsDiag] _requestScannerFocus: after FocusScope retry ${ms}ms requestFocus(scanner)',
+            );
           }
         });
+        debugPrint(
+          '[DependentsDiag] _requestScannerFocus: after Future.delayed(${ms}ms) scheduled',
+        );
       }
     }
+
+    if (_suspendScannerFocusRecovery) return;
 
     // Hide the keyboard after focusing the hidden scanner input.
     // Delay slightly to avoid racing with the user's attempt to focus another
     // text field (which can leave the keyboard suppressed).
+    debugPrint(
+      '[DependentsDiag] _requestScannerFocus: before Future.delayed(60ms) TextInput.hide',
+    );
     Future.delayed(const Duration(milliseconds: 60), () {
+      if (_suspendScannerFocusRecovery) return;
+      debugPrint(
+        '[DependentsDiag] _requestScannerFocus: Future.delayed(60ms) hide keyboard fired '
+        'mounted=$mounted editDialogOpen=$_editDialogOpen',
+      );
       if (!mounted || _editDialogOpen) return;
       if (!_scannerFocusNode.hasFocus) return;
 
@@ -2643,27 +2785,65 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       SystemChannels.textInput.invokeMethod('TextInput.hide');
     });
+    debugPrint(
+      '[DependentsDiag] _requestScannerFocus: after Future.delayed(60ms) scheduled',
+    );
+    debugPrint('[DependentsDiag] _requestScannerFocus: exit');
   }
 
   /// Scanner-only focus recovery used after scan processing paths where
   /// rebuilds/snackbars can briefly steal focus from the hidden scanner field.
   void _restoreScanFieldFocus() {
     if (!mounted) return;
+    if (_suspendScannerFocusRecovery) return;
 
     void reclaim() {
+      if (_suspendScannerFocusRecovery) return;
+      debugPrint(
+        '[DependentsDiag] _restoreScanFieldFocus.reclaim: enter mounted=$mounted',
+      );
       if (!mounted) return;
       if (!_scanTabActive || _editDialogOpen) return;
       if (!_shouldReclaimScannerFocus()) return;
       if (!_scannerFocusNode.canRequestFocus) return;
+      debugPrint(
+        '[DependentsDiag] _restoreScanFieldFocus: before FocusScope.requestFocus(scanner)',
+      );
       FocusScope.of(context).requestFocus(_scannerFocusNode);
+      debugPrint(
+        '[DependentsDiag] _restoreScanFieldFocus: after FocusScope.requestFocus(scanner)',
+      );
     }
 
+    if (_suspendScannerFocusRecovery) return;
+
     // First restore after the current frame settles.
+    debugPrint(
+      '[DependentsDiag] _restoreScanFieldFocus: before addPostFrameCallback',
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_suspendScannerFocusRecovery) return;
+      debugPrint(
+        '[DependentsDiag] _restoreScanFieldFocus: addPostFrameCallback fired',
+      );
       reclaim();
     });
+    debugPrint(
+      '[DependentsDiag] _restoreScanFieldFocus: after addPostFrameCallback scheduled',
+    );
+    if (_suspendScannerFocusRecovery) return;
+
     // Then add one small delayed pulse for snackbar/rebuild races.
-    Future.delayed(const Duration(milliseconds: 60), reclaim);
+    debugPrint(
+      '[DependentsDiag] _restoreScanFieldFocus: before Future.delayed(60ms)',
+    );
+    Future.delayed(const Duration(milliseconds: 60), () {
+      if (_suspendScannerFocusRecovery) return;
+      reclaim();
+    });
+    debugPrint(
+      '[DependentsDiag] _restoreScanFieldFocus: after Future.delayed(60ms) scheduled',
+    );
   }
 
   Future<void> _stopAllSounds() async {
@@ -6426,118 +6606,139 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     scheduleMicrotask(() => _reapplyLocalAddedCustomers());
   }
 
-  Future<void> _showSelectCustomerDialog() async {
-    if (_customers.isEmpty) return;
+  /// Isolated minimal picker for full-catalog test/export flows (dependents crash diagnosis).
+  /// Does not use [_runCustomerPickerDialog], focus nodes, or scanner recovery hooks.
+  Future<Customer?> _showSimpleCustomerPickerForCatalogTests() async {
+    if (_customers.isEmpty) return null;
+    return showDialog<Customer>(
+      context: context,
+      builder: (ctx) => _SimpleCatalogTestCustomerPickerDialog(
+        customers: List<Customer>.from(_customers),
+      ),
+    );
+  }
+
+  /// Same UI as [_showSelectCustomerDialog] but does not update [_selectedCustomer]
+  /// or status — for flows that must not touch app quote/customer selection.
+  Future<Customer?> _runCustomerPickerDialog() async {
+    debugPrint('[DependentsDiag] entering _runCustomerPickerDialog');
+    if (_customers.isEmpty) return null;
     _editDialogOpen = true;
     final searchController = TextEditingController();
-    final filtered = <Customer>[];
-    filtered.addAll(_customers);
-    final picked = await showDialog<Customer>(
-      context: context,
-      builder: (ctx) {
-        var didRequestFocus = false;
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            if (!didRequestFocus) {
-              didRequestFocus = true;
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted) return;
-                if (!_searchCustomersFocusNode.hasFocus) {
-                  FocusScope.of(
-                    context,
-                  ).requestFocus(_searchCustomersFocusNode);
-                }
-              });
-              Future.delayed(const Duration(milliseconds: 150), () {
-                if (!mounted) return;
-                if (!_searchCustomersFocusNode.hasFocus) {
-                  FocusScope.of(
-                    context,
-                  ).requestFocus(_searchCustomersFocusNode);
-                }
-              });
-            }
+    try {
+      final filtered = <Customer>[];
+      filtered.addAll(_customers);
+      debugPrint('[DependentsDiag] opening picker dialog');
+      final picked = await showDialog<Customer>(
+        context: context,
+        builder: (ctx) {
+          bool dialogAlive = true;
 
-            void applyCustomerFilter(String query) {
-              final q = query.trim().toLowerCase();
-              filtered
-                ..clear()
-                ..addAll(
-                  _customers.where((c) {
-                    if (q.isEmpty) return true;
-                    return c.displayName.toLowerCase().contains(q) ||
-                        c.contact.toLowerCase().contains(q) ||
-                        c.email.toLowerCase().contains(q) ||
-                        c.companyName.toLowerCase().contains(q) ||
-                        c.city.toLowerCase().contains(q) ||
-                        c.state.toLowerCase().contains(q);
-                  }),
-                );
-              setDialogState(() {});
-            }
+          void popCustomerPicker([Customer? result]) {
+            if (!dialogAlive) return;
+            dialogAlive = false;
+            if (!ctx.mounted) return;
+            Navigator.of(ctx).pop(result);
+          }
 
-            return AlertDialog(
-              title: const Text('Select Customer'),
-              content: SizedBox(
-                width: 400,
-                height: 400,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: searchController,
-                      focusNode: _searchCustomersFocusNode,
-                      autofocus: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Search customers',
-                        hintText: 'Name, contact, email...',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.search),
+          return StatefulBuilder(
+            builder: (_, setDialogState) {
+              void applyCustomerFilter(String query) {
+                if (!dialogAlive || !ctx.mounted) return;
+                final q = query.trim().toLowerCase();
+                filtered
+                  ..clear()
+                  ..addAll(
+                    _customers.where((c) {
+                      if (q.isEmpty) return true;
+                      return c.displayName.toLowerCase().contains(q) ||
+                          c.contact.toLowerCase().contains(q) ||
+                          c.email.toLowerCase().contains(q) ||
+                          c.companyName.toLowerCase().contains(q) ||
+                          c.city.toLowerCase().contains(q) ||
+                          c.state.toLowerCase().contains(q);
+                    }),
+                  );
+                if (!dialogAlive || !ctx.mounted) return;
+                setDialogState(() {});
+              }
+
+              return AlertDialog(
+                title: const Text('Select Customer'),
+                content: SizedBox(
+                  width: 400,
+                  height: 400,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: searchController,
+                        focusNode: _searchCustomersFocusNode,
+                        autofocus: false,
+                        decoration: const InputDecoration(
+                          labelText: 'Search customers',
+                          hintText: 'Name, contact, email...',
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.search),
+                        ),
+                        onChanged: applyCustomerFilter,
                       ),
-                      onChanged: applyCustomerFilter,
-                    ),
-                    const SizedBox(height: 10),
-                    Flexible(
-                      child: filtered.isEmpty
-                          ? const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(18),
-                                child: Text('No matching customers'),
+                      const SizedBox(height: 10),
+                      Flexible(
+                        child: filtered.isEmpty
+                            ? const Center(
+                                child: Padding(
+                                  padding: EdgeInsets.all(18),
+                                  child: Text('No matching customers'),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: filtered.length,
+                                itemBuilder: (_, i) {
+                                  final c = filtered[i];
+                                  return ListTile(
+                                    title: Text(c.displayName),
+                                    subtitle: c.contact.isEmpty
+                                        ? null
+                                        : Text(c.contact),
+                                    onTap: () => popCustomerPicker(c),
+                                  );
+                                },
                               ),
-                            )
-                          : ListView.builder(
-                              itemCount: filtered.length,
-                              itemBuilder: (_, i) {
-                                final c = filtered[i];
-                                return ListTile(
-                                  title: Text(c.displayName),
-                                  subtitle: c.contact.isEmpty
-                                      ? null
-                                      : Text(c.contact),
-                                  onTap: () => Navigator.pop(ctx, c),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, null),
-                  child: const Text('Clear selection'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    _editDialogOpen = false;
+                actions: [
+                  TextButton(
+                    onPressed: () => popCustomerPicker(),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => popCustomerPicker(null),
+                    child: const Text('Clear selection'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+      debugPrint(
+        '[DependentsDiag] closing picker dialog result=$picked',
+      );
+      return picked;
+    } finally {
+      debugPrint(
+        '[DependentsDiag] customer picker finally: dispose search, _editDialogOpen=false',
+      );
+      searchController.dispose();
+      _editDialogOpen = false;
+    }
+  }
+
+  Future<void> _showSelectCustomerDialog() async {
+    final picked = await _runCustomerPickerDialog();
     if (!mounted) return;
     setState(() {
       _selectedCustomer = picked;
@@ -6545,7 +6746,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ? 'Customer cleared'
           : 'Customer: ${picked.displayName}';
     });
+    if (!mounted) return;
+    debugPrint(
+      '[DependentsDiag] _showSelectCustomerDialog: before _requestScannerFocus()',
+    );
     _requestScannerFocus();
+    debugPrint(
+      '[DependentsDiag] _showSelectCustomerDialog: after _requestScannerFocus()',
+    );
   }
 
   Product? _findProduct(String input) {
@@ -8616,646 +8824,661 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           ),
                           textInputAction: TextInputAction.search,
                         ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          FilterChip(
-                            label: const Text('New Items'),
-                            selected: _catalogMerchandising == 'newItems',
-                            onSelected: (selected) {
-                              setState(() {
-                                if (selected) {
-                                  _catalogMerchandising = 'newItems';
-                                } else if (_catalogMerchandising ==
-                                    'newItems') {
-                                  _catalogMerchandising = null;
-                                }
-                                _selectedCatalogSubCategory = null;
-                              });
-                            },
-                          ),
-                          FilterChip(
-                            label: const Text('Everyday'),
-                            selected: _catalogMerchandising == 'everyday',
-                            onSelected: (selected) {
-                              setState(() {
-                                if (selected) {
-                                  _catalogMerchandising = 'everyday';
-                                } else if (_catalogMerchandising ==
-                                    'everyday') {
-                                  _catalogMerchandising = null;
-                                }
-                                _selectedCatalogSubCategory = null;
-                              });
-                            },
-                          ),
-                          FilterChip(
-                            label: const Text('Home Decor'),
-                            selected: _catalogMerchandising == 'homeDecor',
-                            onSelected: (selected) {
-                              setState(() {
-                                if (selected) {
-                                  _catalogMerchandising = 'homeDecor';
-                                } else if (_catalogMerchandising ==
-                                    'homeDecor') {
-                                  _catalogMerchandising = null;
-                                }
-                                _selectedCatalogSubCategory = null;
-                              });
-                            },
-                          ),
-                          FilterChip(
-                            label: const Text('Seasonal'),
-                            selected: _catalogMerchandising == 'seasonal',
-                            onSelected: (selected) {
-                              setState(() {
-                                if (selected) {
-                                  _catalogMerchandising = 'seasonal';
-                                } else if (_catalogMerchandising ==
-                                    'seasonal') {
-                                  _catalogMerchandising = null;
-                                }
-                                _selectedCatalogSubCategory = null;
-                              });
-                            },
-                          ),
-                          FilterChip(
-                            label: const Text('Sale'),
-                            selected: _catalogMerchandising == 'sale',
-                            onSelected: (selected) {
-                              setState(() {
-                                if (selected) {
-                                  _catalogMerchandising = 'sale';
-                                } else if (_catalogMerchandising == 'sale') {
-                                  _catalogMerchandising = null;
-                                }
-                                _selectedCatalogSubCategory = null;
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          FilterChip(
-                            label: const Text('In Order'),
-                            selected: _catalogInOrderOnly,
-                            onSelected: (selected) {
-                              setState(() => _catalogInOrderOnly = selected);
-                            },
-                          ),
-                          TextButton.icon(
-                            onPressed:
-                                (_catalogMerchandising != null ||
-                                    _catalogInOrderOnly ||
-                                    _selectedCatalogCategory != null ||
-                                    _selectedCatalogSubCategory != null)
-                                ? () {
-                                    setState(() {
-                                      _catalogMerchandising = null;
-                                      _catalogInOrderOnly = false;
-                                      _selectedCatalogCategory = null;
-                                      _selectedCatalogSubCategory = null;
-                                    });
-                                  }
-                                : null,
-                            icon: const Icon(Icons.clear),
-                            label: const Text('Clear Filters'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      IntrinsicHeight(
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
                           children: [
-                            Expanded(
-                              child: _ecatalogCatalogFilterDropdown(
-                                labelText: 'Category',
-                                value: validatedCatalogCategory,
-                                items: [
-                                  const DropdownMenuItem<String?>(
-                                    value: null,
-                                    child: Text('All Categories'),
-                                  ),
-                                  for (final c in categories)
-                                    DropdownMenuItem<String?>(
-                                      value: c,
-                                      child: Text(
-                                        c,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                ],
-                                onChanged: (v) {
-                                  setState(() {
-                                    _selectedCatalogCategory = v;
-                                    final selectedSub =
-                                        _selectedCatalogSubCategory;
-                                    if (selectedSub != null &&
-                                        !_catalogSubCategoriesForSelectedCategory()
-                                            .contains(selectedSub)) {
-                                      _selectedCatalogSubCategory = null;
-                                    }
-                                  });
-                                },
-                              ),
+                            FilterChip(
+                              label: const Text('New Items'),
+                              selected: _catalogMerchandising == 'newItems',
+                              onSelected: (selected) {
+                                setState(() {
+                                  if (selected) {
+                                    _catalogMerchandising = 'newItems';
+                                  } else if (_catalogMerchandising ==
+                                      'newItems') {
+                                    _catalogMerchandising = null;
+                                  }
+                                  _selectedCatalogSubCategory = null;
+                                });
+                              },
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: _ecatalogCatalogFilterDropdown(
-                                labelText: 'Sub-Category',
-                                value: validatedCatalogSubCategory,
-                                items: [
-                                  const DropdownMenuItem<String?>(
-                                    value: null,
-                                    child: Text('All Sub-Categories'),
-                                  ),
-                                  for (final sub in subCategories)
-                                    DropdownMenuItem<String?>(
-                                      value: sub,
-                                      child: Text(
-                                        sub,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                ],
-                                onChanged: (v) {
-                                  setState(
-                                    () => _selectedCatalogSubCategory = v,
-                                  );
-                                },
-                              ),
+                            FilterChip(
+                              label: const Text('Everyday'),
+                              selected: _catalogMerchandising == 'everyday',
+                              onSelected: (selected) {
+                                setState(() {
+                                  if (selected) {
+                                    _catalogMerchandising = 'everyday';
+                                  } else if (_catalogMerchandising ==
+                                      'everyday') {
+                                    _catalogMerchandising = null;
+                                  }
+                                  _selectedCatalogSubCategory = null;
+                                });
+                              },
+                            ),
+                            FilterChip(
+                              label: const Text('Home Decor'),
+                              selected: _catalogMerchandising == 'homeDecor',
+                              onSelected: (selected) {
+                                setState(() {
+                                  if (selected) {
+                                    _catalogMerchandising = 'homeDecor';
+                                  } else if (_catalogMerchandising ==
+                                      'homeDecor') {
+                                    _catalogMerchandising = null;
+                                  }
+                                  _selectedCatalogSubCategory = null;
+                                });
+                              },
+                            ),
+                            FilterChip(
+                              label: const Text('Seasonal'),
+                              selected: _catalogMerchandising == 'seasonal',
+                              onSelected: (selected) {
+                                setState(() {
+                                  if (selected) {
+                                    _catalogMerchandising = 'seasonal';
+                                  } else if (_catalogMerchandising ==
+                                      'seasonal') {
+                                    _catalogMerchandising = null;
+                                  }
+                                  _selectedCatalogSubCategory = null;
+                                });
+                              },
+                            ),
+                            FilterChip(
+                              label: const Text('Sale'),
+                              selected: _catalogMerchandising == 'sale',
+                              onSelected: (selected) {
+                                setState(() {
+                                  if (selected) {
+                                    _catalogMerchandising = 'sale';
+                                  } else if (_catalogMerchandising == 'sale') {
+                                    _catalogMerchandising = null;
+                                  }
+                                  _selectedCatalogSubCategory = null;
+                                });
+                              },
                             ),
                           ],
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            FilterChip(
+                              label: const Text('In Order'),
+                              selected: _catalogInOrderOnly,
+                              onSelected: (selected) {
+                                setState(() => _catalogInOrderOnly = selected);
+                              },
+                            ),
+                            TextButton.icon(
+                              onPressed:
+                                  (_catalogMerchandising != null ||
+                                      _catalogInOrderOnly ||
+                                      _selectedCatalogCategory != null ||
+                                      _selectedCatalogSubCategory != null)
+                                  ? () {
+                                      setState(() {
+                                        _catalogMerchandising = null;
+                                        _catalogInOrderOnly = false;
+                                        _selectedCatalogCategory = null;
+                                        _selectedCatalogSubCategory = null;
+                                      });
+                                    }
+                                  : null,
+                              icon: const Icon(Icons.clear),
+                              label: const Text('Clear Filters'),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Expanded(
+                                child: _ecatalogCatalogFilterDropdown(
+                                  labelText: 'Category',
+                                  value: validatedCatalogCategory,
+                                  items: [
+                                    const DropdownMenuItem<String?>(
+                                      value: null,
+                                      child: Text('All Categories'),
+                                    ),
+                                    for (final c in categories)
+                                      DropdownMenuItem<String?>(
+                                        value: c,
+                                        child: Text(
+                                          c,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) {
+                                    setState(() {
+                                      _selectedCatalogCategory = v;
+                                      final selectedSub =
+                                          _selectedCatalogSubCategory;
+                                      if (selectedSub != null &&
+                                          !_catalogSubCategoriesForSelectedCategory()
+                                              .contains(selectedSub)) {
+                                        _selectedCatalogSubCategory = null;
+                                      }
+                                    });
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: _ecatalogCatalogFilterDropdown(
+                                  labelText: 'Sub-Category',
+                                  value: validatedCatalogSubCategory,
+                                  items: [
+                                    const DropdownMenuItem<String?>(
+                                      value: null,
+                                      child: Text('All Sub-Categories'),
+                                    ),
+                                    for (final sub in subCategories)
+                                      DropdownMenuItem<String?>(
+                                        value: sub,
+                                        child: Text(
+                                          sub,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) {
+                                    setState(
+                                      () => _selectedCatalogSubCategory = v,
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                    ),
                   ),
-                ),
-                if (filtered.isEmpty)
-                  SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: Center(
-                      child: Text(
-                        _catalogInOrderOnly
-                            ? 'No items from this order match the current filter.'
-                            : 'No products match',
-                        style: textTheme.bodyLarge?.copyWith(
-                          color: _kSecondaryText,
+                  if (filtered.isEmpty)
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Center(
+                        child: Text(
+                          _catalogInOrderOnly
+                              ? 'No items from this order match the current filter.'
+                              : 'No products match',
+                          style: textTheme.bodyLarge?.copyWith(
+                            color: _kSecondaryText,
+                          ),
                         ),
                       ),
-                    ),
-                  )
-                else
-                  SliverList(
-                    delegate: SliverChildBuilderDelegate((context, index) {
-                      final product = filtered[index];
-                      final orderLineKey = _orderLineKeyForProduct(product);
-                      final line = _orderLineByKey[orderLineKey];
-                      final inCurrentOrder = line != null;
-                      final qtyInQuote = line?.quantity ?? 0;
-                      final lineTotal = line != null
-                          ? _getDiscountedLineTotal(line)
-                          : 0.0;
-                      final pricingIndicator = _productPricingIndicator(
-                        product,
-                      );
-                      final catLabel = product.category.trim().isEmpty
-                          ? '—'
-                          : product.category.trim();
-                      final subLabel = product.subCategory.trim().isEmpty
-                          ? '—'
-                          : product.subCategory.trim();
-                      final ecKey = product.itemNumber.trim();
-                      final isExpanded = _ecatalogExpandedItemKey == ecKey;
-                      final Widget ecatalogItemCard = Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Material(
-                          type: MaterialType.card,
-                          elevation: 0.5,
-                          borderRadius: BorderRadius.circular(8),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 8,
-                            ),
-                            child: Row(
-                              key: ValueKey(product.itemNumber),
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: InkWell(
-                                    onTap: () {
-                                      _setStateDebug(
-                                        'ecatalog_toggle_row_expand',
-                                        () {
-                                          if (_ecatalogExpandedItemKey ==
-                                              ecKey) {
-                                            _ecatalogExpandedItemKey = null;
-                                          } else {
-                                            _ecatalogExpandedItemKey = ecKey;
-                                          }
-                                        },
-                                      );
-                                    },
-                                    onLongPress: () =>
-                                        _showECatalogProductDetail(product),
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: isExpanded
-                                        ? Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.stretch,
-                                            children: [
-                                              ClipRRect(
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                child: AspectRatio(
-                                                  aspectRatio: 4 / 3,
-                                                  child: Image.network(
-                                                    'https://showroom-images.netlify.app/images/$ecKey.jpeg',
-                                                    fit: BoxFit.cover,
-                                                    cacheWidth: 800,
-                                                    cacheHeight: 600,
-                                                    filterQuality:
-                                                        FilterQuality.low,
-                                                    loadingBuilder:
-                                                        (
-                                                          context,
-                                                          child,
-                                                          loadingProgress,
-                                                        ) {
-                                                          if (loadingProgress ==
-                                                              null) {
-                                                            return child;
-                                                          }
-                                                          return ColoredBox(
-                                                            color: colorScheme
-                                                                .surfaceContainerHighest,
-                                                            child: Icon(
-                                                              Icons
-                                                                  .image_outlined,
-                                                              size: 48,
+                    )
+                  else
+                    SliverList(
+                      delegate: SliverChildBuilderDelegate((context, index) {
+                        final product = filtered[index];
+                        final orderLineKey = _orderLineKeyForProduct(product);
+                        final line = _orderLineByKey[orderLineKey];
+                        final inCurrentOrder = line != null;
+                        final qtyInQuote = line?.quantity ?? 0;
+                        final lineTotal = line != null
+                            ? _getDiscountedLineTotal(line)
+                            : 0.0;
+                        final pricingIndicator = _productPricingIndicator(
+                          product,
+                        );
+                        final catLabel = product.category.trim().isEmpty
+                            ? '—'
+                            : product.category.trim();
+                        final subLabel = product.subCategory.trim().isEmpty
+                            ? '—'
+                            : product.subCategory.trim();
+                        final ecKey = product.itemNumber.trim();
+                        final isExpanded = _ecatalogExpandedItemKey == ecKey;
+                        final Widget ecatalogItemCard = Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Material(
+                            type: MaterialType.card,
+                            elevation: 0.5,
+                            borderRadius: BorderRadius.circular(8),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                              child: Row(
+                                key: ValueKey(product.itemNumber),
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: InkWell(
+                                      onTap: () {
+                                        _setStateDebug(
+                                          'ecatalog_toggle_row_expand',
+                                          () {
+                                            if (_ecatalogExpandedItemKey ==
+                                                ecKey) {
+                                              _ecatalogExpandedItemKey = null;
+                                            } else {
+                                              _ecatalogExpandedItemKey = ecKey;
+                                            }
+                                          },
+                                        );
+                                      },
+                                      onLongPress: () =>
+                                          _showECatalogProductDetail(product),
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: isExpanded
+                                          ? Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.stretch,
+                                              children: [
+                                                ClipRRect(
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  child: AspectRatio(
+                                                    aspectRatio: 4 / 3,
+                                                    child: Image.network(
+                                                      'https://showroom-images.netlify.app/images/$ecKey.jpeg',
+                                                      fit: BoxFit.cover,
+                                                      cacheWidth: 800,
+                                                      cacheHeight: 600,
+                                                      filterQuality:
+                                                          FilterQuality.low,
+                                                      loadingBuilder:
+                                                          (
+                                                            context,
+                                                            child,
+                                                            loadingProgress,
+                                                          ) {
+                                                            if (loadingProgress ==
+                                                                null) {
+                                                              return child;
+                                                            }
+                                                            return ColoredBox(
                                                               color: colorScheme
-                                                                  .outline,
-                                                            ),
-                                                          );
-                                                        },
-                                                    errorBuilder:
-                                                        (
-                                                          context,
-                                                          error,
-                                                          stackTrace,
-                                                        ) {
-                                                          return ColoredBox(
-                                                            color: colorScheme
-                                                                .surfaceContainerHighest,
-                                                            child: Icon(
-                                                              Icons
-                                                                  .image_not_supported_outlined,
-                                                              size: 48,
+                                                                  .surfaceContainerHighest,
+                                                              child: Icon(
+                                                                Icons
+                                                                    .image_outlined,
+                                                                size: 48,
+                                                                color:
+                                                                    colorScheme
+                                                                        .outline,
+                                                              ),
+                                                            );
+                                                          },
+                                                      errorBuilder:
+                                                          (
+                                                            context,
+                                                            error,
+                                                            stackTrace,
+                                                          ) {
+                                                            return ColoredBox(
                                                               color: colorScheme
-                                                                  .outline,
-                                                            ),
-                                                          );
-                                                        },
+                                                                  .surfaceContainerHighest,
+                                                              child: Icon(
+                                                                Icons
+                                                                    .image_not_supported_outlined,
+                                                                size: 48,
+                                                                color:
+                                                                    colorScheme
+                                                                        .outline,
+                                                              ),
+                                                            );
+                                                          },
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                              const SizedBox(height: 8),
-                                              Row(
-                                                children: [
-                                                  Expanded(
-                                                    child: Row(
-                                                      children: [
-                                                        Expanded(
-                                                          child: Text(
-                                                            product.itemNumber,
-                                                            style: textTheme
-                                                                .titleSmall
-                                                                ?.copyWith(
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .w600,
-                                                                ),
-                                                            maxLines: 1,
-                                                            overflow:
-                                                                TextOverflow
-                                                                    .ellipsis,
-                                                          ),
-                                                        ),
-                                                        if (inCurrentOrder)
-                                                          Padding(
-                                                            padding:
-                                                                const EdgeInsets.only(
-                                                                  left: 6,
-                                                                ),
-                                                            child:
-                                                                _ecatalogInOrderQtyBadge(
-                                                                  context,
-                                                                  qtyInQuote,
-                                                                ),
-                                                          ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                  if (pricingIndicator == 'PS')
-                                                    Padding(
-                                                      padding:
-                                                          const EdgeInsets.only(
-                                                            left: 6,
-                                                          ),
-                                                      child:
-                                                          _ECatalogProductDetailSheet._flagChip(
-                                                            context,
-                                                            'PS',
-                                                            colorScheme.primary,
-                                                          ),
-                                                    ),
-                                                  Icon(
-                                                    Icons.keyboard_arrow_up,
-                                                    size: 22,
-                                                    color: colorScheme
-                                                        .onSurfaceVariant,
-                                                  ),
-                                                ],
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                product.description,
-                                                style: textTheme.bodyMedium,
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Text(
-                                                '$catLabel / $subLabel',
-                                                style: textTheme.bodySmall
-                                                    ?.copyWith(
-                                                      color: _kSecondaryText,
-                                                    ),
-                                              ),
-                                              const SizedBox(height: 2),
-                                              _buildECatalogListPriceColumn(
-                                                product: product,
-                                                textTheme: textTheme,
-                                                colorScheme: colorScheme,
-                                              ),
-                                            ],
-                                          )
-                                        : Row(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              _ECatalogProductThumbnail(
-                                                product: product,
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
+                                                const SizedBox(height: 8),
+                                                Row(
                                                   children: [
-                                                    Row(
-                                                      children: [
-                                                        Expanded(
-                                                          child: Row(
-                                                            children: [
-                                                              Expanded(
-                                                                child: Text(
-                                                                  product
-                                                                      .itemNumber,
-                                                                  style: textTheme
-                                                                      .titleSmall
-                                                                      ?.copyWith(
-                                                                        fontWeight:
-                                                                            FontWeight.w600,
-                                                                      ),
-                                                                  maxLines: 1,
-                                                                  overflow:
-                                                                      TextOverflow
-                                                                          .ellipsis,
-                                                                ),
-                                                              ),
-                                                              if (inCurrentOrder)
-                                                                Padding(
-                                                                  padding:
-                                                                      const EdgeInsets.only(
-                                                                        left: 6,
-                                                                      ),
-                                                                  child: _ecatalogInOrderQtyBadge(
+                                                    Expanded(
+                                                      child: Row(
+                                                        children: [
+                                                          Expanded(
+                                                            child: Text(
+                                                              product
+                                                                  .itemNumber,
+                                                              style: textTheme
+                                                                  .titleSmall
+                                                                  ?.copyWith(
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w600,
+                                                                  ),
+                                                              maxLines: 1,
+                                                              overflow:
+                                                                  TextOverflow
+                                                                      .ellipsis,
+                                                            ),
+                                                          ),
+                                                          if (inCurrentOrder)
+                                                            Padding(
+                                                              padding:
+                                                                  const EdgeInsets.only(
+                                                                    left: 6,
+                                                                  ),
+                                                              child:
+                                                                  _ecatalogInOrderQtyBadge(
                                                                     context,
                                                                     qtyInQuote,
                                                                   ),
-                                                                ),
-                                                            ],
-                                                          ),
-                                                        ),
-                                                        if (pricingIndicator ==
-                                                            'PS')
-                                                          Padding(
-                                                            padding:
-                                                                const EdgeInsets.only(
-                                                                  left: 6,
-                                                                ),
-                                                            child:
-                                                                _ECatalogProductDetailSheet._flagChip(
-                                                                  context,
-                                                                  'PS',
-                                                                  colorScheme
-                                                                      .primary,
-                                                                ),
-                                                          ),
-                                                        Icon(
-                                                          Icons
-                                                              .keyboard_arrow_down,
-                                                          size: 22,
-                                                          color: colorScheme
-                                                              .onSurfaceVariant,
-                                                        ),
-                                                      ],
-                                                    ),
-                                                    const SizedBox(height: 2),
-                                                    Text(
-                                                      product.description,
-                                                      style:
-                                                          textTheme.bodyMedium,
-                                                      maxLines: 2,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                    ),
-                                                    const SizedBox(height: 4),
-                                                    Text(
-                                                      '$catLabel / $subLabel',
-                                                      style: textTheme.bodySmall
-                                                          ?.copyWith(
-                                                            color:
-                                                                _kSecondaryText,
-                                                          ),
-                                                      maxLines: 1,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                    ),
-                                                    const SizedBox(height: 2),
-                                                    _buildECatalogListPriceColumn(
-                                                      product: product,
-                                                      textTheme: textTheme,
-                                                      colorScheme: colorScheme,
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: 132,
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      SizedBox(
-                                        height: 40,
-                                        child: Align(
-                                          alignment: Alignment.centerRight,
-                                          child: inCurrentOrder
-                                              ? Row(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    IconButton(
-                                                      visualDensity:
-                                                          VisualDensity.compact,
-                                                      padding: EdgeInsets.zero,
-                                                      constraints:
-                                                          const BoxConstraints(
-                                                            minWidth: 40,
-                                                            minHeight: 40,
-                                                          ),
-                                                      onPressed: () =>
-                                                          _decreaseLineQty(
-                                                            line,
-                                                          ),
-                                                      icon: const Icon(
-                                                        Icons
-                                                            .remove_circle_outline,
+                                                            ),
+                                                        ],
                                                       ),
                                                     ),
-                                                    SizedBox(
-                                                      width: 28,
-                                                      child: Text(
-                                                        '$qtyInQuote',
-                                                        textAlign:
-                                                            TextAlign.center,
-                                                        style: textTheme
-                                                            .titleSmall
-                                                            ?.copyWith(
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .w600,
+                                                    if (pricingIndicator ==
+                                                        'PS')
+                                                      Padding(
+                                                        padding:
+                                                            const EdgeInsets.only(
+                                                              left: 6,
+                                                            ),
+                                                        child:
+                                                            _ECatalogProductDetailSheet._flagChip(
+                                                              context,
+                                                              'PS',
+                                                              colorScheme
+                                                                  .primary,
                                                             ),
                                                       ),
-                                                    ),
-                                                    IconButton(
-                                                      visualDensity:
-                                                          VisualDensity.compact,
-                                                      padding: EdgeInsets.zero,
-                                                      constraints:
-                                                          const BoxConstraints(
-                                                            minWidth: 40,
-                                                            minHeight: 40,
-                                                          ),
-                                                      onPressed: () =>
-                                                          _increaseLineQty(
-                                                            line,
-                                                          ),
-                                                      icon: const Icon(
-                                                        Icons
-                                                            .add_circle_outline,
-                                                      ),
+                                                    Icon(
+                                                      Icons.keyboard_arrow_up,
+                                                      size: 22,
+                                                      color: colorScheme
+                                                          .onSurfaceVariant,
                                                     ),
                                                   ],
-                                                )
-                                              : TextButton(
-                                                  onPressed: () =>
-                                                      _incrementCatalogProductQty(
-                                                        product,
+                                                ),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  product.description,
+                                                  style: textTheme.bodyMedium,
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  '$catLabel / $subLabel',
+                                                  style: textTheme.bodySmall
+                                                      ?.copyWith(
+                                                        color: _kSecondaryText,
                                                       ),
-                                                  style: TextButton.styleFrom(
-                                                    padding:
-                                                        const EdgeInsets.symmetric(
-                                                          horizontal: 10,
-                                                          vertical: 4,
-                                                        ),
-                                                    minimumSize: Size.zero,
-                                                    tapTargetSize:
-                                                        MaterialTapTargetSize
-                                                            .shrinkWrap,
-                                                    visualDensity:
-                                                        VisualDensity.compact,
-                                                  ),
-                                                  child: Text(
-                                                    'Add',
-                                                    style: textTheme.labelLarge
-                                                        ?.copyWith(
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                        ),
+                                                ),
+                                                const SizedBox(height: 2),
+                                                _buildECatalogListPriceColumn(
+                                                  product: product,
+                                                  textTheme: textTheme,
+                                                  colorScheme: colorScheme,
+                                                ),
+                                              ],
+                                            )
+                                          : Row(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                _ECatalogProductThumbnail(
+                                                  product: product,
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Expanded(
+                                                  child: Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    children: [
+                                                      Row(
+                                                        children: [
+                                                          Expanded(
+                                                            child: Row(
+                                                              children: [
+                                                                Expanded(
+                                                                  child: Text(
+                                                                    product
+                                                                        .itemNumber,
+                                                                    style: textTheme
+                                                                        .titleSmall
+                                                                        ?.copyWith(
+                                                                          fontWeight:
+                                                                              FontWeight.w600,
+                                                                        ),
+                                                                    maxLines: 1,
+                                                                    overflow:
+                                                                        TextOverflow
+                                                                            .ellipsis,
+                                                                  ),
+                                                                ),
+                                                                if (inCurrentOrder)
+                                                                  Padding(
+                                                                    padding:
+                                                                        const EdgeInsets.only(
+                                                                          left:
+                                                                              6,
+                                                                        ),
+                                                                    child: _ecatalogInOrderQtyBadge(
+                                                                      context,
+                                                                      qtyInQuote,
+                                                                    ),
+                                                                  ),
+                                                              ],
+                                                            ),
+                                                          ),
+                                                          if (pricingIndicator ==
+                                                              'PS')
+                                                            Padding(
+                                                              padding:
+                                                                  const EdgeInsets.only(
+                                                                    left: 6,
+                                                                  ),
+                                                              child:
+                                                                  _ECatalogProductDetailSheet._flagChip(
+                                                                    context,
+                                                                    'PS',
+                                                                    colorScheme
+                                                                        .primary,
+                                                                  ),
+                                                            ),
+                                                          Icon(
+                                                            Icons
+                                                                .keyboard_arrow_down,
+                                                            size: 22,
+                                                            color: colorScheme
+                                                                .onSurfaceVariant,
+                                                          ),
+                                                        ],
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        product.description,
+                                                        style: textTheme
+                                                            .bodyMedium,
+                                                        maxLines: 2,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                      ),
+                                                      const SizedBox(height: 4),
+                                                      Text(
+                                                        '$catLabel / $subLabel',
+                                                        style: textTheme
+                                                            .bodySmall
+                                                            ?.copyWith(
+                                                              color:
+                                                                  _kSecondaryText,
+                                                            ),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      _buildECatalogListPriceColumn(
+                                                        product: product,
+                                                        textTheme: textTheme,
+                                                        colorScheme:
+                                                            colorScheme,
+                                                      ),
+                                                    ],
                                                   ),
                                                 ),
-                                        ),
-                                      ),
-                                      SizedBox(
-                                        height: 16,
-                                        child: inCurrentOrder
-                                            ? Text(
-                                                _formatCurrency(lineTotal),
-                                                textAlign: TextAlign.right,
-                                                style: textTheme.bodySmall
-                                                    ?.copyWith(
-                                                      fontWeight:
-                                                          FontWeight.w700,
-                                                      color:
-                                                          colorScheme.primary,
-                                                    ),
-                                              )
-                                            : const SizedBox.shrink(),
-                                      ),
-                                    ],
+                                              ],
+                                            ),
+                                    ),
                                   ),
-                                ),
-                              ],
+                                  SizedBox(
+                                    width: 132,
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
+                                        SizedBox(
+                                          height: 40,
+                                          child: Align(
+                                            alignment: Alignment.centerRight,
+                                            child: inCurrentOrder
+                                                ? Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      IconButton(
+                                                        visualDensity:
+                                                            VisualDensity
+                                                                .compact,
+                                                        padding:
+                                                            EdgeInsets.zero,
+                                                        constraints:
+                                                            const BoxConstraints(
+                                                              minWidth: 40,
+                                                              minHeight: 40,
+                                                            ),
+                                                        onPressed: () =>
+                                                            _decreaseLineQty(
+                                                              line,
+                                                            ),
+                                                        icon: const Icon(
+                                                          Icons
+                                                              .remove_circle_outline,
+                                                        ),
+                                                      ),
+                                                      SizedBox(
+                                                        width: 28,
+                                                        child: Text(
+                                                          '$qtyInQuote',
+                                                          textAlign:
+                                                              TextAlign.center,
+                                                          style: textTheme
+                                                              .titleSmall
+                                                              ?.copyWith(
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w600,
+                                                              ),
+                                                        ),
+                                                      ),
+                                                      IconButton(
+                                                        visualDensity:
+                                                            VisualDensity
+                                                                .compact,
+                                                        padding:
+                                                            EdgeInsets.zero,
+                                                        constraints:
+                                                            const BoxConstraints(
+                                                              minWidth: 40,
+                                                              minHeight: 40,
+                                                            ),
+                                                        onPressed: () =>
+                                                            _increaseLineQty(
+                                                              line,
+                                                            ),
+                                                        icon: const Icon(
+                                                          Icons
+                                                              .add_circle_outline,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  )
+                                                : TextButton(
+                                                    onPressed: () =>
+                                                        _incrementCatalogProductQty(
+                                                          product,
+                                                        ),
+                                                    style: TextButton.styleFrom(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                            horizontal: 10,
+                                                            vertical: 4,
+                                                          ),
+                                                      minimumSize: Size.zero,
+                                                      tapTargetSize:
+                                                          MaterialTapTargetSize
+                                                              .shrinkWrap,
+                                                      visualDensity:
+                                                          VisualDensity.compact,
+                                                    ),
+                                                    child: Text(
+                                                      'Add',
+                                                      style: textTheme
+                                                          .labelLarge
+                                                          ?.copyWith(
+                                                            fontWeight:
+                                                                FontWeight.w600,
+                                                          ),
+                                                    ),
+                                                  ),
+                                          ),
+                                        ),
+                                        SizedBox(
+                                          height: 16,
+                                          child: inCurrentOrder
+                                              ? Text(
+                                                  _formatCurrency(lineTotal),
+                                                  textAlign: TextAlign.right,
+                                                  style: textTheme.bodySmall
+                                                      ?.copyWith(
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        color:
+                                                            colorScheme.primary,
+                                                      ),
+                                                )
+                                              : const SizedBox.shrink(),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                      if (line != null) {
-                        return Dismissible(
-                          key: ValueKey(orderLineKey),
-                          direction: DismissDirection.endToStart,
-                          confirmDismiss: (_) async {
-                            await _confirmDeleteLine(line);
-                            return false;
-                          },
-                          background: const _OrderLineCardDismissBackground(
-                            compactLayout: true,
-                          ),
-                          child: ecatalogItemCard,
                         );
-                      }
-                      return ecatalogItemCard;
-                    }, childCount: filtered.length),
-                  ),
-              ],
-            ),
+                        if (line != null) {
+                          return Dismissible(
+                            key: ValueKey(orderLineKey),
+                            direction: DismissDirection.endToStart,
+                            confirmDismiss: (_) async {
+                              await _confirmDeleteLine(line);
+                              return false;
+                            },
+                            background: const _OrderLineCardDismissBackground(
+                              compactLayout: true,
+                            ),
+                            child: ecatalogItemCard,
+                          );
+                        }
+                        return ecatalogItemCard;
+                      }, childCount: filtered.length),
+                    ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 8),
@@ -9902,6 +10125,583 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     _requestScannerFocus();
+  }
+
+  /// Debug-only: one persisted quote containing every loaded catalog line, without
+  /// [_ensureRoutingForProduct] / workspace switches (no multi-bucket split).
+  Future<void> _persistFullCatalogTestQuote(Customer customer) async {
+    final now = DateTime.now();
+    final defaultSeq = await _generateDefaultQuoteName();
+    final name = 'FULL CATALOG TEST $defaultSeq'.toUpperCase();
+    final id = now.millisecondsSinceEpoch.toString();
+
+    final orderedProducts = _productsByItemNumber.values.toList()
+      ..sort((a, b) => _compareItemNumberAscending(a.itemNumber, b.itemNumber));
+
+    final linesJson = <Map<String, dynamic>>[];
+    for (final product in orderedProducts) {
+      final bucket = _resolveQuoteBucketForProduct(product);
+      linesJson.add({
+        'upc': product.upc,
+        'itemNumber': product.itemNumber,
+        'description': product.description,
+        'price': product.price,
+        'productType': product.productType,
+        'discountRaw': product.discountRaw,
+        'discountEligible': product.discountEligible,
+        'netRaw': product.netRaw,
+        'isNet': product.isNet,
+        'psRaw': product.psRaw,
+        'isPs': product.isPs,
+        'isNewRelease': product.isNewRelease,
+        'category': product.category,
+        'subCategory': product.subCategory,
+        'quoteBucketKey': bucket.bucketKey,
+        'quoteBucketLabel': bucket.displayLabel,
+        'quantity': 1,
+        'scans': 0,
+      });
+    }
+
+    final def = _defaultQuoteBucketDefinition;
+    final persistedBucketKey = _logicalQuoteBucketKey(def.bucketKey);
+    final rootBucketKey = persistedBucketKey.isNotEmpty
+        ? persistedBucketKey
+        : def.bucketKey;
+
+    final customerName = customer.displayName.trim();
+    final customerId = customer.id.trim();
+
+    try {
+      final dir = await _getQuotesDirectory();
+
+      final quoteJson = {
+        'id': id,
+        'name': name,
+        'createdAt': now.toIso8601String(),
+        'updatedAt': now.toIso8601String(),
+        'quoteBucketKey': rootBucketKey,
+        'quoteBucketLabel': def.displayLabel,
+        'lines': linesJson,
+        'customer': customer.toJson(),
+      };
+
+      final file = File('${dir.path}/quote_$id.json');
+      await file.writeAsString(jsonEncode(quoteJson), flush: true);
+
+      final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
+      var list = <Map<String, dynamic>>[];
+
+      if (await indexFile.exists()) {
+        final content = await indexFile.readAsString();
+        final decoded = jsonDecode(content);
+        if (decoded is List) {
+          list = List<Map<String, dynamic>>.from(
+            decoded.map((e) => Map<String, dynamic>.from(e as Map)),
+          );
+        }
+      }
+
+      list.removeWhere((e) => e['id']?.toString() == id);
+
+      final row = <String, dynamic>{
+        'id': id,
+        'name': name,
+        'customerName': customerName,
+        'customerId': customerId,
+        'quoteBucketKey': rootBucketKey,
+        'quoteBucketLabel': def.displayLabel,
+        'updatedAt': now.toIso8601String(),
+      };
+      row['quoteStatus'] = quoteLifecycleStatusToJson(
+        QuoteLifecycleStatus.active,
+      );
+
+      list.insert(0, row);
+
+      await indexFile.writeAsString(jsonEncode(list), flush: true);
+      await _removeQuoteFromArchiveIndexIfPresent(id);
+
+      if (!mounted) return;
+      setState(() {
+        _status =
+            'Full catalog test quote saved: $name (${linesJson.length} lines)';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Saved full catalog test quote ($name, ${linesJson.length} lines).',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _status = 'Error saving full catalog test quote: $e';
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error saving test quote: $e')));
+    }
+
+    if (!mounted) return;
+    debugPrint(
+      '[DependentsDiag] _persistFullCatalogTestQuote: before _requestScannerFocus()',
+    );
+    _requestScannerFocus();
+    debugPrint(
+      '[DependentsDiag] _persistFullCatalogTestQuote: after _requestScannerFocus()',
+    );
+  }
+
+  Future<void> _buildFullCatalogTestQuoteFlow() async {
+    if (!kDebugMode) return;
+    if (_productsByItemNumber.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Load products first.')));
+      return;
+    }
+    if (_customers.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Load customers CSV first.')),
+      );
+      return;
+    }
+
+    _suspendScannerFocusRecovery = true;
+    try {
+      debugPrint('[DependentsDiag] opening simple picker');
+      final customer = await _showSimpleCustomerPickerForCatalogTests();
+      debugPrint('[DependentsDiag] closing simple picker result=$customer');
+      if (!mounted || customer == null) return;
+
+      debugPrint('[DependentsDiag] opening confirm dialog');
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: const Text('Full catalog test quote'),
+            content: const Text(
+              'This will create one large single test quote with all loaded products. Continue?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Continue'),
+              ),
+            ],
+          );
+        },
+      );
+      debugPrint(
+        '[DependentsDiag] closing confirm dialog confirm=$confirm',
+      );
+      if (confirm != true || !mounted) return;
+
+      await _persistFullCatalogTestQuote(customer);
+      if (!mounted) return;
+    } finally {
+      _suspendScannerFocusRecovery = false;
+    }
+  }
+
+  /// Same unit/list rules as [_iterQuoteShareAttachmentLines] for a live [Product]
+  /// (customer discount only when [_productPricingState] is discount-eligible).
+  ({
+    double listPrice,
+    double price,
+    String discountCol,
+    String netCol,
+    String psCol,
+  })
+  _applyPricingLogic(Product product, Customer customer) {
+    final customerDiscPct = customer.discountPercent;
+    final state = _productPricingState(product);
+    final shelfUnit = product.price;
+
+    final double unitRaw;
+    if (state == ProductPricingState.discountEligible && customerDiscPct > 0) {
+      unitRaw = shelfUnit * (1 - customerDiscPct / 100.0);
+    } else {
+      unitRaw = shelfUnit;
+    }
+
+    final listPrice = _roundedUnitPrice(product.listPrice);
+
+    var discountCol = '';
+    if (state == ProductPricingState.discountEligible && customerDiscPct > 0) {
+      discountCol = customerDiscPct == customerDiscPct.roundToDouble()
+          ? customerDiscPct.round().toString()
+          : customerDiscPct.toStringAsFixed(2);
+    }
+
+    final netCol = product.isNet ? 'YES' : '';
+    final psCol = product.isPs ? 'YES' : '';
+
+    return (
+      listPrice: listPrice,
+      price: _roundedUnitPrice(unitRaw),
+      discountCol: discountCol,
+      netCol: netCol,
+      psCol: psCol,
+    );
+  }
+
+  String _formatExportFileSizeKbMb(int byteLength) {
+    if (byteLength >= 1024 * 1024) {
+      return '${(byteLength / (1024 * 1024)).toStringAsFixed(2)} MB';
+    }
+    if (byteLength >= 1024) {
+      return '${(byteLength / 1024).toStringAsFixed(1)} KB';
+    }
+    return '$byteLength B';
+  }
+
+  Future<void> _exportFullCatalogExcelQuoteFlow() async {
+    if (!kDebugMode) return;
+    debugPrint('[ExportDiag] export flow entered');
+    if (_exportingFullCatalogExcel) return;
+    if (_productsByItemNumber.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Load products first.')));
+      return;
+    }
+    if (_customers.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Load customers CSV first.')),
+      );
+      return;
+    }
+
+    _suspendScannerFocusRecovery = true;
+    try {
+      debugPrint('[DependentsDiag] opening simple picker');
+      final customer = await _showSimpleCustomerPickerForCatalogTests();
+      debugPrint('[DependentsDiag] closing simple picker result=$customer');
+      if (!mounted || customer == null) return;
+      debugPrint('[ExportDiag] customer selected');
+
+      debugPrint('[DependentsDiag] opening confirm dialog');
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: const Text('Export full catalog'),
+            content: const Text(
+              'This will build and export a full catalog Excel quote (~18,000 items) '
+              'without opening it in the app. Continue?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Continue'),
+              ),
+            ],
+          );
+        },
+      );
+      debugPrint(
+        '[DependentsDiag] closing confirm dialog confirm=$confirm',
+      );
+      if (confirm != true || !mounted) return;
+      debugPrint('[ExportDiag] confirm accepted');
+
+      debugPrint(
+        'Full catalog Excel: customer selected '
+        '(id=${customer.id}, name=${customer.displayName})',
+      );
+
+      if (!mounted) return;
+      setState(() => _exportingFullCatalogExcel = true);
+      final sw = Stopwatch()..start();
+      String? outPath;
+      var rowCount = 0;
+      try {
+        final products = _sortByItemNumberAscending<Product>(
+          _allProducts,
+          (p) => p.itemNumber,
+        );
+        rowCount = products.length;
+        debugPrint('Full catalog Excel: export start (products=$rowCount)');
+
+        final excel = xlsx.Excel.createExcel();
+        final defaultSheet = excel.getDefaultSheet() ?? excel.tables.keys.first;
+        excel.rename(defaultSheet, 'Quote');
+        final sheet = excel['Quote'];
+        xlsx.TextCellValue t(String v) => xlsx.TextCellValue(v);
+
+        sheet.appendRow([
+          t('Item Number'),
+          t('Description'),
+          t('UPC'),
+          t('List Price'),
+          t('Price'),
+          t('DISCOUNT'),
+          t('NET'),
+          t('PS'),
+          t('Product Type'),
+          t('Category'),
+          t('Sub-Category'),
+          t('Qty'),
+        ]);
+
+        debugPrint('[ExportDiag] row build start');
+        for (var i = 0; i < products.length; i++) {
+          final product = products[i];
+          final pr = _applyPricingLogic(product, customer);
+          sheet.appendRow([
+            t(product.itemNumber),
+            t(product.description),
+            t(product.upc),
+            xlsx.DoubleCellValue(pr.listPrice),
+            xlsx.DoubleCellValue(pr.price),
+            t(pr.discountCol),
+            t(pr.netCol),
+            t(pr.psCol),
+            t(product.productType),
+            t(product.category),
+            t(product.subCategory),
+            xlsx.IntCellValue(1),
+          ]);
+          if (i % 400 == 0 && i > 0) {
+            debugPrint(
+              '[DependentsDiag] _exportFullCatalogExcelQuoteFlow: before '
+              'Future<void>.delayed(Duration.zero) yield i=$i',
+            );
+            await Future<void>.delayed(Duration.zero);
+            debugPrint(
+              '[DependentsDiag] _exportFullCatalogExcelQuoteFlow: after '
+              'Future<void>.delayed(Duration.zero) yield i=$i mounted=$mounted',
+            );
+            if (!mounted) return;
+          }
+        }
+        debugPrint('[ExportDiag] row build complete with row count $rowCount');
+
+        debugPrint(
+          'Full catalog Excel: rows written=$rowCount '
+          '(matches products iterated=${products.length})',
+        );
+
+        const colWidths = <double>[
+          14, // Item Number
+          42, // Description
+          14, // UPC
+          12, // List Price
+          12, // Price
+          10, // DISCOUNT
+          8, // NET
+          8, // PS
+          14, // Product Type
+          18, // Category
+          18, // Sub-Category
+          8, // Qty
+        ];
+        for (var c = 0; c < colWidths.length; c++) {
+          sheet.setColumnWidth(c, colWidths[c]);
+        }
+
+        final docs = await getApplicationDocumentsDirectory();
+        debugPrint('[ExportDiag] output directory resolved: ${docs.path}');
+        if (!mounted) return;
+        final now = DateTime.now();
+        final stamp =
+            '${now.year.toString().padLeft(4, '0')}'
+            '${now.month.toString().padLeft(2, '0')}'
+            '${now.day.toString().padLeft(2, '0')}_'
+            '${now.hour.toString().padLeft(2, '0')}'
+            '${now.minute.toString().padLeft(2, '0')}'
+            '${now.second.toString().padLeft(2, '0')}';
+        final filename = 'FULL_CATALOG_$stamp.xlsx';
+        final file = File(p.join(docs.path, filename));
+        debugPrint('[ExportDiag] output file path chosen: ${file.path}');
+
+        debugPrint('[ExportDiag] excel.encode() start');
+        final bytes = excel.encode();
+        final bytesNull = bytes == null;
+        final bytesLen = bytes?.length ?? 0;
+        debugPrint(
+          '[ExportDiag] excel.encode() complete bytes is null=$bytesNull '
+          'bytes length=$bytesLen',
+        );
+
+        if (bytes == null || bytes.isEmpty) {
+          debugPrint('[ExportDiag] encode returned null/empty');
+          sw.stop();
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Export failed: Excel encode returned no data.',
+                ),
+              ),
+            );
+            await showDialog<void>(
+              context: context,
+              builder: (dialogContext) {
+                return AlertDialog(
+                  title: const Text('Export failed'),
+                  content: const Text(
+                    'Excel encode returned no data. Nothing was written.',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('OK'),
+                    ),
+                  ],
+                );
+              },
+            );
+          }
+          return;
+        }
+
+        debugPrint('[ExportDiag] writeAsBytes start');
+        await file.writeAsBytes(bytes, flush: true);
+        debugPrint('[ExportDiag] writeAsBytes complete');
+
+        final existsAfter = await file.exists();
+        final lenAfter = existsAfter ? await file.length() : 0;
+        debugPrint(
+          '[ExportDiag] after write: file.exists()=$existsAfter '
+          'file.length()=$lenAfter',
+        );
+
+        if (!existsAfter || lenAfter <= 0) {
+          sw.stop();
+          debugPrint(
+            '[ExportDiag] write verification failed path=${file.path} '
+            'exists=$existsAfter length=$lenAfter',
+          );
+          if (mounted) {
+            await showDialog<void>(
+              context: context,
+              builder: (dialogContext) {
+                return AlertDialog(
+                  title: const Text('Export failed'),
+                  content: SelectableText(
+                    'The file was not written correctly.\n\nPath:\n${file.path}',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('OK'),
+                    ),
+                  ],
+                );
+              },
+            );
+          }
+          return;
+        }
+
+        if (!mounted) return;
+        outPath = file.path;
+
+        sw.stop();
+        final elapsedSec = sw.elapsedMilliseconds / 1000.0;
+        final sizeLabel = _formatExportFileSizeKbMb(lenAfter);
+        debugPrint(
+          'Full catalog Excel: export complete '
+          'rows=$rowCount path=$outPath elapsed=${elapsedSec.toStringAsFixed(2)}s',
+        );
+
+        if (!mounted) return;
+        debugPrint('[DependentsDiag] opening completion dialog');
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) {
+            debugPrint('[ExportDiag] completion dialog shown');
+            final pathStr = outPath ?? file.path;
+            final body =
+                'Rows exported: $rowCount\n'
+                'Elapsed: ${elapsedSec.toStringAsFixed(2)} s\n'
+                'File size: $sizeLabel\n'
+                'Path:\n$pathStr';
+            return AlertDialog(
+              title: const Text('Export complete'),
+              content: SingleChildScrollView(
+                child: SelectableText(body),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: pathStr));
+                    if (ctx.mounted) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(content: Text('Path copied')),
+                      );
+                    }
+                  },
+                  child: const Text('Copy Path'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    try {
+                      await Share.shareXFiles([
+                        XFile(
+                          pathStr,
+                          mimeType:
+                              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        ),
+                      ]);
+                    } catch (_) {
+                      if (ctx.mounted) {
+                        ScaffoldMessenger.of(ctx).showSnackBar(
+                          const SnackBar(
+                            content: Text('Unable to share file'),
+                          ),
+                        );
+                      }
+                    }
+                  },
+                  child: const Text('Share File'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    if (mounted) {
+                      await _openCsvWithSystemHandler(File(pathStr));
+                    }
+                  },
+                  child: const Text('Open File'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('OK'),
+                ),
+              ],
+            );
+          },
+        );
+        debugPrint('[DependentsDiag] closing completion dialog');
+      } catch (e, st) {
+        debugPrint('Full catalog Excel export failed: $e\n$st');
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
+        }
+      } finally {
+        sw.stop();
+        if (mounted) {
+          setState(() => _exportingFullCatalogExcel = false);
+        }
+      }
+    } finally {
+      _suspendScannerFocusRecovery = false;
+    }
   }
 
   /// Active (working) quotes for Load Quote and daily use — same eligibility as
@@ -11103,8 +11903,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _OrderLineCardCompactExpandHost.scanTab => _scanTabExpandedLineKey,
       null => null,
     };
-    final bool compactExpanded =
-        compactLayout && expandedKeyForHost == lineKey;
+    final bool compactExpanded = compactLayout && expandedKeyForHost == lineKey;
     return _OrderLineCard(
       dismissibleKey: ValueKey(lineKey),
       line: line,
@@ -11235,6 +12034,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       onAddCustomer: _showAddCustomerDialog,
       loadingProductsFromWeb: _loadingProductsFromWeb,
       loadingCustomersFromWeb: _isLoadingCustomers,
+      onBuildFullCatalogTestQuote: kDebugMode
+          ? _buildFullCatalogTestQuoteFlow
+          : null,
+      onExportFullCatalogExcel: kDebugMode
+          ? _exportFullCatalogExcelQuoteFlow
+          : null,
+      exportingFullCatalogExcel: _exportingFullCatalogExcel,
     );
   }
 
@@ -13478,6 +14284,9 @@ class _SetupTab extends StatelessWidget {
     required this.onAddCustomer,
     required this.loadingProductsFromWeb,
     required this.loadingCustomersFromWeb,
+    this.onBuildFullCatalogTestQuote,
+    this.onExportFullCatalogExcel,
+    this.exportingFullCatalogExcel = false,
   });
 
   final VoidCallback onLoadProducts;
@@ -13485,6 +14294,9 @@ class _SetupTab extends StatelessWidget {
   final Future<void> Function() onAddCustomer;
   final bool loadingProductsFromWeb;
   final bool loadingCustomersFromWeb;
+  final Future<void> Function()? onBuildFullCatalogTestQuote;
+  final Future<void> Function()? onExportFullCatalogExcel;
+  final bool exportingFullCatalogExcel;
 
   @override
   Widget build(BuildContext context) {
@@ -13531,6 +14343,30 @@ class _SetupTab extends StatelessWidget {
             },
             child: const Text('Add Customer'),
           ),
+          if (onBuildFullCatalogTestQuote != null) ...[
+            const SizedBox(height: 16),
+            OutlinedButton(
+              onPressed: () {
+                unawaited(onBuildFullCatalogTestQuote!());
+              },
+              child: const Text('Build Full Catalog Test Quote'),
+            ),
+          ],
+          if (onExportFullCatalogExcel != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: exportingFullCatalogExcel
+                  ? null
+                  : () {
+                      unawaited(onExportFullCatalogExcel!());
+                    },
+              child: Text(
+                exportingFullCatalogExcel
+                    ? 'EXPORTING…'
+                    : 'Export Full Catalog Test Quote (Excel)',
+              ),
+            ),
+          ],
         ],
       ),
     );
