@@ -17,10 +17,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 const String _productsCsvUrl =
-  'https://docs.google.com/spreadsheets/d/1JXn_5iwfVESL8laul5Q3IEdQQ6cHwph6yY5ojKnPZ6I/export?format=csv&gid=1299110245';
+    'https://docs.google.com/spreadsheets/d/1JXn_5iwfVESL8laul5Q3IEdQQ6cHwph6yY5ojKnPZ6I/export?format=csv&gid=1299110245';
 
 const String _customersCsvUrl =
-  'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
+    'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
 
 /// Locally added customers (showroom / Setup); not synced to Google Sheets.
 const String _kAddedCustomersFilename = 'added_customers.json';
@@ -38,9 +38,7 @@ const bool _kScanRebuildInstrumentationEnabled = false;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const ShowroomScannerApp());
 }
 
@@ -58,6 +56,9 @@ class UpperCaseTextFormatter extends TextInputFormatter {
   }
 }
 
+/// Which tab owns compact order-line expand/collapse ([_ordersTabExpandedLineKey] vs [_scanTabExpandedLineKey]).
+enum _OrderLineCardCompactExpandHost { ordersTab, scanTab }
+
 // --- Phase 1: theme tokens (visual only; no app logic) ---
 const Color _kDeepTeal = Color(0xFF006D77);
 const Color _kWarmCoral = Color(0xFFFF7F50);
@@ -69,26 +70,73 @@ const Color _kSecondaryText = Color(0xFF5F6368);
 const Color _kDividerWarm = Color(0xFFC9C5C0);
 const Color _kDividerWarmSoft = Color(0xFFE5E2DE);
 
+/// ECatalog Seasonal: UI sub-category labels → [Product.productType] (CSV column).
+/// Order matches showroom merchandising; used only for ECatalog filtering.
+const Map<String, String> _kEcatalogSeasonalLabelToProductType = {
+  'Calendar & Planner': 'CALENDAR',
+  'Canada Day': 'CANADA DAY',
+  'Celebrate Pride': 'PRIDE',
+  'Chinese New Year': 'CHINESE NEW YEAR',
+  'Christmas': 'CHRISTMAS',
+  'Diwali': 'DIWALI',
+  'Easter': 'EASTER',
+  'Fall/Winter Essentials': 'FALL/WINTER ESSENTIALS',
+  'Father\'s Day': 'FATHER\'S DAY',
+  'Graduation': 'GRADUATION',
+  'Halloween': 'HALLOWEEN',
+  'Hanukkah': 'HANUKKAH',
+  'Harvest': 'HARVEST',
+  'Mother\'s Day': 'MOTHER\'S DAY',
+  'New Years': 'NEW YEARS',
+  'Spring/Summer General': 'SUMMER GENERAL',
+  'Spring/Summer Toys': 'SUMMER TOYS',
+  'St Patrick\'s Day': 'ST PATRICK\'S DAY',
+  'Valentine\'s Day': 'VALENTINE\'S DAY',
+};
+
+const List<String> _kEcatalogSeasonalSubcategoryLabels = [
+  'Calendar & Planner',
+  'Canada Day',
+  'Celebrate Pride',
+  'Chinese New Year',
+  'Christmas',
+  'Diwali',
+  'Easter',
+  'Fall/Winter Essentials',
+  'Father\'s Day',
+  'Graduation',
+  'Halloween',
+  'Hanukkah',
+  'Harvest',
+  'Mother\'s Day',
+  'New Years',
+  'Spring/Summer General',
+  'Spring/Summer Toys',
+  'St Patrick\'s Day',
+  'Valentine\'s Day',
+];
+
 class ShowroomScannerApp extends StatelessWidget {
   const ShowroomScannerApp({super.key});
 
   static ThemeData get _showroomTheme {
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: _kDeepTeal,
-      brightness: Brightness.light,
-    ).copyWith(
-      primary: _kDeepTeal,
-      onPrimary: Colors.white,
-      secondary: _kWarmCoral,
-      onSecondary: Colors.white,
-      tertiary: _kSuccessGreen,
-      onTertiary: Colors.white,
-      surface: _kSurfaceCard,
-      onSurface: _kHeadingText,
-      onSurfaceVariant: _kSecondaryText,
-      outline: _kDividerWarm,
-      outlineVariant: _kDividerWarmSoft,
-    );
+    final colorScheme =
+        ColorScheme.fromSeed(
+          seedColor: _kDeepTeal,
+          brightness: Brightness.light,
+        ).copyWith(
+          primary: _kDeepTeal,
+          onPrimary: Colors.white,
+          secondary: _kWarmCoral,
+          onSecondary: Colors.white,
+          tertiary: _kSuccessGreen,
+          onTertiary: Colors.white,
+          surface: _kSurfaceCard,
+          onSurface: _kHeadingText,
+          onSurfaceVariant: _kSecondaryText,
+          outline: _kDividerWarm,
+          outlineVariant: _kDividerWarmSoft,
+        );
 
     final filledShape = RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(20),
@@ -97,73 +145,70 @@ class ShowroomScannerApp extends StatelessWidget {
       borderRadius: BorderRadius.circular(16),
     );
 
-    final textTheme = ThemeData(
-      useMaterial3: true,
-      colorScheme: colorScheme,
-    ).textTheme.apply(
-      bodyColor: _kHeadingText,
-      displayColor: _kHeadingText,
-    ).copyWith(
-      headlineLarge: const TextStyle(
-        fontWeight: FontWeight.w600,
-        letterSpacing: -0.5,
-        color: _kHeadingText,
-      ),
-      headlineMedium: const TextStyle(
-        fontWeight: FontWeight.w600,
-        letterSpacing: -0.25,
-        color: _kHeadingText,
-      ),
-      headlineSmall: const TextStyle(
-        fontWeight: FontWeight.w600,
-        color: _kHeadingText,
-      ),
-      titleLarge: const TextStyle(
-        fontWeight: FontWeight.w600,
-        fontSize: 22,
-        height: 1.25,
-        letterSpacing: -0.2,
-        color: _kHeadingText,
-      ),
-      titleMedium: const TextStyle(
-        fontWeight: FontWeight.w600,
-        fontSize: 16,
-        height: 1.3,
-        color: _kHeadingText,
-      ),
-      titleSmall: const TextStyle(
-        fontWeight: FontWeight.w600,
-        fontSize: 14,
-        height: 1.3,
-        color: _kHeadingText,
-      ),
-      bodyLarge: const TextStyle(
-        fontSize: 16,
-        height: 1.45,
-        color: _kHeadingText,
-      ),
-      bodyMedium: const TextStyle(
-        fontSize: 14,
-        height: 1.4,
-        color: _kSecondaryText,
-      ),
-      bodySmall: TextStyle(
-        fontSize: 12,
-        height: 1.35,
-        color: _kSecondaryText.withValues(alpha: 0.95),
-      ),
-      labelLarge: const TextStyle(
-        fontWeight: FontWeight.w600,
-        fontSize: 14,
-        letterSpacing: 0.15,
-        color: _kHeadingText,
-      ),
-      labelMedium: const TextStyle(
-        fontWeight: FontWeight.w500,
-        fontSize: 12,
-        color: _kSecondaryText,
-      ),
-    );
+    final textTheme = ThemeData(useMaterial3: true, colorScheme: colorScheme)
+        .textTheme
+        .apply(bodyColor: _kHeadingText, displayColor: _kHeadingText)
+        .copyWith(
+          headlineLarge: const TextStyle(
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.5,
+            color: _kHeadingText,
+          ),
+          headlineMedium: const TextStyle(
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.25,
+            color: _kHeadingText,
+          ),
+          headlineSmall: const TextStyle(
+            fontWeight: FontWeight.w600,
+            color: _kHeadingText,
+          ),
+          titleLarge: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 22,
+            height: 1.25,
+            letterSpacing: -0.2,
+            color: _kHeadingText,
+          ),
+          titleMedium: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 16,
+            height: 1.3,
+            color: _kHeadingText,
+          ),
+          titleSmall: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+            height: 1.3,
+            color: _kHeadingText,
+          ),
+          bodyLarge: const TextStyle(
+            fontSize: 16,
+            height: 1.45,
+            color: _kHeadingText,
+          ),
+          bodyMedium: const TextStyle(
+            fontSize: 14,
+            height: 1.4,
+            color: _kSecondaryText,
+          ),
+          bodySmall: TextStyle(
+            fontSize: 12,
+            height: 1.35,
+            color: _kSecondaryText.withValues(alpha: 0.95),
+          ),
+          labelLarge: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+            letterSpacing: 0.15,
+            color: _kHeadingText,
+          ),
+          labelMedium: const TextStyle(
+            fontWeight: FontWeight.w500,
+            fontSize: 12,
+            color: _kSecondaryText,
+          ),
+        );
 
     return ThemeData(
       useMaterial3: true,
@@ -175,9 +220,7 @@ class ShowroomScannerApp extends StatelessWidget {
         elevation: 1,
         shadowColor: const Color(0x331F2529),
         surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         clipBehavior: Clip.antiAlias,
         margin: EdgeInsets.zero,
       ),
@@ -203,7 +246,10 @@ class ShowroomScannerApp extends StatelessWidget {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 16,
+        ),
         border: inputBorder,
         enabledBorder: inputBorder.copyWith(
           borderSide: BorderSide(color: colorScheme.outlineVariant),
@@ -218,10 +264,15 @@ class ShowroomScannerApp extends StatelessWidget {
           borderSide: BorderSide(color: colorScheme.error, width: 2),
         ),
         labelStyle: TextStyle(color: colorScheme.onSurfaceVariant),
-        hintStyle: TextStyle(color: colorScheme.onSurfaceVariant.withValues(alpha: 0.8)),
+        hintStyle: TextStyle(
+          color: colorScheme.onSurfaceVariant.withValues(alpha: 0.8),
+        ),
         floatingLabelStyle: WidgetStateTextStyle.resolveWith((states) {
           if (states.contains(WidgetState.focused)) {
-            return TextStyle(color: colorScheme.primary, fontWeight: FontWeight.w600);
+            return TextStyle(
+              color: colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            );
           }
           return TextStyle(color: colorScheme.onSurfaceVariant);
         }),
@@ -354,8 +405,8 @@ double _lineTotalFromRoundedUnitPrice({
 
 /// List price for PS "Reg. Price" display when present; otherwise sheet unit price.
 double _displayRegUnitPrice(Product product) => _roundedUnitPrice(
-      product.listPrice > 0 ? product.listPrice : product.price,
-    );
+  product.listPrice > 0 ? product.listPrice : product.price,
+);
 
 enum ProductPricingState { regular, discountEligible, net, ps }
 
@@ -445,8 +496,10 @@ List<List<String>> orderExportCsvRows({
 class OrderImportCsvRow {
   final String item;
   final int quantity;
+
   /// From an optional Description column when the import header names it.
   final String description;
+
   /// From an optional Price column when the import header names it.
   final String price;
 
@@ -491,6 +544,7 @@ class OrderImportApplyOutcome {
   final int moqAdjustedRows;
   final Map<String, int> importedQuantityByBucket;
   final List<OrderImportSkippedRow> skippedRows;
+
   /// Non-header data rows from the selected CSV files (valid rows + parse-time skips).
   final int totalRowsProcessed;
   final int newItemsCount;
@@ -535,19 +589,22 @@ enum OrderImportDuplicateResolution {
 }
 
 /// Options shown in the duplicate import review dialog (MOQ-safe presets only; no replace-with-file).
-const List<OrderImportDuplicateResolution> _kOrderImportDuplicateReviewOptions = [
-  OrderImportDuplicateResolution.totalQty,
-  OrderImportDuplicateResolution.minimumQty,
-  OrderImportDuplicateResolution.skip,
-];
+const List<OrderImportDuplicateResolution> _kOrderImportDuplicateReviewOptions =
+    [
+      OrderImportDuplicateResolution.totalQty,
+      OrderImportDuplicateResolution.minimumQty,
+      OrderImportDuplicateResolution.skip,
+    ];
 
 /// One grouped CSV import row after catalog match and MOQ snap (may conflict with current order).
 class OrderImportPreparedLine {
   final String displayItem;
   final Product product;
+
   /// Quantity from the file after grouping rows and snapping to MOQ (import path).
   final int importedQtyMoq;
   final int rawCsvCombinedQty;
+
   /// When non-null, the order already has at least one matching line; sum of those quantities.
   final int? existingOrderQtySum;
   final String sourceDescription;
@@ -569,8 +626,10 @@ class OrderImportPreparedLine {
 class OrderImportPrepareOutcome {
   final List<OrderImportPreparedLine> lines;
   final List<OrderImportSkippedRow> skippedRows;
+
   /// Rows where grouped CSV quantity differed from MOQ-rounded import quantity.
   final int csvMoqAdjustedRows;
+
   /// Non-header data rows from the selected CSV files (valid rows + parse-time skips).
   final int totalRowsProcessed;
 
@@ -595,7 +654,7 @@ String _orderImportOptionalCsvCell(List<dynamic> row, int? columnIndex) {
 
 /// First matching column index for optional Description / Price on order-import CSVs.
 ({int? descriptionCol, int? priceCol})
-    _orderImportOptionalDescriptionPriceColumns(List<dynamic> headerRow) {
+_orderImportOptionalDescriptionPriceColumns(List<dynamic> headerRow) {
   int? descriptionCol;
   int? priceCol;
   for (var i = 0; i < headerRow.length; i++) {
@@ -635,9 +694,7 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
   }
   final List<List<dynamic>> rows;
   try {
-    rows = const CsvToListConverter(
-      shouldParseNumbers: false,
-    ).convert(rawCsv);
+    rows = const CsvToListConverter(shouldParseNumbers: false).convert(rawCsv);
   } catch (e) {
     throw FormatException('Invalid CSV: $e');
   }
@@ -733,10 +790,7 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
     );
   }
 
-  return OrderImportCsvParseOutcome(
-    rows: list,
-    skippedRows: skippedRows,
-  );
+  return OrderImportCsvParseOutcome(rows: list, skippedRows: skippedRows);
 }
 
 /// Match import label to catalog: [Product.itemNumber] first, then [Product.upc].
@@ -753,12 +807,15 @@ Product? matchOrderImportProduct(
 
   final isNumericItemLabel = RegExp(r'^\d+$').hasMatch(itemKey);
   if (isNumericItemLabel) {
-    final candidateWidths = productsByItemNumber.keys
-        .where((k) => k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k))
-        .map((k) => k.length)
-        .toSet()
-        .toList()
-      ..sort();
+    final candidateWidths =
+        productsByItemNumber.keys
+            .where(
+              (k) => k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
+            )
+            .map((k) => k.length)
+            .toSet()
+            .toList()
+          ..sort();
     for (final width in candidateWidths) {
       final padded = itemKey.padLeft(width, '0');
       final byPaddedItem = productsByItemNumber[padded];
@@ -889,14 +946,12 @@ Future<File> saveOrderExportCsvToAndroidPublicShowroomExports({
       'saveOrderExportCsvToAndroidPublicShowroomExports is Android-only',
     );
   }
-  final path = await _androidPublicDocumentsChannel.invokeMethod<String>(
-    'savePublicCsvInShowroomExports',
-    <String, dynamic>{
-      'customerFolder': sanitizedCustomerFolderName,
-      'filename': filename,
-      'content': csvText,
-    },
-  );
+  final path = await _androidPublicDocumentsChannel
+      .invokeMethod<String>('savePublicCsvInShowroomExports', <String, dynamic>{
+        'customerFolder': sanitizedCustomerFolderName,
+        'filename': filename,
+        'content': csvText,
+      });
   if (path == null || path.isEmpty) {
     throw StateError('savePublicCsvInShowroomExports returned no path');
   }
@@ -908,9 +963,7 @@ Future<File> saveOrderExportCsvToAndroidPublicShowroomExports({
 /// [ensureShowroomSyncExportedOrdersRootDirectory]).
 Future<Directory> ensureLocalShowroomExportsRootDirectory() async {
   final base = await getApplicationDocumentsDirectory();
-  final root = Directory(
-    p.join(base.path, 'Showroom_Sync', 'Exported orders'),
-  );
+  final root = Directory(p.join(base.path, 'Showroom_Sync', 'Exported orders'));
   await root.create(recursive: true);
   return root;
 }
@@ -980,19 +1033,10 @@ Future<File> exportOrderCsvToShowroomExportsLayout({
   return file;
 }
 
-enum ScanFeedbackType {
-  none,
-  successNewItem,
-  successExistingItem,
-  notFound,
-}
+enum ScanFeedbackType { none, successNewItem, successExistingItem, notFound }
 
 /// Lifecycle for saved quotes (active workspace vs archive).
-enum QuoteLifecycleStatus {
-  active,
-  archived,
-  confirmed,
-}
+enum QuoteLifecycleStatus { active, archived, confirmed }
 
 List<String> _stringListFromJsonField(dynamic v) {
   if (v is! List) return [];
@@ -1172,9 +1216,9 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
   final customerMap = data['customer'];
   var customerDiscPct = 0.0;
   if (customerMap is Map<String, dynamic>) {
-    customerDiscPct =
-        Customer.fromJson(Map<String, dynamic>.from(customerMap))
-            .discountPercent;
+    customerDiscPct = Customer.fromJson(
+      Map<String, dynamic>.from(customerMap),
+    ).discountPercent;
   }
 
   bool parseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
@@ -1190,7 +1234,9 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
     if (isNet) return ProductPricingState.net;
     final b = map['discountEligible'];
     if (b is bool) {
-      return b ? ProductPricingState.discountEligible : ProductPricingState.regular;
+      return b
+          ? ProductPricingState.discountEligible
+          : ProductPricingState.regular;
     }
     final raw = (map['discountRaw'] as String?) ?? '';
     return parseYesFlag(raw)
@@ -1269,30 +1315,29 @@ class Customer {
     return v;
   }
 
-  String get displayName =>
-      companyName.trim().isNotEmpty ? companyName : id;
+  String get displayName => companyName.trim().isNotEmpty ? companyName : id;
 
   /// Stable lookup key (CSV `Id` when present; otherwise derived from row).
   String get idOrKey => id;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'companyName': companyName,
-        'address': address,
-        'address2': address2,
-        'city': city,
-        'state': state,
-        'zip': zip,
-        'phone': phone,
-        'fax': fax,
-        'email': email,
-        'contact': contact,
-        'salesRepName': salesRepName,
-        'priceList': priceList,
-        'discount': discount,
-        'discountPercent': discountPercent,
-        'paymentTerms': paymentTerms,
-      };
+    'id': id,
+    'companyName': companyName,
+    'address': address,
+    'address2': address2,
+    'city': city,
+    'state': state,
+    'zip': zip,
+    'phone': phone,
+    'fax': fax,
+    'email': email,
+    'contact': contact,
+    'salesRepName': salesRepName,
+    'priceList': priceList,
+    'discount': discount,
+    'discountPercent': discountPercent,
+    'paymentTerms': paymentTerms,
+  };
 
   static Customer fromJson(Map<String, dynamic> json) {
     String s(String key) => (json[key] as String?)?.trim() ?? '';
@@ -1402,15 +1447,18 @@ class _OrderImportDuplicateReviewDialogState
               runSpacing: 4,
               children: [
                 TextButton(
-                  onPressed: () => _applyAll(OrderImportDuplicateResolution.totalQty),
+                  onPressed: () =>
+                      _applyAll(OrderImportDuplicateResolution.totalQty),
                   child: const Text('Total qty — all'),
                 ),
                 TextButton(
-                  onPressed: () => _applyAll(OrderImportDuplicateResolution.minimumQty),
+                  onPressed: () =>
+                      _applyAll(OrderImportDuplicateResolution.minimumQty),
                   child: const Text('Minimum qty — all'),
                 ),
                 TextButton(
-                  onPressed: () => _applyAll(OrderImportDuplicateResolution.skip),
+                  onPressed: () =>
+                      _applyAll(OrderImportDuplicateResolution.skip),
                   child: const Text('Skip — all'),
                 ),
               ],
@@ -1440,9 +1488,8 @@ class _OrderImportDuplicateReviewDialogState
                             row.displayItem.trim().isEmpty
                                 ? row.product.itemNumber
                                 : row.displayItem.trim(),
-                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                ),
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(fontWeight: FontWeight.w600),
                           ),
                           if (sub.isNotEmpty)
                             Padding(
@@ -1469,10 +1516,13 @@ class _OrderImportDuplicateReviewDialogState
                             value: _choices[index],
                             isExpanded: true,
                             items: [
-                              for (final opt in _kOrderImportDuplicateReviewOptions)
+                              for (final opt
+                                  in _kOrderImportDuplicateReviewOptions)
                                 DropdownMenuItem(
                                   value: opt,
-                                  child: Text(_orderImportDuplicateResolutionLabel(opt)),
+                                  child: Text(
+                                    _orderImportDuplicateResolutionLabel(opt),
+                                  ),
                                 ),
                             ],
                             onChanged: (v) {
@@ -1496,8 +1546,9 @@ class _OrderImportDuplicateReviewDialogState
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(context).pop(List<OrderImportDuplicateResolution>.from(_choices)),
+          onPressed: () => Navigator.of(
+            context,
+          ).pop(List<OrderImportDuplicateResolution>.from(_choices)),
           child: const Text('Apply import'),
         ),
       ],
@@ -1532,7 +1583,8 @@ class _LoadQuoteDialogContent extends StatefulWidget {
   final FocusNode searchQuotesFocusNode;
 
   @override
-  State<_LoadQuoteDialogContent> createState() => _LoadQuoteDialogContentState();
+  State<_LoadQuoteDialogContent> createState() =>
+      _LoadQuoteDialogContentState();
 }
 
 class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
@@ -1546,23 +1598,13 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
     _searchController = TextEditingController();
     _searchController.addListener(() => setState(() {}));
 
-    // `autofocus: true` is not fully reliable on some Android devices when
-    // another TextField (the hidden scanner input) has focus.
-    // Request focus explicitly right after the first frame.
+    // After the first frame the [TextField] has registered this node with the
+    // dialog's focus scope. Request on the node directly — not
+    // [FocusScope.of(context).requestFocus], which can throw if the scope
+    // does not yet include the node (e.g. during dialog attach).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (!widget.searchQuotesFocusNode.hasFocus) {
-        FocusScope.of(context).requestFocus(widget.searchQuotesFocusNode);
-      }
-    });
-
-    // A second attempt helps on devices where the initial focus request is
-    // dropped due to timing.
-    Future.delayed(const Duration(milliseconds: 150), () {
-      if (!mounted) return;
-      if (!widget.searchQuotesFocusNode.hasFocus) {
-        FocusScope.of(context).requestFocus(widget.searchQuotesFocusNode);
-      }
+      widget.searchQuotesFocusNode.requestFocus();
     });
   }
 
@@ -1583,11 +1625,12 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
       final customer = (info.customerName).toLowerCase();
       final bucketLabel = (info.quoteBucketLabel).toLowerCase();
       final dateText = widget.formatDate(info.updatedAt).toLowerCase();
-      final displayCustomer =
-          customer.isEmpty ? 'no customer' : customer; // matches visible label
+      final displayCustomer = customer.isEmpty
+          ? 'no customer'
+          : customer; // matches visible label
       final displayQuote = name.isEmpty ? 'unnamed quote' : name;
-      final combined =
-          'customer: $displayCustomer – quote: $displayQuote'.toLowerCase();
+      final combined = 'customer: $displayCustomer – quote: $displayQuote'
+          .toLowerCase();
 
       if (q.isEmpty) return true;
 
@@ -1601,67 +1644,82 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
     final media = MediaQuery.of(context);
     // Keep panel size stable while typing/searching: do not resize with
     // keyboard insets; use an internal list scroll area instead.
+    // Use a screen-derived max height only — not [LayoutBuilder], which
+    // participates in intrinsic sizing passes inside [AlertDialog] and can
+    // trigger "LayoutBuilder does not support returning intrinsic dimensions".
     final double maxHeight = media.size.height * 0.75;
 
+    // [AlertDialog] may wrap [content] in a scroll view with unbounded height;
+    // [Expanded] needs a finite height. [SizedBox] from [MediaQuery] avoids
+    // intrinsic-layout conflicts.
     return SizedBox(
       width: double.maxFinite,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          // Allow the content to shrink for few items but never overflow screen.
-          maxHeight: maxHeight,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-            ),
-            const SizedBox(height: 4),
-            TextField(
-              controller: _searchController,
-              focusNode: widget.searchQuotesFocusNode,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: 'Search quotes',
-                hintText: 'Type quote name',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.search),
+      height: maxHeight,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+              Text(
+                'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
               ),
-              onChanged: (_) => setState(() {}),
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: filtered.isEmpty
-                  ? Center(
-                      child: Text(
-                        'No matching quotes',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    )
-                  : ListView.builder(
+              const SizedBox(height: 4),
+              TextField(
+                controller: _searchController,
+                focusNode: widget.searchQuotesFocusNode,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Search quotes',
+                  hintText: 'Type quote name',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.search),
+                ),
+                onChanged: (_) => setState(() {}),
+                onTapOutside: (_) {
+                  widget.searchQuotesFocusNode.unfocus();
+                },
+              ),
+              const SizedBox(height: 4),
+              Expanded(
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (ScrollNotification n) {
+                    if (n is UserScrollNotification) {
+                      widget.searchQuotesFocusNode.unfocus();
+                    }
+                    return false;
+                  },
+                  child: filtered.isEmpty
+                      ? Center(
+                          child: Text(
+                            'No matching quotes',
+                            style: TextStyle(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
                       itemCount: filtered.length,
                       itemBuilder: (_, i) {
                         final info = filtered[i];
                         final String customerName =
                             info.customerName.trim().isEmpty
-                                ? 'No customer'
-                                : info.customerName.trim();
+                            ? 'No customer'
+                            : info.customerName.trim();
                         final String quoteName = info.name.isEmpty
                             ? 'Unnamed quote'
                             : info.name;
-                        final rawBucketKey =
-                            info.quoteBucketKey.trim().toLowerCase();
+                        final rawBucketKey = info.quoteBucketKey
+                            .trim()
+                            .toLowerCase();
                         final rawBucketLabel = info.quoteBucketLabel.trim();
                         final String bucketLabel = rawBucketLabel.isEmpty
                             ? 'EVERYDAY'
                             : (rawBucketKey == 'every_day'
-                                ? 'EVERYDAY'
-                                : rawBucketLabel);
+                                  ? 'EVERYDAY'
+                                  : rawBucketLabel);
                         final theme = Theme.of(context);
                         return SizedBox(
                           key: ValueKey(info.id),
@@ -1669,8 +1727,9 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                           child: Material(
                             color: Colors.transparent,
                             child: InkWell(
-                              onTap: () => Navigator.of(widget.dialogContext)
-                                  .pop(info.id),
+                              onTap: () => Navigator.of(
+                                widget.dialogContext,
+                              ).pop(info.id),
                               child: Padding(
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 12,
@@ -1699,9 +1758,10 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                             overflow: TextOverflow.ellipsis,
                                             style: theme.textTheme.bodySmall
                                                 ?.copyWith(
-                                              color: theme
-                                                  .colorScheme.onSurfaceVariant,
-                                            ),
+                                                  color: theme
+                                                      .colorScheme
+                                                      .onSurfaceVariant,
+                                                ),
                                           ),
                                         ],
                                       ),
@@ -1709,17 +1769,19 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                     SizedBox(
                                       width: 112,
                                       child: Row(
-                                        mainAxisAlignment: MainAxisAlignment.end,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.end,
                                         children: [
                                           IconButton(
                                             icon: const Icon(
                                               Icons.email_outlined,
                                             ),
                                             tooltip: 'Email / Share quote',
-                                            onPressed: () => widget.onShareQuote(
-                                              info.id,
-                                              info.name,
-                                            ),
+                                            onPressed: () =>
+                                                widget.onShareQuote(
+                                                  info.id,
+                                                  info.name,
+                                                ),
                                           ),
                                           IconButton(
                                             icon: const Icon(
@@ -1728,8 +1790,7 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                             tooltip:
                                                 'Remove from list (after emailing or saving)',
                                             onPressed: () async {
-                                              final confirm =
-                                                  await showDialog<bool>(
+                                              final confirm = await showDialog<bool>(
                                                 context: context,
                                                 builder: (c) => AlertDialog(
                                                   title: const Text(
@@ -1743,9 +1804,9 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                                     TextButton(
                                                       onPressed: () =>
                                                           Navigator.pop(
-                                                        c,
-                                                        false,
-                                                      ),
+                                                            c,
+                                                            false,
+                                                          ),
                                                       child: const Text(
                                                         'Cancel',
                                                       ),
@@ -1753,9 +1814,9 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                                     TextButton(
                                                       onPressed: () =>
                                                           Navigator.pop(
-                                                        c,
-                                                        true,
-                                                      ),
+                                                            c,
+                                                            true,
+                                                          ),
                                                       child: const Text(
                                                         'Delete',
                                                       ),
@@ -1774,11 +1835,13 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                                     _quotes.removeWhere(
                                                       (e) => e.id == info.id,
                                                     );
-                                                    becameEmpty = _quotes.isEmpty;
+                                                    becameEmpty =
+                                                        _quotes.isEmpty;
                                                   });
                                                   if (becameEmpty) {
-                                                    FocusScope.of(context)
-                                                        .unfocus();
+                                                    FocusScope.of(
+                                                      context,
+                                                    ).unfocus();
                                                     _searchController.clear();
                                                   }
                                                 }
@@ -1796,10 +1859,10 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                         );
                       },
                     ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -1832,11 +1895,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   final FocusNode _scannerFocusNode = FocusNode();
   final TextEditingController _scannerController = TextEditingController();
 
+  /// Load Quote dialog only — search field ([_LoadQuoteDialogContent]).
   final FocusNode _searchQuotesFocusNode = FocusNode();
   final FocusNode _searchCustomersFocusNode = FocusNode();
 
   final FocusNode _quickEntryFocusNode = FocusNode();
   final TextEditingController _quickEntryController = TextEditingController();
+
   /// Keeps the manual Item # / UPC [TextField] instance when it moves into the keyboard bar.
   final GlobalKey _quickEntryTextFieldKey = GlobalKey();
 
@@ -1850,8 +1915,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     text: 'NEW QUOTE',
   );
 
-  final ScrollController _orderListScrollController = ScrollController();
   final ScrollController _orderListTabScrollController = ScrollController();
+
   /// Scroll controller for the Scan tab middle (order list + details + search hits).
   final ScrollController _scanPanelScrollController = ScrollController();
 
@@ -1873,6 +1938,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _productsByItemNumber.values.toList(growable: false);
 
   final List<OrderLine> _orderLines = [];
+
   /// Order lines keyed by a strict identity based on full item number (preferred) or UPC.
   /// This ensures similar-looking item numbers (e.g. 87001 vs 87002) are never merged.
   final Map<String, OrderLine> _orderLineByKey = {};
@@ -1880,9 +1946,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Timer? _scanDebounceTimer;
   Timer? _refocusTimer;
   Timer? _scanFeedbackTimer;
+
   /// Cancels stale tail-cutoff pauses so rapid error scans are not clipped by an older timer.
   Timer? _errorBuzzTailPauseTimer;
   Timer? _quoteNameBarcodeDebounce;
+
   /// Clears [_scanTabHighlightLineKey] after a brief post-scan flash (Scan tab order list only).
   Timer? _scanTabHighlightClearTimer;
 
@@ -1891,22 +1959,27 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Timer? _searchDebounce;
 
   /// E-Catalog tab (V1): filters over [_productsByItemNumber] only; no extra CSV load.
-  final TextEditingController _catalogSearchController = TextEditingController();
+  final TextEditingController _catalogSearchController =
+      TextEditingController();
+  final FocusNode _ecatalogSearchFocusNode = FocusNode();
+  Timer? _ecatalogSearchKeyboardIdleTimer;
   String _catalogSearchQuery = '';
+
   /// null means "All Categories".
   String? _selectedCatalogCategory;
-  /// null means "All Product Types".
-  String? _selectedCatalogProductType;
-  bool _catalogNewReleaseOnly = false;
-  bool _catalogPsOnly = false;
-  bool _catalogGcOnly = false;
+
+  /// null means "All Sub-Categories".
+  String? _selectedCatalogSubCategory;
+
+  /// ECatalog merchandising: `newItems` | `everyday` | `homeDecor` | `seasonal` | `sale` (PS) | null (all).
+  String? _catalogMerchandising;
   bool _catalogInOrderOnly = false;
   String _catalogFilteredCacheKey = '';
   List<Product>? _catalogFilteredProductsCache;
   List<String>? _catalogDistinctCategories;
-  int? _catalogDistinctCategoriesProductCount;
-  String? _catalogProductTypeOptionsCacheKey;
-  List<String>? _catalogProductTypeOptionsCache;
+  String _catalogDistinctCategoriesCacheKey = '';
+  String? _catalogSubCategoryOptionsCacheKey;
+  List<String>? _catalogSubCategoryOptionsCache;
 
   late final AudioPlayer _goodScanPlayer;
   late final AudioPlayer _goodScanPlayer2;
@@ -1948,9 +2021,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   bool _loadingProducts = true;
   bool _loadingProductsFromWeb = false;
   bool _isLoadingCustomers = false;
+
   /// After a CSV/sheet customer reload, used to re-select a locally added customer.
   Customer? _pendingRestoreCustomerAfterLocalMerge;
   bool _editDialogOpen = false;
+
   /// Prevents overlapping order-CSV imports (second tap while apply/write still runs → duplicate ITEMS_NOT_IMPORTED writes).
   bool _orderCsvImportInProgress = false;
 
@@ -1962,8 +2037,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// When non-null, [_ensureRoutingForProduct] logs each bucket once per CSV import session.
   String? _quoteImportDebugSession;
   final Set<String> _quoteImportLoggedBucketKeys = <String>{};
+
   /// Grep: [ImportRoute] — first routing touch per customer+bucket during CSV import.
   final Set<String> _orderImportRouteTraceKeys = <String>{};
+
   /// Every quote id persisted via [_saveQuote] during a single order CSV import (all routed buckets).
   final Set<String> _orderImportTouchedQuoteIds = <String>{};
 
@@ -1981,6 +2058,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Orders tab only: which order line card is expanded ([_orderLineKeyForProduct]); at most one.
   String? _ordersTabExpandedLineKey;
+
+  /// Scan tab only: which order line card is expanded ([_orderLineKeyForProduct]); at most one.
+  String? _scanTabExpandedLineKey;
+
+  /// E-Catalog tab only: which catalog row is expanded ([Product.itemNumber.trim]); at most one.
+  String? _ecatalogExpandedItemKey;
 
   /// [GlobalKey]s for Scan tab order rows — used with [Scrollable.ensureVisible] after a scan (UI only).
   final Map<String, GlobalKey> _scanTabOrderRowKeys = <String, GlobalKey>{};
@@ -2004,12 +2087,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   List<Customer> _customers = [];
   final Map<String, Customer> _customersByKey = {};
   Customer? _selectedCustomer;
+
   /// Updated when customer CSV loads; no longer shown in Scan panel.
   // ignore: unused_field
   String _customersLoadDebugLine = 'Customers Loaded: loading…';
+
   /// Updated when product catalog loads; no longer shown in Scan panel.
   // ignore: unused_field
   String _productsLoadDebugLine = 'Products Loaded: loading…';
+
   /// When non-null, Save Quote updates this quote instead of creating a new one.
   String? _currentQuoteId;
   String _activeQuoteBucketKey = _defaultQuoteBucketKey;
@@ -2180,7 +2266,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final raw = _scanPerfRawBySeq.remove(seq) ?? '';
     final scanTabBuildDelta =
         _scanTabBuildCount - (_scanStartScanTabBuildCount.remove(seq) ?? 0);
-    final orderListTabBuildDelta = _orderListTabBuildCount -
+    final orderListTabBuildDelta =
+        _orderListTabBuildCount -
         (_scanStartOrderListTabBuildCount.remove(seq) ?? 0);
     final orderListBuildDelta =
         _orderListBuildCount - (_scanStartOrderListBuildCount.remove(seq) ?? 0);
@@ -2189,10 +2276,36 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
+  void _scheduleECatalogSearchKeyboardIdleDismiss() {
+    _ecatalogSearchKeyboardIdleTimer?.cancel();
+    _ecatalogSearchKeyboardIdleTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      if (_ecatalogSearchFocusNode.hasFocus) {
+        _ecatalogSearchFocusNode.unfocus();
+      }
+    });
+  }
+
   void _onCatalogSearchChanged() {
     final next = _catalogSearchController.text;
     if (next == _catalogSearchQuery) return;
-    setState(() => _catalogSearchQuery = next);
+    _scheduleECatalogSearchKeyboardIdleDismiss();
+    setState(() {
+      _catalogSearchQuery = next;
+      _ecatalogExpandedItemKey = null;
+    });
+  }
+
+  bool _onECatalogScrollDismissKeyboard(ScrollNotification notification) {
+    final userInitiated = notification is UserScrollNotification ||
+        (notification is ScrollStartNotification &&
+            notification.dragDetails != null);
+    if (!userInitiated) return false;
+    _ecatalogSearchKeyboardIdleTimer?.cancel();
+    if (_ecatalogSearchFocusNode.hasFocus) {
+      _ecatalogSearchFocusNode.unfocus();
+    }
+    return false;
   }
 
   void _onQuoteNameChanged() {
@@ -2263,12 +2376,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // can break first/double beep. Sources are set on first play and then reused via seek+resume.
 
       if (Platform.isWindows) {
-        _windowsGoodScanBytes =
-            (await rootBundle.load(_goodScanAsset)).buffer.asUint8List();
-        _windowsGoodScan2Bytes =
-            (await rootBundle.load(_goodScan2Asset)).buffer.asUint8List();
-        _windowsErrorScanBytes =
-            (await rootBundle.load(_errorScanAsset)).buffer.asUint8List();
+        _windowsGoodScanBytes = (await rootBundle.load(
+          _goodScanAsset,
+        )).buffer.asUint8List();
+        _windowsGoodScan2Bytes = (await rootBundle.load(
+          _goodScan2Asset,
+        )).buffer.asUint8List();
+        _windowsErrorScanBytes = (await rootBundle.load(
+          _errorScanAsset,
+        )).buffer.asUint8List();
       }
 
       debugPrint('[Audio] initialized OK');
@@ -2310,8 +2426,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     _catalogSearchController.removeListener(_onCatalogSearchChanged);
     _catalogSearchController.dispose();
+    _ecatalogSearchKeyboardIdleTimer?.cancel();
+    _ecatalogSearchFocusNode.dispose();
 
-    _orderListScrollController.dispose();
     _orderListTabScrollController.dispose();
     _scanPanelScrollController.dispose();
     _scanTabHighlightClearTimer?.cancel();
@@ -2351,7 +2468,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (!mounted) return;
     final keyboardClosed =
         _quickEntryHoldFloatingLayoutForKeyboard &&
-            MediaQuery.viewInsetsOf(context).bottom == 0;
+        MediaQuery.viewInsetsOf(context).bottom == 0;
     if (keyboardClosed) {
       setState(() {
         _quickEntryHoldFloatingLayoutForKeyboard = false;
@@ -2371,17 +2488,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   void _scheduleScannerRefocus() {
     final startedAt = DateTime.now();
     _refocusTimer?.cancel();
-    _refocusTimer = Timer(const Duration(milliseconds: _scannerRefocusDelayMs), () {
-      if (!mounted) return;
-      if (!_shouldReclaimScannerFocus()) return;
-      if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
-        debugPrint('SCAN_PATH[focus_refocus_timer_fired]');
-      }
-      _perfLog(
-        'focus restore timer fired after ${DateTime.now().difference(startedAt).inMilliseconds}ms',
-      );
-      _requestScannerFocus();
-    });
+    _refocusTimer = Timer(
+      const Duration(milliseconds: _scannerRefocusDelayMs),
+      () {
+        if (!mounted) return;
+        if (!_shouldReclaimScannerFocus()) return;
+        if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
+          debugPrint('SCAN_PATH[focus_refocus_timer_fired]');
+        }
+        _perfLog(
+          'focus restore timer fired after ${DateTime.now().difference(startedAt).inMilliseconds}ms',
+        );
+        _requestScannerFocus();
+      },
+    );
   }
 
   void _recoverScannerFocusAfterTabChange({
@@ -2654,8 +2774,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!mounted) return;
 
       if (Platform.isWindows) {
-        final bytes =
-            isSingle ? _windowsGoodScanBytes : _windowsGoodScan2Bytes;
+        final bytes = isSingle ? _windowsGoodScanBytes : _windowsGoodScan2Bytes;
         if (bytes == null) {
           debugPrint(
             '[Audio] Windows scan sound bytes missing '
@@ -2719,9 +2838,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         debugPrint('Play attempt');
       }
     } catch (e, st) {
-      debugPrint(
-        '[Audio] good beep error (single=$isSingle): $e',
-      );
+      debugPrint('[Audio] good beep error (single=$isSingle): $e');
       if (kDebugMode && !isSingle) {
         debugPrint('[Audio] good beep p2: $st');
       }
@@ -2746,7 +2863,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final bytes = _windowsErrorScanBytes;
         if (bytes != null) {
           if (!_errorScanPlayerSourceReady) {
-            await _errorScanPlayer.setSourceBytes(bytes, mimeType: 'audio/mpeg');
+            await _errorScanPlayer.setSourceBytes(
+              bytes,
+              mimeType: 'audio/mpeg',
+            );
             if (!mounted) return;
             _errorScanPlayerSourceReady = true;
           } else {
@@ -2770,14 +2890,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         // Same 500ms cutoff as before (avoid long tails); pause keeps source prepared
         // for the next bad scan instead of stop()+clearing [_errorScanPlayerSourceReady].
         _errorBuzzTailPauseTimer?.cancel();
-        _errorBuzzTailPauseTimer =
-            Timer(const Duration(milliseconds: 500), () async {
-          _errorBuzzTailPauseTimer = null;
-          if (!mounted) return;
-          try {
-            await _errorScanPlayer.pause();
-          } catch (_) {}
-        });
+        _errorBuzzTailPauseTimer = Timer(
+          const Duration(milliseconds: 500),
+          () async {
+            _errorBuzzTailPauseTimer = null;
+            if (!mounted) return;
+            try {
+              await _errorScanPlayer.pause();
+            } catch (_) {}
+          },
+        );
       }
     } catch (e) {
       debugPrint('[Audio] error buzz error: $e');
@@ -2843,9 +2965,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return 'fall_winter';
     }
 
-    if (t == 'halloween' ||
-        t == 'halloween_quote' ||
-        t == 'halloween quote') {
+    if (t == 'halloween' || t == 'halloween_quote' || t == 'halloween quote') {
       return 'halloween';
     }
 
@@ -2991,23 +3111,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return _defaultQuoteBucketDefinition;
     }
     if (fromProductType.isNotEmpty) {
-      final resolved = _quoteBucketsByRawType[_normalizeBucketLookup(
-        fromProductType,
-      )];
+      final resolved =
+          _quoteBucketsByRawType[_normalizeBucketLookup(fromProductType)];
       if (resolved != null) return resolved;
     }
 
     final fromCategory = product.category.trim();
     if (fromCategory.isNotEmpty) {
-      final resolved = _quoteBucketsByRawType[_normalizeBucketLookup(
-        fromCategory,
-      )];
+      final resolved =
+          _quoteBucketsByRawType[_normalizeBucketLookup(fromCategory)];
       if (resolved != null) return resolved;
     }
 
     // Pride should always route to the PRIDE quote, even when product type
     // values include additional words not listed as explicit mappings.
-    if (_containsPrideToken(fromProductType) || _containsPrideToken(fromCategory)) {
+    if (_containsPrideToken(fromProductType) ||
+        _containsPrideToken(fromCategory)) {
       final prideBucket = _quoteBucketsByBucketKey['pride'];
       if (prideBucket != null) return prideBucket;
     }
@@ -3163,7 +3282,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Prunes superseded empty duplicates for every logical customer present in the
   /// active index (so Load Quote reflects [quotes_active.json] after cleanup).
-  Future<void> _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers() async {
+  Future<void>
+  _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers() async {
     final snapshot = await _loadQuoteIndex();
     final seenRoute = <String>{};
     for (final info in snapshot) {
@@ -3184,8 +3304,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
       if (!await indexFile.exists()) return;
 
-      final archiveIds =
-          (await _loadArchiveQuoteIndex()).map((e) => e.id).toSet();
+      final archiveIds = (await _loadArchiveQuoteIndex())
+          .map((e) => e.id)
+          .toSet();
       final content = await indexFile.readAsString();
       final decoded = jsonDecode(content);
       if (decoded is! List) return;
@@ -3245,9 +3366,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             idsToRemove.add(id);
           }
           final cur = _currentQuoteId;
-          if (cur != null &&
-              emptyIds.contains(cur) &&
-              nonEmptyIds.isNotEmpty) {
+          if (cur != null && emptyIds.contains(cur) && nonEmptyIds.isNotEmpty) {
             // Prefer newest non-empty quote when dropping the empty starter that
             // is still the current id (never skip removal just because it is current).
             replacementIdIfCurrentRemoved ??= nonEmptyIds.first;
@@ -3336,8 +3455,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (text.isEmpty) return true;
     final upper = text.toUpperCase();
     if (upper == 'NEW QUOTE') return true;
-    return RegExp(r'^QUOTE_\d{4}_\d{2}_\d{2}_\d{3}$', caseSensitive: false)
-        .hasMatch(text);
+    return RegExp(
+      r'^QUOTE_\d{4}_\d{2}_\d{2}_\d{3}$',
+      caseSensitive: false,
+    ).hasMatch(text);
   }
 
   Future<void> _ensureRoutingForProduct(Product product) async {
@@ -3356,8 +3477,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final tracePrefix = kspTrace
         ? '[KSP Routing]'
         : graduationTrace
-            ? '[Graduation Routing]'
-            : '[Routing]';
+        ? '[Graduation Routing]'
+        : '[Routing]';
 
     _traceBucketRouteLine(
       kspTrace: kspTrace,
@@ -3415,10 +3536,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           }
         }
         if (_currentQuoteId == null) {
-          final emptyReuseId = await _findEmptyPersistedQuoteIdForCustomerBucket(
-            customer: customer,
-            bucketKey: _activeQuoteBucketKey,
-          );
+          final emptyReuseId =
+              await _findEmptyPersistedQuoteIdForCustomerBucket(
+                customer: customer,
+                bucketKey: _activeQuoteBucketKey,
+              );
           if (emptyReuseId != null) {
             if (_orderLines.isEmpty) {
               await _loadQuoteById(emptyReuseId);
@@ -3456,7 +3578,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       customer,
       _activeQuoteBucketKey,
     );
-    final targetRouteKey = _routeKeyForCustomerBucket(customer, bucket.bucketKey);
+    final targetRouteKey = _routeKeyForCustomerBucket(
+      customer,
+      bucket.bucketKey,
+    );
     if (!bucketTrace) {
       _debugLogQuoteRouting(
         '[Routing] Route key current: "$currentRouteKey"  target: "$targetRouteKey"',
@@ -3500,7 +3625,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _traceBucketRouteLine(
           kspTrace: kspTrace,
           graduationTrace: graduationTrace,
-          message: '$tracePrefix Existing quote found: yes (id=$existingQuoteId)',
+          message:
+              '$tracePrefix Existing quote found: yes (id=$existingQuoteId)',
         );
       } else {
         _debugLogQuoteRouting(
@@ -3620,7 +3746,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         if (rawKey.isEmpty || rawValue is! Map<String, dynamic>) continue;
 
         final bucketKey = (rawValue['bucketKey'] as String?)?.trim() ?? '';
-        final displayLabel = (rawValue['displayLabel'] as String?)?.trim() ?? '';
+        final displayLabel =
+            (rawValue['displayLabel'] as String?)?.trim() ?? '';
         if (bucketKey.isEmpty || displayLabel.isEmpty) continue;
 
         final definition = QuoteBucketDefinition(
@@ -3770,9 +3897,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       builder: (dialogContext) {
         return AlertDialog(
           title: const Text('Export failed'),
-          content: SingleChildScrollView(
-            child: SelectableText(message),
-          ),
+          content: SingleChildScrollView(child: SelectableText(message)),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
@@ -3792,9 +3917,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       await Share.shareXFiles([XFile(file.path, mimeType: 'text/csv')]);
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to share file')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Unable to share file')));
     }
   }
 
@@ -3815,9 +3940,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       await Share.shareXFiles(existing);
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to share files')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Unable to share files')));
     }
   }
 
@@ -3825,9 +3950,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     try {
       if (!await file.exists()) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('File not found.')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('File not found.')));
         return;
       }
       final path = file.path;
@@ -3842,9 +3967,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to open file')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Unable to open file')));
     }
   }
 
@@ -3867,8 +3992,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final day = stampedOn.day.toString().padLeft(2, '0');
     final dateUnderscore = '${y}_${mo}_${day}';
     final dateCompact = '$y$mo$day';
-    final seq =
-        (stampedOn.millisecondsSinceEpoch % 1000).toString().padLeft(3, '0');
+    final seq = (stampedOn.millisecondsSinceEpoch % 1000).toString().padLeft(
+      3,
+      '0',
+    );
     final cust = _itemsNotImportedCustomerFilenameSegment(customerDisplayName);
     return 'ITEMS_NOT_IMPORTED_${dateUnderscore}_${seq}_${cust}_$dateCompact.csv';
   }
@@ -4170,12 +4297,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             parts.add('id=${info.id}:err');
           }
         }
-        _debugLogQuoteImportExport('[ExportAll] candidates: ${parts.join('; ')}');
+        _debugLogQuoteImportExport(
+          '[ExportAll] candidates: ${parts.join('; ')}',
+        );
       }
 
       for (final info in matchingByBucket.values) {
-        final bucketLabel =
-            info.quoteBucketLabel.trim().isEmpty ? '?' : info.quoteBucketLabel;
+        final bucketLabel = info.quoteBucketLabel.trim().isEmpty
+            ? '?'
+            : info.quoteBucketLabel;
         if (!exportedQuoteIds.add(info.id)) {
           if (kDebugMode) {
             debugPrint(
@@ -4359,7 +4489,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (currentId == null) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Current quote is not available to export.')),
+          const SnackBar(
+            content: Text('Current quote is not available to export.'),
+          ),
         );
         return;
       }
@@ -4528,14 +4660,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     if (matching.isEmpty) {
-      lines.insert(
-        0,
-        OrderLine(
-          product: product,
-          quantity: addQty,
-          scans: 1,
-        ),
-      );
+      lines.insert(0, OrderLine(product: product, quantity: addQty, scans: 1));
       return;
     }
 
@@ -4567,11 +4692,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     if (matching.isEmpty) {
       final key = _orderLineKeyForProduct(product);
-      final line = OrderLine(
-        product: product,
-        quantity: newQuantity,
-        scans: 1,
-      );
+      final line = OrderLine(product: product, quantity: newQuantity, scans: 1);
       _orderLines.insert(0, line);
       _orderLineByKey[key] = line;
       return;
@@ -4604,11 +4725,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     final workingOrderLines = <OrderLine>[
       for (final l in _orderLines)
-        OrderLine(
-          product: l.product,
-          quantity: l.quantity,
-          scans: l.scans,
-        ),
+        OrderLine(product: l.product, quantity: l.quantity, scans: l.scans),
     ];
 
     final lines = <OrderImportPreparedLine>[];
@@ -4639,8 +4756,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (importedQty != rowQuantity) {
         csvMoqAdjustedRows++;
       }
-      final existingSum =
-          _sumExistingQtyOnLinesForImportMerge(product, workingOrderLines);
+      final existingSum = _sumExistingQtyOnLinesForImportMerge(
+        product,
+        workingOrderLines,
+      );
       lines.add(
         OrderImportPreparedLine(
           displayItem: item,
@@ -4670,8 +4789,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required OrderImportPrepareOutcome prepare,
     required List<OrderImportDuplicateResolution> duplicateChoices,
   }) async {
-    final expectedDupes =
-        prepare.lines.where((OrderImportPreparedLine l) => l.isDuplicate).length;
+    final expectedDupes = prepare.lines
+        .where((OrderImportPreparedLine l) => l.isDuplicate)
+        .length;
     if (duplicateChoices.length != expectedDupes) {
       debugPrint(
         '[OrderImport] duplicate choice mismatch: got ${duplicateChoices.length} '
@@ -4875,7 +4995,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                 const SizedBox(height: 16),
                 Text('New Items Added: ${applyOutcome.newItemsCount}'),
                 const SizedBox(height: 12),
-                Text('Duplicates Resolved: ${applyOutcome.duplicateItemsCount}'),
+                Text(
+                  'Duplicates Resolved: ${applyOutcome.duplicateItemsCount}',
+                ),
                 Padding(
                   padding: const EdgeInsets.only(left: 12, top: 4),
                   child: Column(
@@ -4887,11 +5009,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                       Text(
                         'Minimum qty: ${applyOutcome.duplicateChoiceMinimumQtyCount}',
                       ),
-                      Text(
-                        'Skipped: ${applyOutcome.duplicateChoiceSkipCount}',
-                      ),
-                      if (dupUse > 0)
-                        Text('Use imported qty: $dupUse'),
+                      Text('Skipped: ${applyOutcome.duplicateChoiceSkipCount}'),
+                      if (dupUse > 0) Text('Use imported qty: $dupUse'),
                     ],
                   ),
                 ),
@@ -4982,11 +5101,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     if (matching.isEmpty) {
       final key = _orderLineKeyForProduct(product);
-      final line = OrderLine(
-        product: product,
-        quantity: addQty,
-        scans: 1,
-      );
+      final line = OrderLine(product: product, quantity: addQty, scans: 1);
       _orderLines.insert(0, line);
       _orderLineByKey[key] = line;
       return;
@@ -5066,9 +5181,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           contributingFileNames.add(file.name);
         } on FormatException catch (e) {
           if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('${file.name}: ${e.message}')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('${file.name}: ${e.message}')));
           return;
         }
       }
@@ -5086,7 +5201,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final sourceFileLabel = contributingFileNames.length == 1
           ? contributingFileNames.single
           : '${contributingFileNames.length} files: '
-              '${contributingFileNames.join(', ')}';
+                '${contributingFileNames.join(', ')}';
 
       if (_productsByItemNumber.isEmpty && _productsByUpc.isEmpty) {
         if (!mounted) return;
@@ -5107,17 +5222,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return;
       }
 
-      _quoteImportDebugSession =
-          kDebugMode ? 'imp_${DateTime.now().millisecondsSinceEpoch}' : null;
+      _quoteImportDebugSession = kDebugMode
+          ? 'imp_${DateTime.now().millisecondsSinceEpoch}'
+          : null;
       _quoteImportLoggedBucketKeys.clear();
-      final totalRowsProcessed =
-          combinedRows.length + allParseSkipped.length;
+      final totalRowsProcessed = combinedRows.length + allParseSkipped.length;
       final prepare = _prepareOrderImportLines(
         combinedRows,
         totalRowsProcessed: totalRowsProcessed,
       );
-      final duplicateLines =
-          prepare.lines.where((l) => l.isDuplicate).toList(growable: false);
+      final duplicateLines = prepare.lines
+          .where((l) => l.isDuplicate)
+          .toList(growable: false);
       final List<OrderImportDuplicateResolution> dupChoices;
       if (duplicateLines.isEmpty) {
         dupChoices = const [];
@@ -5125,11 +5241,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         if (!mounted) return;
         final fromDialog =
             await showDialog<List<OrderImportDuplicateResolution>>(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) =>
-              _OrderImportDuplicateReviewDialog(items: duplicateLines),
-        );
+              context: context,
+              barrierDismissible: false,
+              builder: (ctx) =>
+                  _OrderImportDuplicateReviewDialog(items: duplicateLines),
+            );
         if (fromDialog == null) return;
         dupChoices = fromDialog;
       }
@@ -5204,9 +5320,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _editDialogOpen = false;
       debugPrint('[OrderImport] failed: $e\n$st');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Import failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Import failed: $e')));
     } finally {
       _quoteImportDebugSession = null;
       _quoteImportLoggedBucketKeys.clear();
@@ -5294,8 +5410,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return;
     }
 
-    final header =
-        rows.first.map((e) => e.toString().trim()).toList(growable: false);
+    final header = rows.first
+        .map((e) => e.toString().trim())
+        .toList(growable: false);
     final byNorm = _productHeaderIndexMap(header);
 
     final idxItemNumber = _requireProductColumnIndex(
@@ -5310,37 +5427,32 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       const ['description'],
       header,
     );
-    final idxUpc = _requireProductColumnIndex(byNorm, 'UPC', const ['upc'], header);
-    final idxPrice = _requireProductColumnIndex(
-      byNorm,
-      'Price',
-      const ['price'],
-      header,
-    );
-    final idxDiscount = _requireProductColumnIndex(
-      byNorm,
-      'DISCOUNT',
-      const ['discount'],
-      header,
-    );
+    final idxUpc = _requireProductColumnIndex(byNorm, 'UPC', const [
+      'upc',
+    ], header);
+    final idxPrice = _requireProductColumnIndex(byNorm, 'Price', const [
+      'price',
+    ], header);
+    final idxDiscount = _requireProductColumnIndex(byNorm, 'DISCOUNT', const [
+      'discount',
+    ], header);
     final idxNet = _optionalProductColumnIndex(byNorm, const ['net']);
     final idxPs = _optionalProductColumnIndex(byNorm, const ['ps']);
-    final idxListPrice =
-        _optionalProductColumnIndex(byNorm, const ['listprice']);
-    final idxNewRelease =
-        _optionalProductColumnIndex(byNorm, const ['newrelease']);
+    final idxListPrice = _optionalProductColumnIndex(byNorm, const [
+      'listprice',
+    ]);
+    final idxNewRelease = _optionalProductColumnIndex(byNorm, const [
+      'newrelease',
+    ]);
     final idxProductType = _requireProductColumnIndex(
       byNorm,
       'Product Type',
       const ['producttype'],
       header,
     );
-    final idxCategory = _requireProductColumnIndex(
-      byNorm,
-      'Category',
-      const ['category'],
-      header,
-    );
+    final idxCategory = _requireProductColumnIndex(byNorm, 'Category', const [
+      'category',
+    ], header);
     final idxSubCategory = _requireProductColumnIndex(
       byNorm,
       'Sub-Category',
@@ -5353,12 +5465,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       const ['minorderqty'],
       header,
     );
-    final idxCaseQty = _requireProductColumnIndex(
-      byNorm,
-      'Case Qty',
-      const ['caseqty'],
-      header,
-    );
+    final idxCaseQty = _requireProductColumnIndex(byNorm, 'Case Qty', const [
+      'caseqty',
+    ], header);
 
     final maxColIndex = [
       idxItemNumber,
@@ -5391,8 +5500,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     for (int i = 1; i < rows.length; i++) {
       final row = rows[i];
-      if (row.isEmpty ||
-          row.every((e) => e.toString().trim().isEmpty)) {
+      if (row.isEmpty || row.every((e) => e.toString().trim().isEmpty)) {
         skippedParseErrorRows++;
         continue;
       }
@@ -5478,8 +5586,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _catalogCount = _productsByUpc.length;
     _catalogSource = sourceLabel;
 
-    final int skippedRows =
-        skippedMissingKeyRows + skippedParseErrorRows;
+    final int skippedRows = skippedMissingKeyRows + skippedParseErrorRows;
 
     setProductsDebugLine('Products Loaded: $_catalogCount');
 
@@ -5552,8 +5659,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     debugPrint('[Customers] _loadCustomersFromAssets called');
     try {
       debugPrint('[Customers] Attempting to load assets/data/customers.csv');
-      final rawCsv =
-          await rootBundle.loadString('assets/data/customers.csv');
+      final rawCsv = await rootBundle.loadString('assets/data/customers.csv');
       debugPrint(
         '[Customers] customers.csv loaded successfully '
         '(${rawCsv.length} characters)',
@@ -5561,9 +5667,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _parseAndStoreCustomers(rawCsv);
       debugPrint('[Customers] parse completed');
     } catch (e, st) {
-      debugPrint(
-        '[Customers] Failed to load assets/data/customers.csv: $e',
-      );
+      debugPrint('[Customers] Failed to load assets/data/customers.csv: $e');
       debugPrint('[Customers] Stack: $st');
       if (mounted) {
         setState(() {
@@ -5692,9 +5796,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Products updated successfully ($productCount loaded)',
-          ),
+          content: Text('Products updated successfully ($productCount loaded)'),
           duration: Duration(seconds: 2),
         ),
       );
@@ -5792,18 +5894,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       return out;
     } catch (e, st) {
-      debugPrint(
-        '[Customers] Read $_kAddedCustomersFilename failed: $e\n$st',
-      );
+      debugPrint('[Customers] Read $_kAddedCustomersFilename failed: $e\n$st');
       return [];
     }
   }
 
   Future<void> _writeAddedCustomersToDisk(List<Customer> customers) async {
     final file = await _addedCustomersFile();
-    final payload =
-        customers.map((c) => c.toJson()).toList(growable: false);
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(payload));
+    final payload = customers.map((c) => c.toJson()).toList(growable: false);
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(payload),
+    );
   }
 
   bool _customerNameCollides(
@@ -5992,9 +6093,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (_customerIdCollides(effectiveId, _customers)) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('This customer ID is already in use'),
-          ),
+          const SnackBar(content: Text('This customer ID is already in use')),
         );
         return;
       }
@@ -6013,8 +6112,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return;
       }
 
-      final newCustomer =
-          _customerFromManualEntry(companyName: name, idOrEmpty: idPart);
+      final newCustomer = _customerFromManualEntry(
+        companyName: name,
+        idOrEmpty: idPart,
+      );
       if (_customerNameCollides(name, onDisk) ||
           _customerIdCollides(effectiveId, onDisk)) {
         if (!mounted) return;
@@ -6032,9 +6133,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         debugPrint('[Customers] Add write disk: $e\n$st');
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not save customer to device'),
-          ),
+          const SnackBar(content: Text('Could not save customer to device')),
         );
         return;
       }
@@ -6042,9 +6141,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!mounted) return;
       await _reapplyLocalAddedCustomers();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Customer added')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Customer added')));
     } finally {
       _editDialogOpen = false;
       nameController.dispose();
@@ -6127,8 +6226,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     final firstLine = rawCsv.split('\n').first;
-    final useTab =
-        firstLine.split('\t').length > firstLine.split(',').length;
+    final useTab = firstLine.split('\t').length > firstLine.split(',').length;
     List<List<dynamic>> rows;
     try {
       rows = CsvToListConverter(
@@ -6345,13 +6443,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 if (!mounted) return;
                 if (!_searchCustomersFocusNode.hasFocus) {
-                  FocusScope.of(context).requestFocus(_searchCustomersFocusNode);
+                  FocusScope.of(
+                    context,
+                  ).requestFocus(_searchCustomersFocusNode);
                 }
               });
               Future.delayed(const Duration(milliseconds: 150), () {
                 if (!mounted) return;
                 if (!_searchCustomersFocusNode.hasFocus) {
-                  FocusScope.of(context).requestFocus(_searchCustomersFocusNode);
+                  FocusScope.of(
+                    context,
+                  ).requestFocus(_searchCustomersFocusNode);
                 }
               });
             }
@@ -6360,17 +6462,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               final q = query.trim().toLowerCase();
               filtered
                 ..clear()
-                ..addAll(_customers.where((c) {
-                  if (q.isEmpty) return true;
-                  return c.displayName.toLowerCase().contains(q) ||
-                      c.contact.toLowerCase().contains(q) ||
-                      c.email.toLowerCase().contains(q) ||
-                      c.companyName.toLowerCase().contains(q) ||
-                      c.city.toLowerCase().contains(q) ||
-                      c.state.toLowerCase().contains(q);
-                }));
+                ..addAll(
+                  _customers.where((c) {
+                    if (q.isEmpty) return true;
+                    return c.displayName.toLowerCase().contains(q) ||
+                        c.contact.toLowerCase().contains(q) ||
+                        c.email.toLowerCase().contains(q) ||
+                        c.companyName.toLowerCase().contains(q) ||
+                        c.city.toLowerCase().contains(q) ||
+                        c.state.toLowerCase().contains(q);
+                  }),
+                );
               setDialogState(() {});
             }
+
             return AlertDialog(
               title: const Text('Select Customer'),
               content: SizedBox(
@@ -6478,11 +6583,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return line.product.price * (1 - d / 100.0);
   }
 
-  double _getRegularLineTotal(OrderLine line) =>
-      _lineTotalFromRoundedUnitPrice(
-        rawUnitPrice: line.product.price,
-        qty: line.quantity,
-      );
+  double _getRegularLineTotal(OrderLine line) => _lineTotalFromRoundedUnitPrice(
+    rawUnitPrice: line.product.price,
+    qty: line.quantity,
+  );
 
   double _getDiscountedLineTotal(OrderLine line) =>
       _lineTotalFromRoundedUnitPrice(
@@ -6493,8 +6597,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   double _getLineDiscountAmount(OrderLine line) =>
       _getRegularLineTotal(line) - _getDiscountedLineTotal(line);
 
-  bool _lineHasDiscount(OrderLine line) =>
-      _getLineDiscountAmount(line) > 0.005;
+  bool _lineHasDiscount(OrderLine line) => _getLineDiscountAmount(line) > 0.005;
 
   bool _orderHasAnyDiscount() => _orderDiscountAmount > 0.005;
 
@@ -6536,6 +6639,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Call when quote/list becomes empty so next scan or manual entry is "first time" (single beep).
   void _resetQuoteDisplayAndScanState() {
     _ordersTabExpandedLineKey = null;
+    _scanTabExpandedLineKey = null;
+    _ecatalogExpandedItemKey = null;
     _lastAddedUpc = null;
     _lastItem = '-';
     _lastScan = '-';
@@ -6589,6 +6694,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     Product product,
     String source, {
     required QuoteBucketDefinition bucket,
+
     /// When true (scanner path only): reveal/highlight the row instead of [_scrollToTopSoon].
     bool scheduleScanTabOrderRowReveal = false,
     String feedbackSource = 'scanner',
@@ -6608,11 +6714,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _orderLines.remove(line);
       _orderLines.insert(0, line);
     } else {
-      line = OrderLine(
-        product: product,
-        quantity: addedQty,
-        scans: 1,
-      );
+      line = OrderLine(product: product, quantity: addedQty, scans: 1);
 
       _orderLines.insert(0, line);
       _orderLineByKey[key] = line;
@@ -6729,7 +6831,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _status = 'UPC / ITEM NOT FOUND';
         });
         if (sampleId > 0) {
-          _logScanPerfStep(sampleId, 'setState complete (not-found state updated)');
+          _logScanPerfStep(
+            sampleId,
+            'setState complete (not-found state updated)',
+          );
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
             _logScanPerfStep(sampleId, 'setState frame complete');
@@ -6767,11 +6872,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } catch (e) {
       final int sampleId = _currentScanSampleId;
       if (!mounted) return null;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No match — try again'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('No match — try again')));
       _quickEntryController.clear();
       _restoreScanFieldFocus();
       if (sampleId > 0) {
@@ -6782,10 +6885,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  void _enqueueScan(
-    String value, {
-    String source = 'scanner',
-  }) {
+  void _enqueueScan(String value, {String source = 'scanner'}) {
     final trimmed = value.trim();
     if (trimmed.isEmpty) return;
     if (_currentScanSampleId > 0) {
@@ -6868,20 +6968,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     // completion signal and process the full buffer immediately to avoid
     // acting on partial intermediate values.
     if (value.contains('\n') || value.contains('\r')) {
-      _commitScannerBuffer(
-        trigger: 'newline terminator',
-        rawOverride: value,
-      );
+      _commitScannerBuffer(trigger: 'newline terminator', rawOverride: value);
       return;
     }
     // Post-commit [clear] notifies with ""; skip debounce (would only re-commit empty).
     if (value.isEmpty) {
       return;
     }
-    _scanDebounceTimer = Timer(Duration(milliseconds: _scanInputDebounceMs), () {
-      if (!mounted) return;
-      _commitScannerBuffer(trigger: 'debounce ${_scanInputDebounceMs}ms');
-    });
+    _scanDebounceTimer = Timer(
+      Duration(milliseconds: _scanInputDebounceMs),
+      () {
+        if (!mounted) return;
+        _commitScannerBuffer(trigger: 'debounce ${_scanInputDebounceMs}ms');
+      },
+    );
   }
 
   void _onScannerSubmitted(String value) {
@@ -6897,10 +6997,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
-  void _commitScannerBuffer({
-    required String trigger,
-    String? rawOverride,
-  }) {
+  void _commitScannerBuffer({required String trigger, String? rawOverride}) {
     final source = rawOverride ?? _scannerController.text;
     final cleaned = source.replaceAll('\n', '').replaceAll('\r', '').trim();
     if (cleaned.isEmpty) {
@@ -6952,7 +7049,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '[ManualEntry][Submit] start input is empty. '
           'quickEntryHasFocus=${_quickEntryFocusNode.hasFocus} scannerHasFocus=${_scannerFocusNode.hasFocus}',
         );
-        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryEmptySubmit');
+        _requestScannerFocusAfterManualEntry(
+          debugLabel: 'quickEntryEmptySubmit',
+        );
         return;
       }
 
@@ -6991,9 +7090,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _searchResults = [];
         });
         _triggerScanFeedback(ScanFeedbackType.notFound);
-        _requestScannerFocusAfterManualEntry(
-          debugLabel: 'quickEntryNotFound',
-        );
+        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryNotFound');
         return;
       }
 
@@ -7012,11 +7109,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySuccess');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No match — try again'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('No match — try again')));
       _scannerController.clear();
       _quickEntryController.clear();
       _setStateDebug('quick_entry_clear_search_after_error', () {
@@ -7087,10 +7182,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return;
       }
 
-      final results = _allProducts.where((p) {
-        return p.itemNumber.toLowerCase().contains(query) ||
-            p.description.toLowerCase().contains(query);
-      }).take(10).toList();
+      final results = _allProducts
+          .where((p) {
+            return p.itemNumber.toLowerCase().contains(query) ||
+                p.description.toLowerCase().contains(query);
+          })
+          .take(10)
+          .toList();
 
       _setStateDebug('search_debounce_apply_results', () {
         _searchResults = results;
@@ -7117,8 +7215,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                 controller: controller,
                 keyboardType: TextInputType.number,
                 autofocus: true,
-                decoration:
-                    InputDecoration(labelText: line.product.description),
+                decoration: InputDecoration(
+                  labelText: line.product.description,
+                ),
                 onSubmitted: (_) {
                   final qty = int.tryParse(controller.text.trim());
                   Navigator.pop(dialogContext, qty);
@@ -7268,7 +7367,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  Future<Customer?> _resolveCustomerForActiveQuoteIndexRow(String quoteId) async {
+  Future<Customer?> _resolveCustomerForActiveQuoteIndexRow(
+    String quoteId,
+  ) async {
     final idx = await _loadQuoteIndex();
     SavedQuoteInfo? row;
     for (final q in idx) {
@@ -7637,8 +7738,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return 0;
       }
       final removeSet = toRemoveIds.toSet();
-      final newArchive =
-          archiveEntries.where((e) => !removeSet.contains(e.id)).toList();
+      final newArchive = archiveEntries
+          .where((e) => !removeSet.contains(e.id))
+          .toList();
       await _saveArchiveQuoteIndex(newArchive);
       final activeIds = await _loadActiveIndexIds();
       final dir = await _getQuotesDirectory();
@@ -7703,7 +7805,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Moves [archived] from [quotes_archive.json] to the active index as [active];
   /// does not load it into the in-memory workspace. Rolls back archive if active write fails.
-  Future<bool> _restoreArchivedQuoteToActiveIndex(SavedQuoteInfo archived) async {
+  Future<bool> _restoreArchivedQuoteToActiveIndex(
+    SavedQuoteInfo archived,
+  ) async {
     if (archived.id.isEmpty) return false;
     try {
       final dir = await _getQuotesDirectory();
@@ -7714,8 +7818,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!archiveEntries.any((e) => e.id == archived.id)) return false;
 
       final previousArchive = List<SavedQuoteInfo>.from(archiveEntries);
-      final newArchive =
-          archiveEntries.where((e) => e.id != archived.id).toList();
+      final newArchive = archiveEntries
+          .where((e) => e.id != archived.id)
+          .toList();
 
       final now = DateTime.now();
       final restored = SavedQuoteInfo(
@@ -7824,8 +7929,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       final csvText = _formatQuoteAsCsv(quoteData);
       final quoteName = (quoteData['name'] as String?)?.trim() ?? info.name;
-      final customerName =
-          _customerDisplayNameForExportFromQuoteData(quoteData, info);
+      final customerName = _customerDisplayNameForExportFromQuoteData(
+        quoteData,
+        info,
+      );
       final exportedOn = DateTime.now();
       final filename = _buildExportOrderCsvFilename(
         quoteName: quoteName,
@@ -7880,7 +7987,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     Map<String, dynamic> data;
     try {
-      data = Map<String, dynamic>.from(jsonDecode(await file.readAsString()) as Map);
+      data = Map<String, dynamic>.from(
+        jsonDecode(await file.readAsString()) as Map,
+      );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -7891,7 +8000,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (!mounted) return;
     final stats = quoteDataLineStatsAndTotal(data);
     final lines =
-        data['lines'] as List<dynamic>? ?? data['items'] as List<dynamic>? ?? [];
+        data['lines'] as List<dynamic>? ??
+        data['items'] as List<dynamic>? ??
+        [];
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
@@ -7911,7 +8022,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 4),
-                  Text('Quote: ${info.name.trim().isEmpty ? '(unnamed)' : info.name.trim()}'),
+                  Text(
+                    'Quote: ${info.name.trim().isEmpty ? '(unnamed)' : info.name.trim()}',
+                  ),
                   Text(
                     'Bucket: ${info.quoteBucketLabel.trim().isNotEmpty ? info.quoteBucketLabel.trim() : info.quoteBucketKey}',
                   ),
@@ -7925,7 +8038,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     'Total: \$${stats.$3.toStringAsFixed(2)}',
                   ),
                   const Divider(height: 20),
-                  const Text('Line items', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const Text(
+                    'Line items',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
                   const SizedBox(height: 4),
                   ...lines.map((lineJson) {
                     final map = Map<String, dynamic>.from(lineJson as Map);
@@ -8029,9 +8145,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       setState(() {});
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not restore quote.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not restore quote.')));
     }
   }
 
@@ -8039,14 +8155,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final ok = await _archiveMarkQuoteConfirmed(info);
     if (!mounted) return;
     if (ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Quote marked Confirmed.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Quote marked Confirmed.')));
       setState(() {});
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not update quote.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not update quote.')));
     }
   }
 
@@ -8102,9 +8218,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final archivedMsg = n == 1
         ? '1 archived quote deleted'
         : '$n archived quotes deleted';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(archivedMsg)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(archivedMsg)));
   }
 
   Future<void> _onPurgeConfirmedPressed() async {
@@ -8121,93 +8237,144 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final confirmedMsg = n == 1
         ? '1 confirmed quote deleted'
         : '$n confirmed quotes deleted';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(confirmedMsg)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(confirmedMsg)));
+  }
+
+  /// ECatalog-only merchandising bucket (uses [Product.productType], [Product.category], [Product.isNewRelease]).
+  bool _productMatchesEcatalogMerchandising(Product p) {
+    final m = _catalogMerchandising;
+    if (m == null) return true;
+    if (m == 'newItems') return p.isNewRelease;
+    final pt = p.productType.trim().toUpperCase();
+    if (m == 'everyday') return pt == 'EVERYDAY';
+    if (m == 'homeDecor') {
+      return p.category.trim().toLowerCase().contains('home decor');
+    }
+    if (m == 'seasonal') {
+      return _kEcatalogSeasonalLabelToProductType.values.contains(pt);
+    }
+    if (m == 'sale') return p.isPs;
+    return true;
   }
 
   List<String> _catalogCategories() {
     final n = _productsByItemNumber.length;
+    final merch = _catalogMerchandising;
+    final key = '$n|${merch ?? ''}';
     if (_catalogDistinctCategories != null &&
-        _catalogDistinctCategoriesProductCount == n) {
+        _catalogDistinctCategoriesCacheKey == key) {
       return _catalogDistinctCategories!;
     }
     final set = <String>{};
     for (final p in _productsByItemNumber.values) {
+      if (!_productMatchesEcatalogMerchandising(p)) continue;
       final c = p.category.trim();
       if (c.isNotEmpty) set.add(c);
     }
     final list = set.toList()..sort();
     _catalogDistinctCategories = list;
-    _catalogDistinctCategoriesProductCount = n;
+    _catalogDistinctCategoriesCacheKey = key;
     return list;
   }
 
-  /// Distinct non-empty product types, optionally scoped to selected category.
-  List<String> _catalogProductTypesForSelectedCategory() {
+  /// Category filter applied to ECatalog lists: null if "All" or selection is not in the current subset.
+  String? _resolvedCatalogCategoryForEcatalogFilters() {
+    final raw = _selectedCatalogCategory?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    return _catalogCategories().contains(raw) ? raw : null;
+  }
+
+  /// Distinct sub-categories for the dropdown: CSV sub-categories, or fixed seasonal holiday list.
+  List<String> _catalogSubCategoriesForSelectedCategory() {
     final n = _productsByItemNumber.length;
-    final cat = _selectedCatalogCategory;
-    final key = '$n|${cat ?? ''}';
-    if (_catalogProductTypeOptionsCacheKey == key &&
-        _catalogProductTypeOptionsCache != null) {
-      return _catalogProductTypeOptionsCache!;
+    final cat = _resolvedCatalogCategoryForEcatalogFilters();
+    final merch = _catalogMerchandising;
+    final key = '$n|${cat ?? ''}|${merch ?? ''}';
+    if (_catalogSubCategoryOptionsCacheKey == key &&
+        _catalogSubCategoryOptionsCache != null) {
+      return _catalogSubCategoryOptionsCache!;
+    }
+    if (merch == 'seasonal') {
+      final list = List<String>.from(_kEcatalogSeasonalSubcategoryLabels);
+      _catalogSubCategoryOptionsCacheKey = key;
+      _catalogSubCategoryOptionsCache = list;
+      return list;
     }
     final set = <String>{};
     for (final p in _productsByItemNumber.values) {
+      if (!_productMatchesEcatalogMerchandising(p)) continue;
       if (cat != null && p.category.trim() != cat) continue;
-      final productType = p.productType.trim();
-      if (productType.isNotEmpty) set.add(productType);
+      final sub = p.subCategory.trim();
+      if (sub.isNotEmpty) set.add(sub);
     }
     final list = set.toList()..sort();
-    _catalogProductTypeOptionsCacheKey = key;
-    _catalogProductTypeOptionsCache = list;
+    _catalogSubCategoryOptionsCacheKey = key;
+    _catalogSubCategoryOptionsCache = list;
     return list;
   }
 
   List<Product> _filteredCatalogProducts() {
     final q = _catalogSearchQuery.trim().toLowerCase();
-    final cat = _selectedCatalogCategory;
-    final productTypes = _catalogProductTypesForSelectedCategory();
-    final typeRaw = _selectedCatalogProductType;
-    final productType =
-        typeRaw != null && productTypes.contains(typeRaw) ? typeRaw : null;
-    final newOnly = _catalogNewReleaseOnly;
-    final psOnly = _catalogPsOnly;
-    final gcOnly = _catalogGcOnly;
+    final cat = _resolvedCatalogCategoryForEcatalogFilters();
+    final subCategories = _catalogSubCategoriesForSelectedCategory();
+    final subRaw = _selectedCatalogSubCategory;
+    final subCategory = subRaw != null && subCategories.contains(subRaw)
+        ? subRaw
+        : null;
     final inOrderOnly = _catalogInOrderOnly;
+    final merch = _catalogMerchandising;
+    // Include order-line sequence so cache invalidates when lines move (e.g. rescan) with same count.
+    final orderSeqSig = Object.hashAll(
+      _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
+    );
     final key =
-        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${productType ?? ''}|$newOnly|$psOnly|$gcOnly|$inOrderOnly|${_orderLineByKey.length}';
-    if (_catalogFilteredCacheKey == key && _catalogFilteredProductsCache != null) {
+        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|${_orderLineByKey.length}|$orderSeqSig';
+    if (_catalogFilteredCacheKey == key &&
+        _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
     }
     final out = <Product>[];
     for (final p in _productsByItemNumber.values) {
+      if (!_productMatchesEcatalogMerchandising(p)) continue;
       if (cat != null && p.category.trim() != cat) continue;
-      if (productType != null && p.productType.trim() != productType) continue;
-      if (newOnly && !p.isNewRelease) continue;
-      if (psOnly && !p.isPs) continue;
-      if (gcOnly && !_isGiftcraftProduct(p)) continue;
-      if (inOrderOnly && !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
+      if (subCategory != null) {
+        if (merch == 'seasonal') {
+          final wantPt = _kEcatalogSeasonalLabelToProductType[subCategory];
+          final pt = p.productType.trim().toUpperCase();
+          if (wantPt == null || pt != wantPt) continue;
+        } else {
+          if (p.subCategory.trim() != subCategory) continue;
+        }
+      }
+      if (inOrderOnly &&
+          !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
         continue;
       }
-      final matchesQuery = q.isEmpty ||
+      final matchesQuery =
+          q.isEmpty ||
           p.itemNumber.toLowerCase().contains(q) ||
           p.description.toLowerCase().contains(q);
       if (!matchesQuery) continue;
       out.add(p);
     }
-    out.sort((a, b) => a.itemNumber.compareTo(b.itemNumber));
+    // Match Scan / Orders tab: lines already on the order follow [_orderLines] order; others stay by item #.
+    final orderIndexByKey = <String, int>{};
+    for (var i = 0; i < _orderLines.length; i++) {
+      orderIndexByKey[_orderLineKeyForProduct(_orderLines[i].product)] = i;
+    }
+    out.sort((a, b) {
+      final ia = orderIndexByKey[_orderLineKeyForProduct(a)];
+      final ib = orderIndexByKey[_orderLineKeyForProduct(b)];
+      if (ia != null && ib != null) return ia.compareTo(ib);
+      if (ia != null) return -1;
+      if (ib != null) return 1;
+      return a.itemNumber.compareTo(b.itemNumber);
+    });
     _catalogFilteredCacheKey = key;
     _catalogFilteredProductsCache = out;
     return out;
-  }
-
-  bool _isGiftcraftProduct(Product product) {
-    final productType = product.productType.trim().toUpperCase();
-    if (productType == 'GIFTCRAFT' || productType == 'GC') return true;
-    final category = product.category.trim().toUpperCase();
-    if (category == 'GIFTCRAFT' || category == 'GC') return true;
-    return product.itemNumber.trim().toUpperCase().startsWith('GC');
   }
 
   int _qtyInCurrentQuoteForProduct(Product product) {
@@ -8241,12 +8408,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _enqueueScan(payload, source: 'ecatalog');
   }
 
-  void _decrementCatalogProductQty(Product product) {
-    final line = _orderLineByKey[_orderLineKeyForProduct(product)];
-    if (line == null) return;
-    _decreaseLineQty(line);
-  }
-
   /// ECatalog catalog row only. Branch order: (1) PS → Reg.+Sale; (2) NET → Price;
   /// (3) discount-eligible + customer discount → Reg.+Your Price; (4) Price.
   /// Uses [Product.isPs] / [Product.isNet] (same source as chips and [_productPricingState]).
@@ -8266,10 +8427,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final branch = isPs
           ? 'PS'
           : isNet
-              ? 'NET'
-              : showRegAndYourPrice
-                  ? 'DISCOUNT'
-                  : 'PRICE_ONLY';
+          ? 'NET'
+          : showRegAndYourPrice
+          ? 'DISCOUNT'
+          : 'PRICE_ONLY';
       debugPrint(
         '[ECatalog price] #${product.itemNumber} | "${product.description}" '
         '| psRaw="${product.psRaw}" isPs=$isPs | isNet=$isNet '
@@ -8309,15 +8470,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'Price: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: textTheme.titleSmall?.copyWith(
-          fontWeight: FontWeight.w700,
-        ),
+        style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
       );
     }
     if (showRegAndYourPrice) {
       final catalogLine = OrderLine(product: product, quantity: 1, scans: 0);
-      final yourPrice =
-          _roundedUnitPrice(_getDiscountedUnitPrice(catalogLine));
+      final yourPrice = _roundedUnitPrice(_getDiscountedUnitPrice(catalogLine));
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -8347,9 +8505,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       'Price: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: textTheme.titleSmall?.copyWith(
-        fontWeight: FontWeight.w700,
-      ),
+      style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
     );
   }
 
@@ -8361,11 +8517,42 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       showDragHandle: true,
       builder: (context) {
         final safeBottom = MediaQuery.of(context).padding.bottom;
+        final theme = Theme.of(context);
         return SingleChildScrollView(
           padding: EdgeInsets.only(bottom: safeBottom + 16),
-          child: _ECatalogProductDetailSheet(product: product),
+          child: _ECatalogProductDetailSheet(
+            product: product,
+            ecatalogPricing: _buildECatalogListPriceColumn(
+              product: product,
+              textTheme: theme.textTheme,
+              colorScheme: theme.colorScheme,
+            ),
+          ),
         );
       },
+    );
+  }
+
+  /// ECatalog category and sub-category dropdowns: identical [InputDecorator] +
+  /// [DropdownButton] styling (theme [InputDecorationTheme] applies to both).
+  Widget _ecatalogCatalogFilterDropdown({
+    required String labelText,
+    required String? value,
+    required List<DropdownMenuItem<String?>> items,
+    required ValueChanged<String?> onChanged,
+  }) {
+    final theme = Theme.of(context);
+    return InputDecorator(
+      decoration: InputDecoration(labelText: labelText),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String?>(
+          isExpanded: true,
+          value: value,
+          style: theme.textTheme.titleMedium,
+          items: items,
+          onChanged: onChanged,
+        ),
+      ),
     );
   }
 
@@ -8378,17 +8565,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     final filtered = _filteredCatalogProducts();
     final categories = _catalogCategories();
-    final productTypes = _catalogProductTypesForSelectedCategory();
-    final validatedCatalogProductType =
-        _selectedCatalogProductType != null &&
-                productTypes.contains(_selectedCatalogProductType)
-            ? _selectedCatalogProductType
-            : null;
-    if (_selectedCatalogProductType != null &&
-        !productTypes.contains(_selectedCatalogProductType!)) {
+    final validatedCatalogCategory =
+        _resolvedCatalogCategoryForEcatalogFilters();
+    if (_selectedCatalogCategory != null &&
+        !categories.contains(_selectedCatalogCategory!)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        setState(() => _selectedCatalogProductType = null);
+        setState(() {
+          _selectedCatalogCategory = null;
+          _selectedCatalogSubCategory = null;
+        });
+      });
+    }
+    final subCategories = _catalogSubCategoriesForSelectedCategory();
+    final validatedCatalogSubCategory =
+        _selectedCatalogSubCategory != null &&
+            subCategories.contains(_selectedCatalogSubCategory)
+        ? _selectedCatalogSubCategory
+        : null;
+    if (_selectedCatalogSubCategory != null &&
+        !subCategories.contains(_selectedCatalogSubCategory!)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _selectedCatalogSubCategory = null);
       });
     }
     final textTheme = Theme.of(context).textTheme;
@@ -8399,170 +8598,248 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextField(
-            controller: _catalogSearchController,
-            decoration: const InputDecoration(
-              labelText: 'Search',
-              hintText: 'Item # or description',
-            ),
-            textInputAction: TextInputAction.search,
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              FilterChip(
-                label: const Text('New Release'),
-                selected: _catalogNewReleaseOnly,
-                onSelected: (selected) {
-                  setState(() => _catalogNewReleaseOnly = selected);
-                },
-              ),
-              FilterChip(
-                label: const Text('PS'),
-                selected: _catalogPsOnly,
-                onSelected: (selected) {
-                  setState(() => _catalogPsOnly = selected);
-                },
-              ),
-              FilterChip(
-                label: const Text('GC'),
-                selected: _catalogGcOnly,
-                onSelected: (selected) {
-                  setState(() => _catalogGcOnly = selected);
-                },
-              ),
-              FilterChip(
-                label: const Text('In Order'),
-                selected: _catalogInOrderOnly,
-                onSelected: (selected) {
-                  setState(() => _catalogInOrderOnly = selected);
-                },
-              ),
-              TextButton.icon(
-                onPressed: (_catalogNewReleaseOnly ||
-                        _catalogPsOnly ||
-                        _catalogGcOnly ||
-                        _catalogInOrderOnly ||
-                        _selectedCatalogCategory != null ||
-                        _selectedCatalogProductType != null)
-                    ? () {
-                        setState(() {
-                          _catalogNewReleaseOnly = false;
-                          _catalogPsOnly = false;
-                          _catalogGcOnly = false;
-                          _catalogInOrderOnly = false;
-                          _selectedCatalogCategory = null;
-                          _selectedCatalogProductType = null;
-                        });
-                      }
-                    : null,
-                icon: const Icon(Icons.clear),
-                label: const Text('Clear Filters'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          InputDecorator(
-            decoration: const InputDecoration(
-              labelText: 'Category',
-            ),
-            child: DropdownButtonHideUnderline(
-              child: DropdownButton<String?>(
-                isExpanded: true,
-                value: _selectedCatalogCategory,
-                items: [
-                  const DropdownMenuItem<String?>(
-                    value: null,
-                    child: Text('All Categories'),
-                  ),
-                  for (final c in categories)
-                    DropdownMenuItem<String?>(
-                      value: c,
-                      child: Text(
-                        c,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-                onChanged: (v) {
-                  setState(() {
-                    _selectedCatalogCategory = v;
-                    final selectedType = _selectedCatalogProductType;
-                    if (selectedType != null &&
-                        !_catalogProductTypesForSelectedCategory().contains(
-                          selectedType,
-                        )) {
-                      _selectedCatalogProductType = null;
-                    }
-                  });
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          InputDecorator(
-            decoration: const InputDecoration(
-              labelText: 'Product Type',
-            ),
-            child: DropdownButtonHideUnderline(
-              child: DropdownButton<String?>(
-                isExpanded: true,
-                value: validatedCatalogProductType,
-                items: [
-                  const DropdownMenuItem<String?>(
-                    value: null,
-                    child: Text('All Product Types'),
-                  ),
-                  for (final productType in productTypes)
-                    DropdownMenuItem<String?>(
-                      value: productType,
-                      child: Text(
-                        productType,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-                onChanged: (v) {
-                  setState(() => _selectedCatalogProductType = v);
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
           Expanded(
-            child: filtered.isEmpty
-                ? Center(
-                    child: Text(
-                      _catalogInOrderOnly
-                          ? 'No items from this order match the current filter.'
-                          : 'No products match',
-                      style: textTheme.bodyLarge?.copyWith(
-                        color: _kSecondaryText,
+            child: NotificationListener<ScrollNotification>(
+              onNotification: _onECatalogScrollDismissKeyboard,
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextField(
+                          controller: _catalogSearchController,
+                          focusNode: _ecatalogSearchFocusNode,
+                          decoration: const InputDecoration(
+                            labelText: 'Search',
+                            hintText: 'Item # or description',
+                          ),
+                          textInputAction: TextInputAction.search,
+                        ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          FilterChip(
+                            label: const Text('New Items'),
+                            selected: _catalogMerchandising == 'newItems',
+                            onSelected: (selected) {
+                              setState(() {
+                                if (selected) {
+                                  _catalogMerchandising = 'newItems';
+                                } else if (_catalogMerchandising ==
+                                    'newItems') {
+                                  _catalogMerchandising = null;
+                                }
+                                _selectedCatalogSubCategory = null;
+                              });
+                            },
+                          ),
+                          FilterChip(
+                            label: const Text('Everyday'),
+                            selected: _catalogMerchandising == 'everyday',
+                            onSelected: (selected) {
+                              setState(() {
+                                if (selected) {
+                                  _catalogMerchandising = 'everyday';
+                                } else if (_catalogMerchandising ==
+                                    'everyday') {
+                                  _catalogMerchandising = null;
+                                }
+                                _selectedCatalogSubCategory = null;
+                              });
+                            },
+                          ),
+                          FilterChip(
+                            label: const Text('Home Decor'),
+                            selected: _catalogMerchandising == 'homeDecor',
+                            onSelected: (selected) {
+                              setState(() {
+                                if (selected) {
+                                  _catalogMerchandising = 'homeDecor';
+                                } else if (_catalogMerchandising ==
+                                    'homeDecor') {
+                                  _catalogMerchandising = null;
+                                }
+                                _selectedCatalogSubCategory = null;
+                              });
+                            },
+                          ),
+                          FilterChip(
+                            label: const Text('Seasonal'),
+                            selected: _catalogMerchandising == 'seasonal',
+                            onSelected: (selected) {
+                              setState(() {
+                                if (selected) {
+                                  _catalogMerchandising = 'seasonal';
+                                } else if (_catalogMerchandising ==
+                                    'seasonal') {
+                                  _catalogMerchandising = null;
+                                }
+                                _selectedCatalogSubCategory = null;
+                              });
+                            },
+                          ),
+                          FilterChip(
+                            label: const Text('Sale'),
+                            selected: _catalogMerchandising == 'sale',
+                            onSelected: (selected) {
+                              setState(() {
+                                if (selected) {
+                                  _catalogMerchandising = 'sale';
+                                } else if (_catalogMerchandising == 'sale') {
+                                  _catalogMerchandising = null;
+                                }
+                                _selectedCatalogSubCategory = null;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          FilterChip(
+                            label: const Text('In Order'),
+                            selected: _catalogInOrderOnly,
+                            onSelected: (selected) {
+                              setState(() => _catalogInOrderOnly = selected);
+                            },
+                          ),
+                          TextButton.icon(
+                            onPressed:
+                                (_catalogMerchandising != null ||
+                                    _catalogInOrderOnly ||
+                                    _selectedCatalogCategory != null ||
+                                    _selectedCatalogSubCategory != null)
+                                ? () {
+                                    setState(() {
+                                      _catalogMerchandising = null;
+                                      _catalogInOrderOnly = false;
+                                      _selectedCatalogCategory = null;
+                                      _selectedCatalogSubCategory = null;
+                                    });
+                                  }
+                                : null,
+                            icon: const Icon(Icons.clear),
+                            label: const Text('Clear Filters'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      IntrinsicHeight(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Expanded(
+                              child: _ecatalogCatalogFilterDropdown(
+                                labelText: 'Category',
+                                value: validatedCatalogCategory,
+                                items: [
+                                  const DropdownMenuItem<String?>(
+                                    value: null,
+                                    child: Text('All Categories'),
+                                  ),
+                                  for (final c in categories)
+                                    DropdownMenuItem<String?>(
+                                      value: c,
+                                      child: Text(
+                                        c,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                ],
+                                onChanged: (v) {
+                                  setState(() {
+                                    _selectedCatalogCategory = v;
+                                    final selectedSub =
+                                        _selectedCatalogSubCategory;
+                                    if (selectedSub != null &&
+                                        !_catalogSubCategoriesForSelectedCategory()
+                                            .contains(selectedSub)) {
+                                      _selectedCatalogSubCategory = null;
+                                    }
+                                  });
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _ecatalogCatalogFilterDropdown(
+                                labelText: 'Sub-Category',
+                                value: validatedCatalogSubCategory,
+                                items: [
+                                  const DropdownMenuItem<String?>(
+                                    value: null,
+                                    child: Text('All Sub-Categories'),
+                                  ),
+                                  for (final sub in subCategories)
+                                    DropdownMenuItem<String?>(
+                                      value: sub,
+                                      child: Text(
+                                        sub,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                ],
+                                onChanged: (v) {
+                                  setState(
+                                    () => _selectedCatalogSubCategory = v,
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+                if (filtered.isEmpty)
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(
+                      child: Text(
+                        _catalogInOrderOnly
+                            ? 'No items from this order match the current filter.'
+                            : 'No products match',
+                        style: textTheme.bodyLarge?.copyWith(
+                          color: _kSecondaryText,
+                        ),
                       ),
                     ),
                   )
-                : ListView.builder(
-                    itemCount: filtered.length,
-                    itemBuilder: (context, index) {
+                else
+                  SliverList(
+                    delegate: SliverChildBuilderDelegate((context, index) {
                       final product = filtered[index];
-                      final line = _orderLineByKey[_orderLineKeyForProduct(product)];
-                      final qtyInQuote = _qtyInCurrentQuoteForProduct(product);
+                      final orderLineKey = _orderLineKeyForProduct(product);
+                      final line = _orderLineByKey[orderLineKey];
+                      final inCurrentOrder = line != null;
+                      final qtyInQuote = line?.quantity ?? 0;
                       final lineTotal = line != null
                           ? _getDiscountedLineTotal(line)
                           : 0.0;
-                      final pricingIndicator = _productPricingIndicator(product);
+                      final pricingIndicator = _productPricingIndicator(
+                        product,
+                      );
                       final catLabel = product.category.trim().isEmpty
                           ? '—'
                           : product.category.trim();
                       final subLabel = product.subCategory.trim().isEmpty
                           ? '—'
                           : product.subCategory.trim();
-                      return Padding(
+                      final ecKey = product.itemNumber.trim();
+                      final isExpanded = _ecatalogExpandedItemKey == ecKey;
+                      final Widget ecatalogItemCard = Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Material(
                           type: MaterialType.card,
@@ -8579,70 +8856,152 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                               children: [
                                 Expanded(
                                   child: InkWell(
-                                    onTap: () =>
+                                    onTap: () {
+                                      _setStateDebug(
+                                        'ecatalog_toggle_row_expand',
+                                        () {
+                                          if (_ecatalogExpandedItemKey ==
+                                              ecKey) {
+                                            _ecatalogExpandedItemKey = null;
+                                          } else {
+                                            _ecatalogExpandedItemKey = ecKey;
+                                          }
+                                        },
+                                      );
+                                    },
+                                    onLongPress: () =>
                                         _showECatalogProductDetail(product),
                                     borderRadius: BorderRadius.circular(8),
-                                    child: Row(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        _ECatalogProductThumbnail(
-                                          product: product,
-                                          isInQuote: qtyInQuote > 0,
-                                        ),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                          child: Column(
+                                    child: isExpanded
+                                        ? Column(
                                             crossAxisAlignment:
-                                                CrossAxisAlignment.start,
+                                                CrossAxisAlignment.stretch,
                                             children: [
+                                              ClipRRect(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                child: AspectRatio(
+                                                  aspectRatio: 4 / 3,
+                                                  child: Image.network(
+                                                    'https://showroom-images.netlify.app/images/$ecKey.jpeg',
+                                                    fit: BoxFit.cover,
+                                                    cacheWidth: 800,
+                                                    cacheHeight: 600,
+                                                    filterQuality:
+                                                        FilterQuality.low,
+                                                    loadingBuilder:
+                                                        (
+                                                          context,
+                                                          child,
+                                                          loadingProgress,
+                                                        ) {
+                                                          if (loadingProgress ==
+                                                              null) {
+                                                            return child;
+                                                          }
+                                                          return ColoredBox(
+                                                            color: colorScheme
+                                                                .surfaceContainerHighest,
+                                                            child: Icon(
+                                                              Icons
+                                                                  .image_outlined,
+                                                              size: 48,
+                                                              color: colorScheme
+                                                                  .outline,
+                                                            ),
+                                                          );
+                                                        },
+                                                    errorBuilder:
+                                                        (
+                                                          context,
+                                                          error,
+                                                          stackTrace,
+                                                        ) {
+                                                          return ColoredBox(
+                                                            color: colorScheme
+                                                                .surfaceContainerHighest,
+                                                            child: Icon(
+                                                              Icons
+                                                                  .image_not_supported_outlined,
+                                                              size: 48,
+                                                              color: colorScheme
+                                                                  .outline,
+                                                            ),
+                                                          );
+                                                        },
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
                                               Row(
                                                 children: [
                                                   Expanded(
-                                                    child: Text(
-                                                      product.itemNumber,
-                                                      style: textTheme.titleSmall
-                                                          ?.copyWith(
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                      ),
-                                                      maxLines: 1,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
+                                                    child: Row(
+                                                      children: [
+                                                        Expanded(
+                                                          child: Text(
+                                                            product.itemNumber,
+                                                            style: textTheme
+                                                                .titleSmall
+                                                                ?.copyWith(
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                ),
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                          ),
+                                                        ),
+                                                        if (inCurrentOrder)
+                                                          Padding(
+                                                            padding:
+                                                                const EdgeInsets.only(
+                                                                  left: 6,
+                                                                ),
+                                                            child:
+                                                                _ecatalogInOrderQtyBadge(
+                                                                  context,
+                                                                  qtyInQuote,
+                                                                ),
+                                                          ),
+                                                      ],
                                                     ),
                                                   ),
                                                   if (pricingIndicator == 'PS')
                                                     Padding(
                                                       padding:
                                                           const EdgeInsets.only(
-                                                        left: 6,
-                                                      ),
+                                                            left: 6,
+                                                          ),
                                                       child:
-                                                          _ECatalogProductDetailSheet
-                                                              ._flagChip(
-                                                        context,
-                                                        'PS',
-                                                        colorScheme.primary,
-                                                      ),
+                                                          _ECatalogProductDetailSheet._flagChip(
+                                                            context,
+                                                            'PS',
+                                                            colorScheme.primary,
+                                                          ),
                                                     ),
+                                                  Icon(
+                                                    Icons.keyboard_arrow_up,
+                                                    size: 22,
+                                                    color: colorScheme
+                                                        .onSurfaceVariant,
+                                                  ),
                                                 ],
                                               ),
                                               const SizedBox(height: 2),
                                               Text(
                                                 product.description,
                                                 style: textTheme.bodyMedium,
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
                                               ),
                                               const SizedBox(height: 4),
                                               Text(
                                                 '$catLabel / $subLabel',
                                                 style: textTheme.bodySmall
                                                     ?.copyWith(
-                                                  color: _kSecondaryText,
-                                                ),
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                                                      color: _kSecondaryText,
+                                                    ),
                                               ),
                                               const SizedBox(height: 2),
                                               _buildECatalogListPriceColumn(
@@ -8651,10 +9010,111 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                 colorScheme: colorScheme,
                                               ),
                                             ],
+                                          )
+                                        : Row(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              _ECatalogProductThumbnail(
+                                                product: product,
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Row(
+                                                      children: [
+                                                        Expanded(
+                                                          child: Row(
+                                                            children: [
+                                                              Expanded(
+                                                                child: Text(
+                                                                  product
+                                                                      .itemNumber,
+                                                                  style: textTheme
+                                                                      .titleSmall
+                                                                      ?.copyWith(
+                                                                        fontWeight:
+                                                                            FontWeight.w600,
+                                                                      ),
+                                                                  maxLines: 1,
+                                                                  overflow:
+                                                                      TextOverflow
+                                                                          .ellipsis,
+                                                                ),
+                                                              ),
+                                                              if (inCurrentOrder)
+                                                                Padding(
+                                                                  padding:
+                                                                      const EdgeInsets.only(
+                                                                        left: 6,
+                                                                      ),
+                                                                  child: _ecatalogInOrderQtyBadge(
+                                                                    context,
+                                                                    qtyInQuote,
+                                                                  ),
+                                                                ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                        if (pricingIndicator ==
+                                                            'PS')
+                                                          Padding(
+                                                            padding:
+                                                                const EdgeInsets.only(
+                                                                  left: 6,
+                                                                ),
+                                                            child:
+                                                                _ECatalogProductDetailSheet._flagChip(
+                                                                  context,
+                                                                  'PS',
+                                                                  colorScheme
+                                                                      .primary,
+                                                                ),
+                                                          ),
+                                                        Icon(
+                                                          Icons
+                                                              .keyboard_arrow_down,
+                                                          size: 22,
+                                                          color: colorScheme
+                                                              .onSurfaceVariant,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    const SizedBox(height: 2),
+                                                    Text(
+                                                      product.description,
+                                                      style:
+                                                          textTheme.bodyMedium,
+                                                      maxLines: 2,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      '$catLabel / $subLabel',
+                                                      style: textTheme.bodySmall
+                                                          ?.copyWith(
+                                                            color:
+                                                                _kSecondaryText,
+                                                          ),
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                    const SizedBox(height: 2),
+                                                    _buildECatalogListPriceColumn(
+                                                      product: product,
+                                                      textTheme: textTheme,
+                                                      colorScheme: colorScheme,
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                        ),
-                                      ],
-                                    ),
                                   ),
                                 ),
                                 SizedBox(
@@ -8666,7 +9126,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                         height: 40,
                                         child: Align(
                                           alignment: Alignment.centerRight,
-                                          child: qtyInQuote > 0
+                                          child: inCurrentOrder
                                               ? Row(
                                                   mainAxisSize:
                                                       MainAxisSize.min,
@@ -8681,8 +9141,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                             minHeight: 40,
                                                           ),
                                                       onPressed: () =>
-                                                          _decrementCatalogProductQty(
-                                                            product,
+                                                          _decreaseLineQty(
+                                                            line,
                                                           ),
                                                       icon: const Icon(
                                                         Icons
@@ -8714,45 +9174,58 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                             minHeight: 40,
                                                           ),
                                                       onPressed: () =>
-                                                          _incrementCatalogProductQty(
-                                                            product,
+                                                          _increaseLineQty(
+                                                            line,
                                                           ),
                                                       icon: const Icon(
-                                                        Icons.add_circle_outline,
+                                                        Icons
+                                                            .add_circle_outline,
                                                       ),
                                                     ),
                                                   ],
                                                 )
-                                              : IconButton(
-                                                  visualDensity:
-                                                      VisualDensity.compact,
-                                                  padding: EdgeInsets.zero,
-                                                  constraints:
-                                                      const BoxConstraints(
-                                                        minWidth: 40,
-                                                        minHeight: 40,
-                                                      ),
+                                              : TextButton(
                                                   onPressed: () =>
                                                       _incrementCatalogProductQty(
                                                         product,
                                                       ),
-                                                  icon: const Icon(
-                                                    Icons.add_circle_outline,
+                                                  style: TextButton.styleFrom(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 10,
+                                                          vertical: 4,
+                                                        ),
+                                                    minimumSize: Size.zero,
+                                                    tapTargetSize:
+                                                        MaterialTapTargetSize
+                                                            .shrinkWrap,
+                                                    visualDensity:
+                                                        VisualDensity.compact,
+                                                  ),
+                                                  child: Text(
+                                                    'Add',
+                                                    style: textTheme.labelLarge
+                                                        ?.copyWith(
+                                                          fontWeight:
+                                                              FontWeight.w600,
+                                                        ),
                                                   ),
                                                 ),
                                         ),
                                       ),
                                       SizedBox(
                                         height: 16,
-                                        child: qtyInQuote > 0
+                                        child: inCurrentOrder
                                             ? Text(
                                                 _formatCurrency(lineTotal),
                                                 textAlign: TextAlign.right,
                                                 style: textTheme.bodySmall
                                                     ?.copyWith(
-                                                  fontWeight: FontWeight.w700,
-                                                  color: colorScheme.primary,
-                                                ),
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                      color:
+                                                          colorScheme.primary,
+                                                    ),
                                               )
                                             : const SizedBox.shrink(),
                                       ),
@@ -8764,8 +9237,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           ),
                         ),
                       );
-                    },
+                      if (line != null) {
+                        return Dismissible(
+                          key: ValueKey(orderLineKey),
+                          direction: DismissDirection.endToStart,
+                          confirmDismiss: (_) async {
+                            await _confirmDeleteLine(line);
+                            return false;
+                          },
+                          background: const _OrderLineCardDismissBackground(
+                            compactLayout: true,
+                          ),
+                          child: ecatalogItemCard,
+                        );
+                      }
+                      return ecatalogItemCard;
+                    }, childCount: filtered.length),
                   ),
+              ],
+            ),
+            ),
           ),
           const SizedBox(height: 8),
           Material(
@@ -8850,8 +9341,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final exportPath = exportedFile.path;
       final exportBasename = p.basename(exportPath);
-      final bucketExportKey =
-          _logicalQuoteBucketKey(primaryInfo.quoteBucketKey);
+      final bucketExportKey = _logicalQuoteBucketKey(
+        primaryInfo.quoteBucketKey,
+      );
 
       final idsToMove = <String>{};
       for (final e in list) {
@@ -8869,8 +9361,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         )) {
           continue;
         }
-        if (_logicalQuoteBucketKey(info.quoteBucketKey) !=
-            bucketExportKey) {
+        if (_logicalQuoteBucketKey(info.quoteBucketKey) != bucketExportKey) {
           continue;
         }
         final id = info.id;
@@ -8959,8 +9450,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final rawName = (map['name'] as String?) ?? '';
       final upperName = rawName.trim().toUpperCase();
       final matchesLegacyPrefix = upperName.startsWith('QUOTE_${datePart}_');
-      final matchesEverydayPrefix =
-          upperName.startsWith('EVERYDAY QUOTE_${datePart}_');
+      final matchesEverydayPrefix = upperName.startsWith(
+        'EVERYDAY QUOTE_${datePart}_',
+      );
       if (!matchesLegacyPrefix && !matchesEverydayPrefix) continue;
       final prefix = matchesEverydayPrefix
           ? 'EVERYDAY QUOTE_${datePart}_'
@@ -9039,9 +9531,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         if (e is! Map) continue;
         if (e['id']?.toString() != quoteId) continue;
         try {
-          final info = SavedQuoteInfo.fromJson(
-            Map<String, dynamic>.from(e),
-          );
+          final info = SavedQuoteInfo.fromJson(Map<String, dynamic>.from(e));
           if (info.status != QuoteLifecycleStatus.active) return false;
           if (await _archiveIndexContainsQuoteId(quoteId)) return false;
           return true;
@@ -9099,15 +9589,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (bucketLabel.isEmpty) {
         final fromConfig = _quoteBucketsByBucketKey[rootBucketKeyForRow];
         bucketLabel =
-            fromConfig?.displayLabel ?? _defaultQuoteBucketDefinition.displayLabel;
+            fromConfig?.displayLabel ??
+            _defaultQuoteBucketDefinition.displayLabel;
       }
-      if (_logicalQuoteBucketKey(rootBucketKeyForRow) == _defaultQuoteBucketKey) {
+      if (_logicalQuoteBucketKey(rootBucketKeyForRow) ==
+          _defaultQuoteBucketKey) {
         bucketLabel = _defaultQuoteBucketDefinition.displayLabel;
       }
 
       final updatedAt =
           DateTime.tryParse((data['updatedAt'] as String?) ?? '') ??
-              DateTime.now();
+          DateTime.now();
 
       final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
       List<Map<String, dynamic>> list = [];
@@ -9172,7 +9664,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           try {
             final raw = await qf.readAsString();
             final d = Map<String, dynamic>.from(jsonDecode(raw) as Map);
-            bucketTag = (d['quoteBucketLabel'] as String?)?.trim() ??
+            bucketTag =
+                (d['quoteBucketLabel'] as String?)?.trim() ??
                 _logicalQuoteBucketKey(
                   (d['quoteBucketKey'] as String?)?.trim() ?? '',
                 );
@@ -9180,16 +9673,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             bucketTag = '?';
           }
         }
-        final eligible =
-            await _quoteIdHasActiveEligibleRowInActiveIndexStorage(id);
+        final eligible = await _quoteIdHasActiveEligibleRowInActiveIndexStorage(
+          id,
+        );
         debugPrint(
           '[ImportTouched] quoteId=$id bucket=${bucketTag.isEmpty ? '?' : bucketTag} '
           'saved=${onDisk ? 'yes' : 'no'} activeIndex=${eligible ? 'yes' : 'no'}',
         );
       }
       final idx = await _loadQuoteIndex();
-      final visible =
-          touched.where((id) => idx.any((e) => e.id == id)).toList();
+      final visible = touched
+          .where((id) => idx.any((e) => e.id == id))
+          .toList();
       debugPrint(
         '[ImportPostSync] activeIndexCount=${idx.length} '
         'touchedVisible=${visible.join(',')}',
@@ -9264,8 +9759,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       var workspaceId = _currentQuoteId;
       if (workspaceId != null) {
-        final eligible =
-            await _quoteIdHasActiveEligibleRowInActiveIndexStorage(workspaceId);
+        final eligible = await _quoteIdHasActiveEligibleRowInActiveIndexStorage(
+          workspaceId,
+        );
         final diskProbe = File('${dir.path}/quote_$workspaceId.json');
         if (!eligible && !await diskProbe.exists()) {
           _debugLogQuoteImportExport(
@@ -9320,7 +9816,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             setState(() {
               _currentQuoteId = null;
               _activeQuoteBucketKey = _defaultQuoteBucketDefinition.bucketKey;
-              _activeQuoteBucketLabel = _defaultQuoteBucketDefinition.displayLabel;
+              _activeQuoteBucketLabel =
+                  _defaultQuoteBucketDefinition.displayLabel;
               _orderLines.clear();
               _orderLineByKey.clear();
               _orderListVersion += 1;
@@ -9378,8 +9875,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // quoteStatus copied from [priorEntry] (e.g. archived/confirmed) would
       // otherwise persist and hide otherwise valid routed quotes from
       // [_loadQuoteIndex] / [_quoteIdHasActiveEligibleRowInActiveIndexStorage].
-      row['quoteStatus'] =
-          quoteLifecycleStatusToJson(QuoteLifecycleStatus.active);
+      row['quoteStatus'] = quoteLifecycleStatusToJson(
+        QuoteLifecycleStatus.active,
+      );
 
       list.insert(0, row);
 
@@ -9412,8 +9910,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     try {
       await _ensureLegacyQuoteIndexMigratedIfNeeded();
       final dir = await _getQuotesDirectory();
-      final archiveIds =
-          (await _loadArchiveQuoteIndex()).map((e) => e.id).toSet();
+      final archiveIds = (await _loadArchiveQuoteIndex())
+          .map((e) => e.id)
+          .toSet();
       final activeFile = File(await _getQuoteActiveIndexPath());
       if (await activeFile.exists()) {
         final loaded = await _loadSavedQuotesFromIndexFile(activeFile, dir);
@@ -9484,23 +9983,27 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// [listUnit] from [_listUnitForQuoteShareAttachmentLine] (never line [price]).
   /// [unit] is persisted line [price] after [_formatQuoteAsText]-style customer discount.
   Iterable<
-      ({
-        String itemNumber,
-        String description,
-        double? listUnit,
-        double unit,
-        int qty,
-        double lineTotal,
-      })> _iterQuoteShareAttachmentLines(Map<String, dynamic> data) sync* {
+    ({
+      String itemNumber,
+      String description,
+      double? listUnit,
+      double unit,
+      int qty,
+      double lineTotal,
+    })
+  >
+  _iterQuoteShareAttachmentLines(Map<String, dynamic> data) sync* {
     final lines =
-        data['lines'] as List<dynamic>? ?? data['items'] as List<dynamic>? ?? [];
+        data['lines'] as List<dynamic>? ??
+        data['items'] as List<dynamic>? ??
+        [];
 
     var customerDiscPct = 0.0;
     final customerMap = data['customer'];
     if (customerMap is Map<String, dynamic>) {
-      customerDiscPct =
-          Customer.fromJson(Map<String, dynamic>.from(customerMap))
-              .discountPercent;
+      customerDiscPct = Customer.fromJson(
+        Map<String, dynamic>.from(customerMap),
+      ).discountPercent;
     }
 
     ProductPricingState linePricingState(Map<String, dynamic> map) {
@@ -9514,7 +10017,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (isNet) return ProductPricingState.net;
       final b = map['discountEligible'];
       if (b is bool) {
-        return b ? ProductPricingState.discountEligible : ProductPricingState.regular;
+        return b
+            ? ProductPricingState.discountEligible
+            : ProductPricingState.regular;
       }
       final raw = (map['discountRaw'] as String?) ?? '';
       return _parseYesFlag(raw)
@@ -9582,10 +10087,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   ) {
     final sorted = rows.toList();
     sorted.sort(
-      (a, b) => _compareItemNumberAscending(
-        itemNumberOf(a),
-        itemNumberOf(b),
-      ),
+      (a, b) => _compareItemNumberAscending(itemNumberOf(a), itemNumberOf(b)),
     );
     return sorted;
   }
@@ -9599,7 +10101,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }) {
     if (!richEmailShareAttachments) {
       const header = 'Item,Quantity';
-      final lines = data['lines'] as List<dynamic>? ??
+      final lines =
+          data['lines'] as List<dynamic>? ??
           data['items'] as List<dynamic>? ??
           [];
       final rows = <String>[header];
@@ -9698,7 +10201,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       appendMeta('Generated Date', '$y-$m-$d');
     }
 
-    sheet.appendRow([cell(''), cell(''), cell(''), cell(''), cell(''), cell('')]);
+    sheet.appendRow([
+      cell(''),
+      cell(''),
+      cell(''),
+      cell(''),
+      cell(''),
+      cell(''),
+    ]);
 
     sheet.appendRow([
       cell('Item Number'),
@@ -9722,13 +10232,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       horizontalAlign: xlsx.HorizontalAlign.Left,
     );
     sheet
-        .cell(
-          xlsx.CellIndex.indexByColumnRow(
-            columnIndex: 0,
-            rowIndex: rowIndex - 1,
-          ),
-        )
-        .cellStyle = leftAlignStyle;
+            .cell(
+              xlsx.CellIndex.indexByColumnRow(
+                columnIndex: 0,
+                rowIndex: rowIndex - 1,
+              ),
+            )
+            .cellStyle =
+        leftAlignStyle;
 
     final richLines = _iterQuoteShareAttachmentLines(data).toList();
     final orderedRichLines = sortByItemNumberAsc
@@ -9747,32 +10258,35 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         xlsx.DoubleCellValue(line.lineTotal),
       ]);
       sheet
-          .cell(
-            xlsx.CellIndex.indexByColumnRow(
-              columnIndex: 0,
-              rowIndex: rowIndex,
-            ),
-          )
-          .cellStyle = leftAlignStyle;
+              .cell(
+                xlsx.CellIndex.indexByColumnRow(
+                  columnIndex: 0,
+                  rowIndex: rowIndex,
+                ),
+              )
+              .cellStyle =
+          leftAlignStyle;
       if (line.listUnit != null) {
         sheet
-            .cell(
-              xlsx.CellIndex.indexByColumnRow(
-                columnIndex: 2,
-                rowIndex: rowIndex,
-              ),
-            )
-            .cellStyle = currencyStyle;
+                .cell(
+                  xlsx.CellIndex.indexByColumnRow(
+                    columnIndex: 2,
+                    rowIndex: rowIndex,
+                  ),
+                )
+                .cellStyle =
+            currencyStyle;
       }
       for (final col in [3, 5]) {
         sheet
-            .cell(
-              xlsx.CellIndex.indexByColumnRow(
-                columnIndex: col,
-                rowIndex: rowIndex,
-              ),
-            )
-            .cellStyle = currencyStyle;
+                .cell(
+                  xlsx.CellIndex.indexByColumnRow(
+                    columnIndex: col,
+                    rowIndex: rowIndex,
+                  ),
+                )
+                .cellStyle =
+            currencyStyle;
       }
       rowIndex++;
     }
@@ -9788,7 +10302,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   String _formatQuoteAsText(Map<String, dynamic> data) {
     final name = data['name'] as String? ?? 'Quote';
     final lines =
-        data['lines'] as List<dynamic>? ?? data['items'] as List<dynamic>? ?? [];
+        data['lines'] as List<dynamic>? ??
+        data['items'] as List<dynamic>? ??
+        [];
     final buffer = StringBuffer('Quote: $name\n');
     final customerMap = data['customer'];
     var customerDiscPct = 0.0;
@@ -9813,7 +10329,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (isNet) return ProductPricingState.net;
       final b = map['discountEligible'];
       if (b is bool) {
-        return b ? ProductPricingState.discountEligible : ProductPricingState.regular;
+        return b
+            ? ProductPricingState.discountEligible
+            : ProductPricingState.regular;
       }
       final raw = (map['discountRaw'] as String?) ?? '';
       return _parseYesFlag(raw)
@@ -9872,15 +10390,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     discountedOrderSum = _roundMoney(discountedOrderSum);
     final orderDiscountAmt = _roundMoney(regularOrderSum - discountedOrderSum);
     if (orderDiscountAmt > 0.005) {
-      buffer.writeln(
-        'Regular Total: \$${regularOrderSum.toStringAsFixed(2)}',
-      );
-      buffer.writeln(
-        'Discount: \$${orderDiscountAmt.toStringAsFixed(2)}',
-      );
-      buffer.writeln(
-        'Final Total: \$${discountedOrderSum.toStringAsFixed(2)}',
-      );
+      buffer.writeln('Regular Total: \$${regularOrderSum.toStringAsFixed(2)}');
+      buffer.writeln('Discount: \$${orderDiscountAmt.toStringAsFixed(2)}');
+      buffer.writeln('Final Total: \$${discountedOrderSum.toStringAsFixed(2)}');
     } else {
       buffer.writeln('Total: \$${discountedOrderSum.toStringAsFixed(2)}');
     }
@@ -9923,14 +10435,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final text = _formatQuoteAsText(data);
 
-      final attachments = <XFile>[
-        XFile(csvPath, mimeType: 'text/csv'),
-      ];
+      final attachments = <XFile>[XFile(csvPath, mimeType: 'text/csv')];
       try {
         final bucketLabel = (data['quoteBucketLabel'] as String?)?.trim() ?? '';
         final bucketKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
-        final productTypeRaw =
-            bucketLabel.isNotEmpty ? bucketLabel : bucketKey;
+        final productTypeRaw = bucketLabel.isNotEmpty ? bucketLabel : bucketKey;
         final productToken = safeFileToken(
           productTypeRaw.isNotEmpty ? productTypeRaw : 'Unknown',
         );
@@ -9940,8 +10449,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         if (cm is Map<String, dynamic>) {
           final cust = Customer.fromJson(Map<String, dynamic>.from(cm));
           final company = cust.companyName.trim();
-          final identifyingCustomer =
-              company.isNotEmpty ? company : cust.id.trim();
+          final identifyingCustomer = company.isNotEmpty
+              ? company
+              : cust.id.trim();
           customerToken = safeFileToken(identifyingCustomer);
         }
         if (customerToken.isEmpty) {
@@ -9978,11 +10488,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         );
       } catch (_) {}
 
-      await Share.shareXFiles(
-        attachments,
-        text: text,
-        subject: 'Quote: $name',
-      );
+      await Share.shareXFiles(attachments, text: text, subject: 'Quote: $name');
     } catch (_) {}
   }
 
@@ -10019,14 +10525,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final content = await file.readAsString();
       final data = Map<String, dynamic>.from(jsonDecode(content) as Map);
 
-      final name =
-          (data['name'] as String? ?? 'EVERYDAY QUOTE').toUpperCase();
+      final name = (data['name'] as String? ?? 'EVERYDAY QUOTE').toUpperCase();
       final loadedQuoteBucketKey =
           (data['quoteBucketKey'] as String?)?.trim() ?? '';
       final loadedQuoteBucketLabel =
           (data['quoteBucketLabel'] as String?)?.trim() ?? '';
       final linesList =
-          data['lines'] as List<dynamic>? ?? data['items'] as List<dynamic>? ?? [];
+          data['lines'] as List<dynamic>? ??
+          data['items'] as List<dynamic>? ??
+          [];
 
       Customer? loadedCustomer;
       final customerMap = data['customer'];
@@ -10035,8 +10542,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         try {
           loadedCustomer = _customers.firstWhere((c) => c.id == savedId);
         } catch (_) {
-          loadedCustomer =
-              Customer.fromJson(Map<String, dynamic>.from(customerMap));
+          loadedCustomer = Customer.fromJson(
+            Map<String, dynamic>.from(customerMap),
+          );
         }
       }
       loadedCustomer ??= await _resolveCustomerForActiveQuoteIndexRow(id);
@@ -10101,7 +10609,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       String activeBucketKey = loadedQuoteBucketKey;
       String activeBucketLabel = loadedQuoteBucketLabel;
       if (activeBucketKey.isEmpty && newOrderLines.isNotEmpty) {
-        final inferred = _resolveQuoteBucketForProduct(newOrderLines.first.product);
+        final inferred = _resolveQuoteBucketForProduct(
+          newOrderLines.first.product,
+        );
         activeBucketKey = inferred.bucketKey;
         activeBucketLabel = inferred.displayLabel;
       }
@@ -10133,6 +10643,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       void applyWorkspace() {
         _ordersTabExpandedLineKey = null;
+        _scanTabExpandedLineKey = null;
         if (_orderCsvImportInProgress) {
           _orderImportTouchedQuoteIds.add(id);
         }
@@ -10203,6 +10714,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<void> _showLoadQuoteDialog() async {
     _editDialogOpen = true;
+    // Rebuild so [MediaQuery.removeViewInsets] above the scaffold applies before
+    // the dialog search field raises the keyboard (avoids a one-frame overflow).
+    setState(() {});
     // Prune before save so a stale [_currentQuoteId] cannot re-insert a
     // superseded empty quote into [quotes_active.json] via [_saveQuote].
     await _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers();
@@ -10270,8 +10784,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               TextButton(
                 style: TextButton.styleFrom(
                   minimumSize: const Size(0, 28),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 2,
+                  ),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
                 onPressed: () => Navigator.pop(ctx),
@@ -10293,7 +10809,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           setState(() {
             _currentQuoteId = null;
             _activeQuoteBucketKey = _defaultQuoteBucketDefinition.bucketKey;
-            _activeQuoteBucketLabel = _defaultQuoteBucketDefinition.displayLabel;
+            _activeQuoteBucketLabel =
+                _defaultQuoteBucketDefinition.displayLabel;
             _orderLines.clear();
             _orderLineByKey.clear();
             _orderListVersion += 1;
@@ -10425,8 +10942,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final feedbackColor = _scanTabFeedbackTint();
     final customerLabel = _selectedCustomer == null
         ? (_customers.isEmpty
-            ? 'Load customers CSV first'
-            : 'No customer selected')
+              ? 'Load customers CSV first'
+              : 'No customer selected')
         : _selectedCustomer!.displayName;
 
     return _ScanQuotePanel(
@@ -10464,13 +10981,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       discountedUnitPrice: line != null
           ? _roundedUnitPrice(_getDiscountedUnitPrice(line))
           : 0,
-      priceIndicator:
-          line != null ? _productPricingIndicator(line.product) : null,
+      priceIndicator: line != null
+          ? _productPricingIndicator(line.product)
+          : null,
       onDecreaseQty: _decreaseSelectedLineQty,
       onIncreaseQty: _increaseSelectedLineQty,
       onDeleteSelectedLine: _confirmDeleteLine,
-      lastScanSummary:
-          'Last: +$_qtyAdded added     Scans: $_itemsScanned',
+      lastScanSummary: 'Last: +$_qtyAdded added     Scans: $_itemsScanned',
     );
   }
 
@@ -10522,9 +11039,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _setStateDebug('scan_search_tap_clear_results', () {
           _searchResults = [];
         });
-        _requestScannerFocusAfterManualEntry(
-          debugLabel: 'quickEntrySearchTap',
-        );
+        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySearchTap');
       },
     );
   }
@@ -10543,16 +11058,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _orderListBuildCount++;
     if (_orderLines.isEmpty) {
       return SliverToBoxAdapter(
-        child: RepaintBoundary(
-          child: const _ScanTabOrderListEmpty(),
-        ),
+        child: RepaintBoundary(child: const _ScanTabOrderListEmpty()),
       );
     }
     return SliverList(
       key: ValueKey<String>('order_list_${_orderListVersion}'),
       delegate: SliverChildBuilderDelegate(
-        (context, index) =>
-            _buildScanTabOrderLineSubtree(_orderLines[index]),
+        (context, index) => _buildScanTabOrderLineSubtree(_orderLines[index]),
         childCount: _orderLines.length,
       ),
     );
@@ -10568,6 +11080,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         child: _buildOrderCard(
           line,
           scanTabHighlightFlash: _scanTabHighlightLineKey == lineKey,
+          compactLayout: true,
+          compactExpandHost: _OrderLineCardCompactExpandHost.scanTab,
         ),
       ),
     );
@@ -10577,16 +11091,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     OrderLine line, {
     bool scanTabHighlightFlash = false,
     bool compactLayout = false,
+    _OrderLineCardCompactExpandHost? compactExpandHost,
   }) {
     final String lineKey = _orderLineKeyForProduct(line.product);
-    final bool ordersExpanded =
-        compactLayout && _ordersTabExpandedLineKey == lineKey;
+    assert(
+      !compactLayout || compactExpandHost != null,
+      'compactLayout requires compactExpandHost',
+    );
+    final String? expandedKeyForHost = switch (compactExpandHost) {
+      _OrderLineCardCompactExpandHost.ordersTab => _ordersTabExpandedLineKey,
+      _OrderLineCardCompactExpandHost.scanTab => _scanTabExpandedLineKey,
+      null => null,
+    };
+    final bool compactExpanded =
+        compactLayout && expandedKeyForHost == lineKey;
     return _OrderLineCard(
       dismissibleKey: ValueKey(lineKey),
       line: line,
       scanTabHighlightFlash: scanTabHighlightFlash,
       compactLayout: compactLayout,
-      expandedOrdersCompact: ordersExpanded,
+      expandedOrdersCompact: compactExpanded,
       restrictCardTapToProductArea: compactLayout,
       lineHasDiscount: _lineHasDiscount(line),
       discountedUnitPrice: _roundedUnitPrice(_getDiscountedUnitPrice(line)),
@@ -10595,11 +11119,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       onSwipeDeletePrompt: () => _confirmDeleteLine(line),
       onCardTap: compactLayout
           ? () {
-              _setStateDebug('orders_tab_toggle_card_expand', () {
-                if (_ordersTabExpandedLineKey == lineKey) {
-                  _ordersTabExpandedLineKey = null;
-                } else {
-                  _ordersTabExpandedLineKey = lineKey;
+              _setStateDebug('order_card_compact_toggle_expand', () {
+                switch (compactExpandHost!) {
+                  case _OrderLineCardCompactExpandHost.ordersTab:
+                    if (_ordersTabExpandedLineKey == lineKey) {
+                      _ordersTabExpandedLineKey = null;
+                    } else {
+                      _ordersTabExpandedLineKey = lineKey;
+                    }
+                  case _OrderLineCardCompactExpandHost.scanTab:
+                    if (_scanTabExpandedLineKey == lineKey) {
+                      _scanTabExpandedLineKey = null;
+                    } else {
+                      _scanTabExpandedLineKey = lineKey;
+                    }
                 }
               });
             }
@@ -10631,7 +11164,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final line = _orderLines[index];
         return KeyedSubtree(
           key: ValueKey(_orderLineKeyForProduct(line.product)),
-          child: _buildOrderCard(line, compactLayout: true),
+          child: _buildOrderCard(
+            line,
+            compactLayout: true,
+            compactExpandHost: _OrderLineCardCompactExpandHost.ordersTab,
+          ),
         );
       },
     );
@@ -10673,10 +11210,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     final viewInsets = MediaQuery.viewInsetsOf(context);
     final quickEntryFloatAboveKeyboard =
-        (_quickEntryFocusNode.hasFocus &&
-                viewInsets.bottom > 0) ||
-            (_quickEntryHoldFloatingLayoutForKeyboard &&
-                viewInsets.bottom > 0);
+        (_quickEntryFocusNode.hasFocus && viewInsets.bottom > 0) ||
+        (_quickEntryHoldFloatingLayoutForKeyboard && viewInsets.bottom > 0);
     return _ScanTabLayout(
       quotePanel: _buildScanQuotePanel(),
       loadingProducts: _loadingProducts,
@@ -10714,44 +11249,50 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _requestScannerFocus();
         }
       },
-      child: Scaffold(
-        // Let the scaffold shrink the body by viewInsets when the keyboard opens.
-        // Do not also add viewInsets.bottom to a non-flex child in [_buildScanTab]:
-        // that inflates the Column's fixed-height children and can force flex space
-        // negative (RenderFlex overflow) on short viewports.
-        resizeToAvoidBottomInset: true,
-        appBar: AppBar(
-          toolbarHeight: 48,
-          title: const Text('Showroom Scanner'),
-          bottom: TabBar(
-            controller: _tabController,
-            tabs: const [
-              Tab(text: 'Scan'),
-              Tab(text: 'E-Catalog'),
-              Tab(text: 'Orders'),
-              Tab(text: 'Archive'),
-              Tab(text: 'Setup'),
-            ],
+      child: MediaQuery.removeViewInsets(
+        context: context,
+        removeBottom: _editDialogOpen,
+        child: Scaffold(
+          // Let the scaffold shrink the body by viewInsets when the keyboard opens.
+          // Do not also add viewInsets.bottom to a non-flex child in [_buildScanTab]:
+          // that inflates the Column's fixed-height children and can force flex space
+          // negative (RenderFlex overflow) on short viewports.
+          // While [_editDialogOpen], bottom insets are stripped above so modal dialogs
+          // (Load Quote search field) do not shrink the scaffold and overflow the Scan tab.
+          resizeToAvoidBottomInset: true,
+          appBar: AppBar(
+            toolbarHeight: 48,
+            title: const Text('Showroom Scanner'),
+            bottom: TabBar(
+              controller: _tabController,
+              tabs: const [
+                Tab(text: 'Scan'),
+                Tab(text: 'E-Catalog'),
+                Tab(text: 'Orders'),
+                Tab(text: 'Archive'),
+                Tab(text: 'Setup'),
+              ],
+            ),
           ),
-        ),
-        body: SafeArea(
-          child: Column(
-            children: [
-              const SizedBox(height: 6),
-              Expanded(
-                child: TabBarView(
-                  controller: _tabController,
-                  physics: const NeverScrollableScrollPhysics(),
-                  children: [
-                    _buildScanTab(),
-                    _buildECatalogTab(),
-                    _buildOrderListTab(),
-                    _buildArchiveTab(),
-                    _buildSetupTab(),
-                  ],
+          body: SafeArea(
+            child: Column(
+              children: [
+                const SizedBox(height: 6),
+                Expanded(
+                  child: TabBarView(
+                    controller: _tabController,
+                    physics: const NeverScrollableScrollPhysics(),
+                    children: [
+                      _buildScanTab(),
+                      _buildECatalogTab(),
+                      _buildOrderListTab(),
+                      _buildArchiveTab(),
+                      _buildSetupTab(),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -10762,8 +11303,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 // --- Scan / Orders tab UI extracted from [_ScannerHomePageState] (presentation only) ---
 
 /// Shared border radius for scan/order line cards and swipe background (presentation only).
-const BorderRadius _kOrderLineCardBorderRadius =
-    BorderRadius.all(Radius.circular(12));
+const BorderRadius _kOrderLineCardBorderRadius = BorderRadius.all(
+  Radius.circular(12),
+);
 
 /// Full Scan tab body: quote header, scrollable middle, and bottom search / quote actions.
 class _ScanTabLayout extends StatelessWidget {
@@ -10783,27 +11325,40 @@ class _ScanTabLayout extends StatelessWidget {
     required this.loadCreateQuoteBar,
   });
 
-  static const EdgeInsets _quotePanelPadding =
-      EdgeInsets.fromLTRB(12, 12, 12, 0);
-  static const EdgeInsets _livePanelPadding =
-      EdgeInsets.symmetric(horizontal: 12);
-  static const EdgeInsets _scrollListPadding =
-      EdgeInsets.symmetric(horizontal: 12);
-  static const EdgeInsets _bottomActionsPadding =
-      EdgeInsets.fromLTRB(12, 8, 12, 8);
+  static const EdgeInsets _quotePanelPadding = EdgeInsets.fromLTRB(
+    12,
+    12,
+    12,
+    0,
+  );
+  static const EdgeInsets _livePanelPadding = EdgeInsets.symmetric(
+    horizontal: 12,
+  );
+  static const EdgeInsets _scrollListPadding = EdgeInsets.symmetric(
+    horizontal: 12,
+  );
+  static const EdgeInsets _bottomActionsPadding = EdgeInsets.fromLTRB(
+    12,
+    8,
+    12,
+    8,
+  );
 
   /// Single instance while catalog is loading (avoids reallocating each parent rebuild).
-  static const Widget _loadingProductsIndicator =
-      Center(child: CircularProgressIndicator());
+  static const Widget _loadingProductsIndicator = Center(
+    child: CircularProgressIndicator(),
+  );
 
   final Widget quotePanel;
   final bool loadingProducts;
   final ScrollController scanPanelScrollController;
   final Widget liveOrderControlPanel;
+
   /// Must be a sliver widget (e.g. [SliverList], [SliverToBoxAdapter]).
   final Widget orderListSliver;
   final Widget searchResultsList;
   final Widget itemSearchBlock;
+
   /// When true, the real [_ScanTabItemSearchBlock] is only in the floating bar;
   /// inline uses [_ScanTabItemSearchPlaceholder] so the field is not under the keyboard.
   final bool quickEntryFloatAboveKeyboard;
@@ -10814,9 +11369,7 @@ class _ScanTabLayout extends StatelessWidget {
   Widget build(BuildContext context) {
     if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
       _debugRebuildCount++;
-      debugPrint(
-        'REBUILD_INSTRUMENT _ScanTabLayout #$_debugRebuildCount',
-      );
+      debugPrint('REBUILD_INSTRUMENT _ScanTabLayout #$_debugRebuildCount');
     }
     final Widget scanBody = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -10934,13 +11487,12 @@ class _ScanQuotePanelBody extends StatelessWidget {
   static final List<TextInputFormatter> _quoteNameInputFormatters =
       <TextInputFormatter>[UpperCaseTextFormatter()];
 
-  static final ButtonStyle _selectCustomerButtonStyle =
-      FilledButton.styleFrom(
-        visualDensity: VisualDensity.compact,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      );
+  static final ButtonStyle _selectCustomerButtonStyle = FilledButton.styleFrom(
+    visualDensity: VisualDensity.compact,
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    minimumSize: Size.zero,
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  );
 
   static final TextStyle _discountSublineStyle = TextStyle(
     fontSize: 11,
@@ -10966,9 +11518,7 @@ class _ScanQuotePanelBody extends StatelessWidget {
   Widget build(BuildContext context) {
     if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
       _debugRebuildCount++;
-      debugPrint(
-        'REBUILD_INSTRUMENT _ScanQuotePanelBody #$_debugRebuildCount',
-      );
+      debugPrint('REBUILD_INSTRUMENT _ScanQuotePanelBody #$_debugRebuildCount');
     }
     final colorScheme = Theme.of(context).colorScheme;
     return Padding(
@@ -10982,10 +11532,7 @@ class _ScanQuotePanelBody extends StatelessWidget {
             focusNode: quoteNameFocusNode,
             textCapitalization: TextCapitalization.characters,
             inputFormatters: _quoteNameInputFormatters,
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 13,
-            ),
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
             decoration: const InputDecoration(
               labelText: 'Quote',
               isDense: true,
@@ -11000,10 +11547,7 @@ class _ScanQuotePanelBody extends StatelessWidget {
             children: [
               const Text(
                 'Customer:',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
-                ),
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
               ),
               const SizedBox(width: 6),
               Expanded(
@@ -11022,8 +11566,7 @@ class _ScanQuotePanelBody extends StatelessWidget {
               FilledButton.tonal(
                 style: _selectCustomerButtonStyle,
                 onPressed: selectCustomerEnabled ? onSelectCustomer : null,
-                child:
-                    const Text('Select', style: TextStyle(fontSize: 12)),
+                child: const Text('Select', style: TextStyle(fontSize: 12)),
               ),
             ],
           ),
@@ -11430,10 +11973,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                         foregroundColor:
                                             colorScheme.onErrorContainer,
                                       ),
-                                      child: const Icon(
-                                        Icons.remove,
-                                        size: 24,
-                                      ),
+                                      child: const Icon(Icons.remove, size: 24),
                                     ),
                                   ),
                                   const SizedBox(width: 4),
@@ -11474,10 +12014,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                         tapTargetSize:
                                             MaterialTapTargetSize.shrinkWrap,
                                       ),
-                                      child: const Icon(
-                                        Icons.add,
-                                        size: 24,
-                                      ),
+                                      child: const Icon(Icons.add, size: 24),
                                     ),
                                   ),
                                 ],
@@ -11491,8 +12028,7 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                   vertical: 8,
                                 ),
                                 minimumSize: const Size(0, 40),
-                                tapTargetSize:
-                                    MaterialTapTargetSize.shrinkWrap,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                                 backgroundColor: colorScheme.error,
                                 foregroundColor: colorScheme.onError,
                               ),
@@ -11564,11 +12100,9 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                 const double deleteW = 84;
                                 const double rowH = 48;
                                 const double g = 8;
-                                final double midW = (c2.maxWidth -
-                                        sideB * 2 -
-                                        deleteW -
-                                        g * 3)
-                                    .clamp(48.0, c2.maxWidth);
+                                final double midW =
+                                    (c2.maxWidth - sideB * 2 - deleteW - g * 3)
+                                        .clamp(48.0, c2.maxWidth);
                                 return SizedBox(
                                   height: rowH,
                                   child: Row(
@@ -11581,10 +12115,10 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                           onPressed: onDecreaseQty,
                                           style: FilledButton.styleFrom(
                                             padding: EdgeInsets.zero,
-                                            backgroundColor: colorScheme
-                                                .errorContainer,
-                                            foregroundColor: colorScheme
-                                                .onErrorContainer,
+                                            backgroundColor:
+                                                colorScheme.errorContainer,
+                                            foregroundColor:
+                                                colorScheme.onErrorContainer,
                                           ),
                                           child: const Icon(
                                             Icons.remove,
@@ -11608,8 +12142,9 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                             border: Border.all(
                                               color: Colors.grey,
                                             ),
-                                            borderRadius:
-                                                BorderRadius.circular(8),
+                                            borderRadius: BorderRadius.circular(
+                                              8,
+                                            ),
                                           ),
                                           child: Text(
                                             'Qty: ${line.quantity}',
@@ -11631,7 +12166,10 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                                           style: FilledButton.styleFrom(
                                             padding: EdgeInsets.zero,
                                           ),
-                                          child: const Icon(Icons.add, size: 28),
+                                          child: const Icon(
+                                            Icons.add,
+                                            size: 28,
+                                          ),
                                         ),
                                       ),
                                       SizedBox(width: g),
@@ -11721,10 +12259,7 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
         FilledButton(
           style: FilledButton.styleFrom(
             visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 8,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
           onPressed: onLoadQuote,
           child: const Text('Load Quote', style: TextStyle(fontSize: 13)),
@@ -11732,10 +12267,7 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
         FilledButton(
           style: FilledButton.styleFrom(
             visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 8,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
           onPressed: onCreateQuote,
           child: const Text('Create Quote', style: TextStyle(fontSize: 13)),
@@ -11743,16 +12275,10 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
         FilledButton(
           style: FilledButton.styleFrom(
             visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 8,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
           onPressed: onScanWithCamera,
-          child: const Text(
-            'Scan with Camera',
-            style: TextStyle(fontSize: 13),
-          ),
+          child: const Text('Scan with Camera', style: TextStyle(fontSize: 13)),
         ),
       ],
     );
@@ -11852,9 +12378,15 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
 
 /// Read-only ECatalog product detail (bottom sheet body).
 class _ECatalogProductDetailSheet extends StatelessWidget {
-  const _ECatalogProductDetailSheet({required this.product});
+  const _ECatalogProductDetailSheet({
+    required this.product,
+    required this.ecatalogPricing,
+  });
 
   final Product product;
+
+  /// Same branch order and formatting as [_ScannerHomePageState._buildECatalogListPriceColumn].
+  final Widget ecatalogPricing;
 
   static Widget _labeledRow(
     BuildContext context, {
@@ -11876,10 +12408,7 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Text(
-              v.isEmpty ? '—' : v,
-              style: textTheme.bodyMedium,
-            ),
+            child: Text(v.isEmpty ? '—' : v, style: textTheme.bodyMedium),
           ),
         ],
       ),
@@ -11893,8 +12422,7 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
     final url =
         'https://showroom-images.netlify.app/images/${product.itemNumber.trim()}.jpeg';
     final flags = <Widget>[
-      if (product.isNewRelease)
-        _flagChip(context, 'NEW', Colors.blue),
+      if (product.isNewRelease) _flagChip(context, 'NEW', Colors.blue),
       if (product.isPs) _flagChip(context, 'PS', colorScheme.primary),
       if (product.isNet) _flagChip(context, 'NET', colorScheme.tertiary),
     ];
@@ -11945,29 +12473,45 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           _labeledRow(context, label: 'Item #', value: product.itemNumber),
-          _labeledRow(context, label: 'Description', value: product.description),
+          _labeledRow(
+            context,
+            label: 'Description',
+            value: product.description,
+          ),
           _labeledRow(context, label: 'UPC', value: product.upc),
-          _labeledRow(
-            context,
-            label: 'List price',
-            value: product.listPrice > 0
-                ? '\$${product.listPrice.toStringAsFixed(2)}'
-                : '',
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 120,
+                  child: Text(
+                    'Pricing',
+                    style: textTheme.bodySmall?.copyWith(
+                      color: _kSecondaryText,
+                    ),
+                  ),
+                ),
+                Expanded(child: ecatalogPricing),
+              ],
+            ),
           ),
           _labeledRow(
             context,
-            label: 'Price',
-            value: '\$${product.price.toStringAsFixed(2)}',
+            label: 'Product type',
+            value: product.productType,
           ),
-          _labeledRow(context, label: 'Product type', value: product.productType),
           _labeledRow(context, label: 'Category', value: product.category),
-          _labeledRow(context, label: 'Sub-category', value: product.subCategory),
+          _labeledRow(
+            context,
+            label: 'Sub-category',
+            value: product.subCategory,
+          ),
           _labeledRow(
             context,
             label: 'Min order qty',
-            value: product.minOrderQty > 0
-                ? '${product.minOrderQty}'
-                : '',
+            value: product.minOrderQty > 0 ? '${product.minOrderQty}' : '',
           ),
           _labeledRow(
             context,
@@ -11981,11 +12525,7 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
               style: textTheme.bodySmall?.copyWith(color: _kSecondaryText),
             ),
             const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: flags,
-            ),
+            Wrap(spacing: 8, runSpacing: 8, children: flags),
           ],
         ],
       ),
@@ -12004,24 +12544,39 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
         child: Text(
           text,
           style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: color,
-                fontWeight: FontWeight.w600,
-              ),
+            color: color,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
     );
   }
 }
 
+/// ECatalog catalog row: compact pill for quantity already in the current order.
+Widget _ecatalogInOrderQtyBadge(BuildContext context, int quantity) {
+  final textTheme = Theme.of(context).textTheme;
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: Colors.green.withValues(alpha: 0.14),
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: Text(
+      '$quantity In Order',
+      style: textTheme.bodySmall?.copyWith(
+        fontWeight: FontWeight.w600,
+        color: Colors.green.shade800,
+      ),
+    ),
+  );
+}
+
 /// Same JPEG URL as [_OrderLineCardRow]; small decode bounds for list scrolling.
 class _ECatalogProductThumbnail extends StatelessWidget {
-  const _ECatalogProductThumbnail({
-    required this.product,
-    this.isInQuote = false,
-  });
+  const _ECatalogProductThumbnail({required this.product});
 
   final Product product;
-  final bool isInQuote;
 
   static const double size = 48;
 
@@ -12033,60 +12588,38 @@ class _ECatalogProductThumbnail extends StatelessWidget {
     return SizedBox(
       width: size,
       height: size,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Positioned.fill(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: Image.network(
-                url,
-                fit: BoxFit.cover,
-                width: size,
-                height: size,
-                cacheWidth: 128,
-                cacheHeight: 128,
-                filterQuality: FilterQuality.low,
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
-                  return ColoredBox(
-                    color: colorScheme.surfaceContainerHighest,
-                    child: Icon(
-                      Icons.image_outlined,
-                      size: 22,
-                      color: colorScheme.outline,
-                    ),
-                  );
-                },
-                errorBuilder: (context, error, stackTrace) {
-                  return ColoredBox(
-                    color: colorScheme.surfaceContainerHighest,
-                    child: Icon(
-                      Icons.image_not_supported_outlined,
-                      size: 20,
-                      color: colorScheme.outline,
-                    ),
-                  );
-                },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Image.network(
+          url,
+          fit: BoxFit.cover,
+          width: size,
+          height: size,
+          cacheWidth: 128,
+          cacheHeight: 128,
+          filterQuality: FilterQuality.low,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return ColoredBox(
+              color: colorScheme.surfaceContainerHighest,
+              child: Icon(
+                Icons.image_outlined,
+                size: 22,
+                color: colorScheme.outline,
               ),
-            ),
-          ),
-          if (isInQuote)
-            const Positioned(
-              top: -2,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Colors.green,
-                    shape: BoxShape.circle,
-                  ),
-                  child: SizedBox(width: 10, height: 10),
-                ),
+            );
+          },
+          errorBuilder: (context, error, stackTrace) {
+            return ColoredBox(
+              color: colorScheme.surfaceContainerHighest,
+              child: Icon(
+                Icons.image_not_supported_outlined,
+                size: 20,
+                color: colorScheme.outline,
               ),
-            ),
-        ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -12127,10 +12660,7 @@ class _ScanTabSearchResultTile extends StatelessWidget {
             if (alreadyInOrder)
               const Text(
                 'In order',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.green,
-                ),
+                style: TextStyle(fontSize: 11, color: Colors.green),
               ),
             if (alreadyInOrder) const SizedBox(width: 6),
             if (product.isPs)
@@ -12187,9 +12717,7 @@ class _ScanTabSearchResultsList extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
-      children: [
-        for (final product in products) itemBuilder(product),
-      ],
+      children: [for (final product in products) itemBuilder(product)],
     );
   }
 }
@@ -12203,10 +12731,7 @@ class _ScanTabOrderListEmpty extends StatelessWidget {
       padding: EdgeInsets.symmetric(vertical: 24),
       child: SizedBox(
         width: double.infinity,
-        child: Text(
-          'No items added yet',
-          textAlign: TextAlign.center,
-        ),
+        child: Text('No items added yet', textAlign: TextAlign.center),
       ),
     );
   }
@@ -12260,8 +12785,9 @@ class _OrderLineQtyColumn extends StatelessWidget {
                   icon: const Icon(Icons.remove),
                   style: IconButton.styleFrom(
                     padding: EdgeInsets.zero,
-                    backgroundColor: colorScheme.errorContainer
-                        .withValues(alpha: 0.5),
+                    backgroundColor: colorScheme.errorContainer.withValues(
+                      alpha: 0.5,
+                    ),
                     foregroundColor: colorScheme.onErrorContainer,
                   ),
                 ),
@@ -12333,10 +12859,10 @@ class _OrderLineCardRow extends StatelessWidget {
     color: Colors.green.shade800,
   );
 
-  /// When true (Orders tab only), use denser text lines and bottom-right image.
+  /// When true (Orders tab + Scan tab order lists), use denser text lines and bottom-right image.
   final bool compactLayout;
 
-  /// Orders tab only: expanded card uses a large top image and untruncated text.
+  /// Compact order lists: expanded card uses a large top image and untruncated text.
   final bool expandedOrdersCompact;
 
   /// When false, only the product / image block is built (qty sits outside the card tap target).
@@ -12383,9 +12909,7 @@ class _OrderLineCardRow extends StatelessWidget {
   Widget build(BuildContext context) {
     if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
       _debugRebuildCount++;
-      debugPrint(
-        'REBUILD_INSTRUMENT _OrderLineCardRow #$_debugRebuildCount',
-      );
+      debugPrint('REBUILD_INSTRUMENT _OrderLineCardRow #$_debugRebuildCount');
     }
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -12436,21 +12960,21 @@ class _OrderLineCardRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             )
           : line.product.isPs
-              ? Text(
-                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-                  'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
-                  'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: line3BaseStyle,
-                )
-              : Text(
-                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-                  'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: line3BaseStyle,
-                );
+          ? Text(
+              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+              'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
+              'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: line3BaseStyle,
+            )
+          : Text(
+              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+              'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: line3BaseStyle,
+            );
 
       final Widget line3Expanded = lineHasDiscount
           ? Text.rich(
@@ -12478,17 +13002,17 @@ class _OrderLineCardRow extends StatelessWidget {
               ),
             )
           : line.product.isPs
-              ? Text(
-                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-                  'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
-                  'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-                  style: line3BaseStyle,
-                )
-              : Text(
-                  'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-                  'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-                  style: line3BaseStyle,
-                );
+          ? Text(
+              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+              'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
+              'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
+              style: line3BaseStyle,
+            )
+          : Text(
+              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
+              'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
+              style: line3BaseStyle,
+            );
 
       final Widget compactProductBlock = expandedOrdersCompact
           ? Column(
@@ -12535,9 +13059,7 @@ class _OrderLineCardRow extends StatelessWidget {
                     right: collapsedImageSize + imageGutter,
                   ),
                   child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      minHeight: collapsedImageSize,
-                    ),
+                    constraints: BoxConstraints(minHeight: collapsedImageSize),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
@@ -12589,7 +13111,7 @@ class _OrderLineCardRow extends StatelessWidget {
       );
     }
 
-    // Scan tab only (non-compact): dense row — description + qty column (Scans / line $).
+    // Legacy non-compact row (unused by current [_buildOrderCard] call sites; Scan uses compact).
     const double scanRowImageSize = 50;
     final Widget scanProductRow = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -12679,11 +13201,14 @@ class _OrderLineCard extends StatelessWidget {
   final Key dismissibleKey;
   final OrderLine line;
   final bool scanTabHighlightFlash;
-  /// Denser card + line layout for the Orders tab [ListView] only.
+
+  /// Denser card + line layout for Orders tab [ListView] and Scan tab [SliverList].
   final bool compactLayout;
-  /// Orders tab expanded card: large top image, untruncated compact text.
+
+  /// Expanded compact card: large top image, untruncated compact text.
   final bool expandedOrdersCompact;
-  /// When true (Orders tab), [onCardTap] applies only to the product block, not qty.
+
+  /// When true (compact lists), [onCardTap] applies only to the product block, not qty.
   final bool restrictCardTapToProductArea;
   final bool lineHasDiscount;
   final double discountedUnitPrice;
@@ -12698,9 +13223,7 @@ class _OrderLineCard extends StatelessWidget {
   Widget build(BuildContext context) {
     if (kDebugMode && _kScanRebuildInstrumentationEnabled) {
       _debugRebuildCount++;
-      debugPrint(
-        'REBUILD_INSTRUMENT _OrderLineCard #$_debugRebuildCount',
-      );
+      debugPrint('REBUILD_INSTRUMENT _OrderLineCard #$_debugRebuildCount');
     }
     final colorScheme = Theme.of(context).colorScheme;
     final ShapeBorder? cardShape = scanTabHighlightFlash
@@ -12781,10 +13304,7 @@ class _OrderLineCard extends StatelessWidget {
         ),
         shape: cardShape,
         child: RepaintBoundary(
-          child: Padding(
-            padding: cardPadding,
-            child: rowBody,
-          ),
+          child: Padding(padding: cardPadding, child: rowBody),
         ),
       ),
     );
@@ -12943,9 +13463,7 @@ class _OrderListTab extends StatelessWidget {
           Expanded(
             child: loadingProducts
                 ? const Center(child: CircularProgressIndicator())
-                : (activeTabIndex == 2
-                    ? orderList
-                    : const SizedBox.shrink()),
+                : (activeTabIndex == 2 ? orderList : const SizedBox.shrink()),
           ),
         ],
       ),
@@ -12989,24 +13507,18 @@ class _SetupTab extends StatelessWidget {
             children: [
               Expanded(
                 child: FilledButton(
-                  onPressed:
-                      loadingProductsFromWeb ? null : onLoadProducts,
+                  onPressed: loadingProductsFromWeb ? null : onLoadProducts,
                   child: Text(
-                    loadingProductsFromWeb
-                        ? 'UPDATING...'
-                        : 'LOAD PRODUCTS',
+                    loadingProductsFromWeb ? 'UPDATING...' : 'LOAD PRODUCTS',
                   ),
                 ),
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: FilledButton(
-                  onPressed:
-                      loadingCustomersFromWeb ? null : onLoadCustomers,
+                  onPressed: loadingCustomersFromWeb ? null : onLoadCustomers,
                   child: Text(
-                    loadingCustomersFromWeb
-                        ? 'UPDATING...'
-                        : 'LOAD CUSTOMERS',
+                    loadingCustomersFromWeb ? 'UPDATING...' : 'LOAD CUSTOMERS',
                   ),
                 ),
               ),
@@ -13028,9 +13540,7 @@ class _SetupTab extends StatelessWidget {
 class _CameraScannerPage extends StatefulWidget {
   final Future<_CameraScanOverlayUpdate?> Function(String) onDetect;
 
-  const _CameraScannerPage({
-    required this.onDetect,
-  });
+  const _CameraScannerPage({required this.onDetect});
 
   @override
   State<_CameraScannerPage> createState() => _CameraScannerPageState();
@@ -13089,7 +13599,8 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
       if (raw.isEmpty) continue;
 
       final now = DateTime.now();
-      final isRecentDuplicate = _lastScannedValue == raw &&
+      final isRecentDuplicate =
+          _lastScannedValue == raw &&
           _lastScannedAt != null &&
           now.difference(_lastScannedAt!) < _duplicateScanCooldown;
       if (isRecentDuplicate) continue;
@@ -13133,16 +13644,16 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          MobileScanner(
-            controller: _controller,
-            onDetect: _handleBarcode,
-          ),
+          MobileScanner(controller: _controller, onDetect: _handleBarcode),
           Positioned(
             top: 12,
             right: 12,
             child: IgnorePointer(
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.black.withValues(alpha: 0.6),
                   borderRadius: BorderRadius.circular(8),
@@ -13163,7 +13674,10 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.black54,
                   borderRadius: BorderRadius.circular(12),
@@ -13257,10 +13771,7 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
       padding: const EdgeInsets.fromLTRB(4, 12, 4, 8),
       child: Text(
         title,
-        style: const TextStyle(
-          fontWeight: FontWeight.w700,
-          fontSize: 15,
-        ),
+        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
       ),
     );
   }
@@ -13375,10 +13886,7 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
                         info.name.trim().isEmpty
                             ? '(Unnamed quote)'
                             : info.name.trim(),
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: onSurface,
-                        ),
+                        style: TextStyle(fontSize: 14, color: onSurface),
                       ),
                       const SizedBox(height: 4),
                       Text(
@@ -13463,17 +13971,21 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
-            return Center(child: Text('Could not load archive: ${snapshot.error}'));
+            return Center(
+              child: Text('Could not load archive: ${snapshot.error}'),
+            );
           }
           final all = snapshot.data ?? [];
-          final archived = all
-              .where((e) => e.status == QuoteLifecycleStatus.archived)
-              .toList()
-            ..sort(_sortArchiveEntries);
-          final confirmed = all
-              .where((e) => e.status == QuoteLifecycleStatus.confirmed)
-              .toList()
-            ..sort(_sortConfirmedEntries);
+          final archived =
+              all
+                  .where((e) => e.status == QuoteLifecycleStatus.archived)
+                  .toList()
+                ..sort(_sortArchiveEntries);
+          final confirmed =
+              all
+                  .where((e) => e.status == QuoteLifecycleStatus.confirmed)
+                  .toList()
+                ..sort(_sortConfirmedEntries);
 
           return RefreshIndicator(
             onRefresh: () async {
