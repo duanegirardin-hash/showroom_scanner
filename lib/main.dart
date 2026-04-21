@@ -7,7 +7,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:csv/csv.dart';
 import 'package:excel/excel.dart' as xlsx;
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show compute, debugPrint, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -16,8 +16,36 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'master_products_sheet_builder.dart';
+
+/// Paths chosen in the master build staging dialog (Build Updated Master Products Sheet).
+class _MasterBuildFileSet {
+  const _MasterBuildFileSet({
+    required this.quotePath,
+    required this.productsPath,
+    required this.psPath,
+    required this.newReleasePath,
+    required this.whse1InStockPath,
+    required this.whse2InStockPath,
+    required this.whse1OutOfStockPath,
+    required this.whse2OutOfStockPath,
+    required this.whse1ComingSoonPath,
+    required this.whse2ComingSoonPath,
+  });
+  final String quotePath;
+  final String productsPath;
+  final String psPath;
+  final String newReleasePath;
+  final String whse1InStockPath;
+  final String whse2InStockPath;
+  final String whse1OutOfStockPath;
+  final String whse2OutOfStockPath;
+  final String whse1ComingSoonPath;
+  final String whse2ComingSoonPath;
+}
+
 const String _productsCsvUrl =
-    'https://docs.google.com/spreadsheets/d/1JXn_5iwfVESL8laul5Q3IEdQQ6cHwph6yY5ojKnPZ6I/export?format=csv&gid=1299110245';
+    'https://docs.google.com/spreadsheets/d/1GEdA9FySq966sRK1NDnVh4fKBmdPA8ERFq-xeVRxSWw/export?format=csv&gid=1048546199';
 
 const String _customersCsvUrl =
     'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
@@ -318,6 +346,12 @@ class Product {
   final String subCategory;
   final int minOrderQty;
   final int caseQty;
+  final bool whse1InStock;
+  final bool whse2InStock;
+  final bool whse1OutOfStock;
+  final bool whse2OutOfStock;
+  final bool whse1ComingSoon;
+  final bool whse2ComingSoon;
 
   Product({
     required this.itemNumber,
@@ -337,7 +371,674 @@ class Product {
     required this.subCategory,
     required this.minOrderQty,
     required this.caseQty,
+    this.whse1InStock = false,
+    this.whse2InStock = false,
+    this.whse1OutOfStock = false,
+    this.whse2OutOfStock = false,
+    this.whse1ComingSoon = false,
+    this.whse2ComingSoon = false,
   });
+}
+
+// --- Products CSV: background isolate (same parsing rules as _parseAndStoreProducts) ---
+
+class _ProductsCsvIsolateJob {
+  const _ProductsCsvIsolateJob({
+    required this.rawCsv,
+    required this.sourceLabel,
+  });
+  final String rawCsv;
+  final String sourceLabel;
+}
+
+class _ProductsCsvIsolateResult {
+  const _ProductsCsvIsolateResult({
+    required this.productsByUpc,
+    required this.productsByItemNumber,
+    required this.catalogCount,
+    required this.catalogSource,
+    required this.productsLoadDebugLine,
+    required this.isEmptyFile,
+  });
+  final Map<String, Product> productsByUpc;
+  final Map<String, Product> productsByItemNumber;
+  final int catalogCount;
+  final String catalogSource;
+  final String productsLoadDebugLine;
+  final bool isEmptyFile;
+}
+
+String _piNormalizedProductHeaderKey(String s) {
+  return s.trim().toLowerCase().replaceAll(RegExp(r'[\s\-]+'), '');
+}
+
+Map<String, int> _piProductHeaderIndexMap(List<String> header) {
+  final Map<String, int> map = {};
+  for (int i = 0; i < header.length; i++) {
+    final nk = _piNormalizedProductHeaderKey(header[i]);
+    if (nk.isEmpty) continue;
+    map.putIfAbsent(nk, () => i);
+  }
+  return map;
+}
+
+int _piRequireProductColumnIndex(
+  Map<String, int> byNorm,
+  String logicalName,
+  List<String> normalizedKeys,
+  List<String> headerForError,
+) {
+  for (final nk in normalizedKeys) {
+    final i = byNorm[nk];
+    if (i != null) return i;
+  }
+  throw FormatException(
+    'Products CSV missing required column "$logicalName" '
+    '(tried normalized keys: $normalizedKeys). '
+    'Headers: ${headerForError.join(', ')}',
+  );
+}
+
+int? _piOptionalProductColumnIndex(
+  Map<String, int> byNorm,
+  List<String> normalizedKeys,
+) {
+  for (final nk in normalizedKeys) {
+    final i = byNorm[nk];
+    if (i != null) return i;
+  }
+  return null;
+}
+
+String _piProductCell(List<dynamic> row, int col) {
+  if (col < 0 || col >= row.length) return '';
+  return row[col].toString();
+}
+
+String _piNormalizeItemNumber(String value) => value.trim().toUpperCase();
+
+String _piDigitsOnly(String value) {
+  return value.replaceAll(RegExp(r'[^0-9]'), '').trim();
+}
+
+String _piNormalizeUpcLookupKey(String value) {
+  final trimmed = value.trim();
+  final digits = _piDigitsOnly(trimmed);
+  return digits.isNotEmpty ? digits : trimmed.toUpperCase();
+}
+
+double _piParsePrice(String value) {
+  final cleaned = value.replaceAll('\$', '').replaceAll(',', '').trim();
+  return double.tryParse(cleaned) ?? 0.0;
+}
+
+int _piParseInt(String value) {
+  return int.tryParse(value.trim()) ?? 0;
+}
+
+bool _piParseDiscountEligibility(String value) {
+  return value.trim().toUpperCase() == 'YES';
+}
+
+bool _piParseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
+
+/// Keeps parity counters referenced so analyzer stays clean without changing outcomes.
+void _productsCsvSinkUnused(Object? _) {}
+
+_ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob job) {
+  final rawCsv = job.rawCsv;
+  final sourceLabel = job.sourceLabel;
+
+  final rows = const CsvToListConverter(
+    shouldParseNumbers: false,
+  ).convert(rawCsv);
+
+  if (rows.isEmpty) {
+    return _ProductsCsvIsolateResult(
+      productsByUpc: {},
+      productsByItemNumber: {},
+      catalogCount: 0,
+      catalogSource: '$sourceLabel (empty)',
+      productsLoadDebugLine: 'Products Loaded: 0 (empty file)',
+      isEmptyFile: true,
+    );
+  }
+
+  final header = rows.first
+      .map((e) => e.toString().trim())
+      .toList(growable: false);
+  final byNorm = _piProductHeaderIndexMap(header);
+
+  final idxItemNumber = _piRequireProductColumnIndex(
+    byNorm,
+    'Item Number',
+    const ['itemnumber'],
+    header,
+  );
+  final idxDescription = _piRequireProductColumnIndex(
+    byNorm,
+    'Description',
+    const ['description'],
+    header,
+  );
+  final idxUpc = _piRequireProductColumnIndex(byNorm, 'UPC', const [
+    'upc',
+  ], header);
+  final idxPrice = _piRequireProductColumnIndex(byNorm, 'Price', const [
+    'price',
+  ], header);
+  final idxDiscount = _piRequireProductColumnIndex(byNorm, 'DISCOUNT', const [
+    'discount',
+  ], header);
+  final idxNet = _piOptionalProductColumnIndex(byNorm, const ['net']);
+  final idxPs = _piOptionalProductColumnIndex(byNorm, const ['ps']);
+  final idxListPrice = _piOptionalProductColumnIndex(byNorm, const [
+    'listprice',
+  ]);
+  final idxNewRelease = _piOptionalProductColumnIndex(byNorm, const [
+    'newrelease',
+  ]);
+  final idxWhse1In = _piOptionalProductColumnIndex(byNorm, const [
+    'whse1instock',
+  ]);
+  final idxWhse2In = _piOptionalProductColumnIndex(byNorm, const [
+    'whse2instock',
+  ]);
+  final idxWhse1Out = _piOptionalProductColumnIndex(byNorm, const [
+    'whse1outofstock',
+  ]);
+  final idxWhse2Out = _piOptionalProductColumnIndex(byNorm, const [
+    'whse2outofstock',
+  ]);
+  final idxWhse1Soon = _piOptionalProductColumnIndex(byNorm, const [
+    'whse1comingsoon',
+  ]);
+  final idxWhse2Soon = _piOptionalProductColumnIndex(byNorm, const [
+    'whse2comingsoon',
+  ]);
+  final missingWhseHeaders = <String>[];
+  if (idxWhse1In == null) missingWhseHeaders.add('Whse 1 In Stock');
+  if (idxWhse2In == null) missingWhseHeaders.add('Whse 2 In Stock');
+  if (idxWhse1Out == null) missingWhseHeaders.add('Whse 1 Out of Stock');
+  if (idxWhse2Out == null) missingWhseHeaders.add('Whse 2 Out of Stock');
+  if (idxWhse1Soon == null) missingWhseHeaders.add('Whse 1 Coming Soon');
+  if (idxWhse2Soon == null) missingWhseHeaders.add('Whse 2 Coming Soon');
+  if (missingWhseHeaders.isNotEmpty) {
+    debugPrint(
+      '[WhseDiag] Optional warehouse columns missing '
+      '(${missingWhseHeaders.length}/6): ${missingWhseHeaders.join(', ')}; '
+      'defaulting to false',
+    );
+  }
+  final idxProductType = _piRequireProductColumnIndex(
+    byNorm,
+    'Product Type',
+    const ['producttype'],
+    header,
+  );
+  final idxCategory = _piRequireProductColumnIndex(byNorm, 'Category', const [
+    'category',
+  ], header);
+  final idxSubCategory = _piRequireProductColumnIndex(
+    byNorm,
+    'Sub-Category',
+    const ['subcategory'],
+    header,
+  );
+  final idxMinOrderQty = _piRequireProductColumnIndex(
+    byNorm,
+    'Minimum Order Quantity',
+    const [
+      'minorderqty',
+      'minimumorderquantity',
+      'moq',
+      'minqty',
+    ],
+    header,
+  );
+  final idxCaseQty = _piRequireProductColumnIndex(
+    byNorm,
+    'Case Quantity',
+    const [
+      'caseqty',
+      'casequantity',
+      'case',
+    ],
+    header,
+  );
+
+  final maxColIndex = [
+    idxItemNumber,
+    idxDescription,
+    idxUpc,
+    idxPrice,
+    idxDiscount,
+    idxProductType,
+    idxCategory,
+    idxSubCategory,
+    idxMinOrderQty,
+    idxCaseQty,
+    if (idxNet != null) idxNet,
+    if (idxPs != null) idxPs,
+    if (idxListPrice != null) idxListPrice,
+    if (idxNewRelease != null) idxNewRelease,
+    if (idxWhse1In != null) idxWhse1In,
+    if (idxWhse2In != null) idxWhse2In,
+    if (idxWhse1Out != null) idxWhse1Out,
+    if (idxWhse2Out != null) idxWhse2Out,
+    if (idxWhse1Soon != null) idxWhse1Soon,
+    if (idxWhse2Soon != null) idxWhse2Soon,
+  ].reduce((a, b) => a > b ? a : b);
+
+  final Map<String, Product> newProductsByUpc = {};
+  final Map<String, Product> newProductsByItemNumber = {};
+
+  final int totalDataRows = rows.length - 1;
+  int processedRows = 0;
+  int skippedMissingKeyRows = 0;
+  int skippedParseErrorRows = 0;
+  int duplicateUpcCount = 0;
+  int duplicateItemNumberCount = 0;
+  int discountEligibleCount = 0;
+  String? firstErrorMessage;
+
+  for (int i = 1; i < rows.length; i++) {
+    final row = rows[i];
+    if (row.isEmpty || row.every((e) => e.toString().trim().isEmpty)) {
+      skippedParseErrorRows++;
+      continue;
+    }
+
+    try {
+      final itemNumber = _piNormalizeItemNumber(
+        _piProductCell(row, idxItemNumber),
+      );
+      final description = _piProductCell(row, idxDescription).trim();
+      final upc = _piProductCell(row, idxUpc).trim();
+      final upcLookup = _piNormalizeUpcLookupKey(upc);
+      final price = _piParsePrice(_piProductCell(row, idxPrice));
+      final listPrice = idxListPrice == null
+          ? 0.0
+          : _piParsePrice(_piProductCell(row, idxListPrice));
+      final discountRaw = _piProductCell(row, idxDiscount).trim();
+      final discountEligible = _piParseDiscountEligibility(discountRaw);
+      final netRaw = idxNet == null ? '' : _piProductCell(row, idxNet).trim();
+      final isNet = _piParseYesFlag(netRaw);
+      final psRaw = idxPs == null ? '' : _piProductCell(row, idxPs).trim();
+      final isPs = _piParseYesFlag(psRaw);
+      final isNewRelease = idxNewRelease == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxNewRelease).trim());
+      final whse1InStock = idxWhse1In == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxWhse1In).trim());
+      final whse2InStock = idxWhse2In == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxWhse2In).trim());
+      final whse1OutOfStock = idxWhse1Out == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxWhse1Out).trim());
+      final whse2OutOfStock = idxWhse2Out == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxWhse2Out).trim());
+      final whse1ComingSoon = idxWhse1Soon == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxWhse1Soon).trim());
+      final whse2ComingSoon = idxWhse2Soon == null
+          ? false
+          : _piParseYesFlag(_piProductCell(row, idxWhse2Soon).trim());
+      if (discountEligible) discountEligibleCount++;
+      final productType = _piProductCell(row, idxProductType).trim();
+      final category = _piProductCell(row, idxCategory).trim();
+      final subCategory = _piProductCell(row, idxSubCategory).trim();
+      final minOrderQty = _piParseInt(_piProductCell(row, idxMinOrderQty));
+      final caseQty = _piParseInt(_piProductCell(row, idxCaseQty));
+
+      if (itemNumber.isEmpty || upcLookup.isEmpty) {
+        skippedMissingKeyRows++;
+        continue;
+      }
+
+      final product = Product(
+        itemNumber: itemNumber,
+        description: description,
+        upc: upc,
+        price: price,
+        listPrice: listPrice,
+        productType: productType,
+        discountRaw: discountRaw,
+        discountEligible: discountEligible,
+        netRaw: netRaw,
+        isNet: isNet,
+        psRaw: psRaw,
+        isPs: isPs,
+        isNewRelease: isNewRelease,
+        category: category,
+        subCategory: subCategory,
+        minOrderQty: minOrderQty == 0 ? 1 : minOrderQty,
+        caseQty: caseQty,
+        whse1InStock: whse1InStock,
+        whse2InStock: whse2InStock,
+        whse1OutOfStock: whse1OutOfStock,
+        whse2OutOfStock: whse2OutOfStock,
+        whse1ComingSoon: whse1ComingSoon,
+        whse2ComingSoon: whse2ComingSoon,
+      );
+
+      if (newProductsByUpc.containsKey(upcLookup)) {
+        duplicateUpcCount++;
+        final existing = newProductsByUpc[upcLookup]!;
+        debugPrint(
+          '[Products][DuplicateUPC] Duplicate UPC detected: $upcLookup\n'
+          '  Existing item: ${existing.itemNumber}\n'
+          '  New item: $itemNumber\n'
+          '  Row index (parsed rows): $i (1-based line in file: ${i + 1})',
+        );
+      }
+      if (newProductsByItemNumber.containsKey(itemNumber)) {
+        duplicateItemNumberCount++;
+      }
+
+      newProductsByUpc[upcLookup] = product;
+      newProductsByItemNumber[itemNumber] = product;
+      processedRows++;
+    } catch (e) {
+      skippedParseErrorRows++;
+      if (firstErrorMessage == null) {
+        firstErrorMessage = 'Row ${i + 1} parse error: $e';
+      }
+    }
+  }
+
+  final int skippedRows = skippedMissingKeyRows + skippedParseErrorRows;
+
+  debugPrint(
+    '[Products][DuplicateUPC] Total duplicate UPCs: $duplicateUpcCount',
+  );
+
+  _productsCsvSinkUnused((
+    maxColIndex,
+    totalDataRows,
+    skippedRows,
+    processedRows,
+    duplicateUpcCount,
+    duplicateItemNumberCount,
+    discountEligibleCount,
+    firstErrorMessage,
+  ));
+
+  return _ProductsCsvIsolateResult(
+    productsByUpc: newProductsByUpc,
+    productsByItemNumber: newProductsByItemNumber,
+    catalogCount: newProductsByUpc.length,
+    catalogSource: sourceLabel,
+    productsLoadDebugLine: 'Products Loaded: ${newProductsByUpc.length}',
+    isEmptyFile: false,
+  );
+}
+
+// --- Customers CSV: background isolate (same parsing rules as _parseAndStoreCustomers) ---
+
+enum _CustomersCsvIsolateOutcome { earlyFailure, success }
+
+class _CustomersCsvIsolateResult {
+  const _CustomersCsvIsolateResult({
+    required this.outcome,
+    required this.totalRowsRead,
+    required this.customersLoaded,
+    required this.customersWithDiscount,
+    required this.skippedRows,
+    required this.duplicateKeyRows,
+    required this.customers,
+    required this.customersByKey,
+  });
+
+  final _CustomersCsvIsolateOutcome outcome;
+  final int totalRowsRead;
+  final int customersLoaded;
+  final int customersWithDiscount;
+  final int skippedRows;
+  final int duplicateKeyRows;
+  final List<Customer> customers;
+  final Map<String, Customer> customersByKey;
+}
+
+_CustomersCsvIsolateResult _customersCsvEarlyFailure({
+  required int totalRowsRead,
+  required int customersLoaded,
+  required int customersWithDiscount,
+  required int skippedRows,
+  required int duplicateKeyRows,
+}) {
+  return _CustomersCsvIsolateResult(
+    outcome: _CustomersCsvIsolateOutcome.earlyFailure,
+    totalRowsRead: totalRowsRead,
+    customersLoaded: customersLoaded,
+    customersWithDiscount: customersWithDiscount,
+    skippedRows: skippedRows,
+    duplicateKeyRows: duplicateKeyRows,
+    customers: const <Customer>[],
+    customersByKey: <String, Customer>{},
+  );
+}
+
+void _debugPrintCustomerLoadReportFromResult(_CustomersCsvIsolateResult r) {
+  debugPrint('----- CUSTOMER LOAD REPORT -----');
+  debugPrint('Total rows read: ${r.totalRowsRead}');
+  debugPrint('Customers loaded: ${r.customersLoaded}');
+  debugPrint('Customers with discount > 0: ${r.customersWithDiscount}');
+  debugPrint('Skipped rows: ${r.skippedRows}');
+  if (r.duplicateKeyRows > 0) {
+    debugPrint(
+      'Duplicate key rows skipped: ${r.duplicateKeyRows} '
+      '(first occurrence kept; key is CSV Id, or CompanyName if Id empty)',
+    );
+  } else {
+    debugPrint('Duplicate key rows skipped: 0');
+  }
+  if (r.customersLoaded == 0) {
+    debugPrint(
+      '[Customers] Zero customers in memory: check CSV content, headers, '
+      'required columns (Id and/or CompanyName), empty data rows, or '
+      'parse errors above.',
+    );
+  }
+}
+
+/// Top-level for [compute]; must not touch [State] or call [setState].
+_CustomersCsvIsolateResult _parseCustomersCatalogCsvIsolate(String rawCsv) {
+  final trimmed = rawCsv.trim();
+  if (trimmed.isEmpty) {
+    debugPrint('[Customers] CSV text is empty after trim.');
+    return _customersCsvEarlyFailure(
+      totalRowsRead: 0,
+      customersLoaded: 0,
+      customersWithDiscount: 0,
+      skippedRows: 0,
+      duplicateKeyRows: 0,
+    );
+  }
+
+  final firstLine = rawCsv.split('\n').first;
+  final useTab = firstLine.split('\t').length > firstLine.split(',').length;
+  List<List<dynamic>> rows;
+  try {
+    rows = CsvToListConverter(
+      shouldParseNumbers: false,
+      fieldDelimiter: useTab ? '\t' : ',',
+    ).convert(rawCsv);
+  } catch (e) {
+    debugPrint('[Customers] CSV parse failed: $e');
+    return _customersCsvEarlyFailure(
+      totalRowsRead: 0,
+      customersLoaded: 0,
+      customersWithDiscount: 0,
+      skippedRows: 0,
+      duplicateKeyRows: 0,
+    );
+  }
+
+  if (rows.isEmpty) {
+    debugPrint('[Customers] CSV parse produced no rows.');
+    return _customersCsvEarlyFailure(
+      totalRowsRead: 0,
+      customersLoaded: 0,
+      customersWithDiscount: 0,
+      skippedRows: 0,
+      duplicateKeyRows: 0,
+    );
+  }
+
+  final headerRow = rows[0].map((e) => e.toString().trim()).toList();
+  debugPrint('[Customers] Headers found: ${headerRow.join(', ')}');
+  int col(String name) {
+    final i = headerRow.indexOf(name);
+    return i >= 0 ? i : -1;
+  }
+
+  int colIgnoreCase(String name) {
+    final lower = name.toLowerCase();
+    for (int i = 0; i < headerRow.length; i++) {
+      if (headerRow[i].toLowerCase() == lower) return i;
+    }
+    return -1;
+  }
+
+  final idxId = col('Id');
+  final idxCompanyName = col('CompanyName');
+  final idxAddress = col('Address');
+  final idxAddress2 = col('Address2');
+  final idxCity = col('City');
+  final idxState = col('State');
+  final idxZip = col('Zip');
+  final idxPhone = col('Phone');
+  final idxFax = col('Fax');
+  final idxEmail = col('Email');
+  final idxContact = col('Contact');
+  final idxSalesRepName = col('SalesRepName');
+  final idxPriceList = col('PriceList');
+  final idxDiscount = colIgnoreCase('discount');
+  final idxPaymentTerms = col('PaymentTerms');
+  if (idxId < 0 && idxCompanyName < 0) {
+    debugPrint(
+      '[Customers] Missing required columns: need Id and/or CompanyName.',
+    );
+    debugPrint(
+      '[Customers] Column index: Id=$idxId, CompanyName=$idxCompanyName, '
+      'Discount=$idxDiscount',
+    );
+    return _customersCsvEarlyFailure(
+      totalRowsRead: rows.length > 1 ? rows.length - 1 : 0,
+      customersLoaded: 0,
+      customersWithDiscount: 0,
+      skippedRows: rows.length > 1 ? rows.length - 1 : 0,
+      duplicateKeyRows: 0,
+    );
+  }
+
+  final totalRowsRead = rows.length > 1 ? rows.length - 1 : 0;
+  final list = <Customer>[];
+  final byKey = <String, Customer>{};
+  var skippedRows = 0;
+  var duplicateKeyRows = 0;
+  var discountNonZero = 0;
+  var duplicateLogBudget = 5;
+
+  for (int i = 1; i < rows.length; i++) {
+    final row = rows[i];
+    try {
+      if (row.every((c) => c.toString().trim().isEmpty)) {
+        skippedRows++;
+        continue;
+      }
+
+      String get(int index) => index >= 0 && index < row.length
+          ? row[index].toString().trim()
+          : '';
+
+      final idPart = idxId >= 0 ? get(idxId) : '';
+      final company = get(idxCompanyName);
+      final lookupKey = idPart.isNotEmpty ? idPart : company;
+      if (lookupKey.isEmpty) {
+        skippedRows++;
+        continue;
+      }
+      if (byKey.containsKey(lookupKey)) {
+        duplicateKeyRows++;
+        skippedRows++;
+        if (duplicateLogBudget > 0) {
+          duplicateLogBudget--;
+          debugPrint(
+            '[Customers] Duplicate key "$lookupKey" at CSV row ${i + 1}: '
+            'skipped (first row at key wins).',
+          );
+        }
+        continue;
+      }
+
+      final idForModel = idPart.isNotEmpty ? idPart : company;
+      final discountCell = idxDiscount >= 0 ? get(idxDiscount) : '';
+      final pct = Customer.parseDiscountPercentFromRaw(discountCell);
+
+      final customer = Customer(
+        id: idForModel,
+        companyName: company,
+        address: get(idxAddress),
+        address2: get(idxAddress2),
+        city: get(idxCity),
+        state: get(idxState),
+        zip: get(idxZip),
+        phone: get(idxPhone),
+        fax: get(idxFax),
+        email: get(idxEmail),
+        contact: get(idxContact),
+        salesRepName: get(idxSalesRepName),
+        priceList: get(idxPriceList),
+        discount: discountCell,
+        discountPercent: pct,
+        paymentTerms: get(idxPaymentTerms),
+      );
+
+      byKey[lookupKey] = customer;
+      list.add(customer);
+      if (pct > 0) discountNonZero++;
+    } catch (e) {
+      skippedRows++;
+      debugPrint('[Customers] Skipping row ${i + 1}: $e');
+    }
+  }
+
+  if (duplicateKeyRows > 5) {
+    debugPrint(
+      '[Customers] ... ${duplicateKeyRows - 5} more duplicate key row(s) '
+      'not shown (see Duplicate key rows skipped count in report).',
+    );
+  }
+
+  return _CustomersCsvIsolateResult(
+    outcome: _CustomersCsvIsolateOutcome.success,
+    totalRowsRead: totalRowsRead,
+    customersLoaded: list.length,
+    customersWithDiscount: discountNonZero,
+    skippedRows: skippedRows,
+    duplicateKeyRows: duplicateKeyRows,
+    customers: list,
+    customersByKey: byKey,
+  );
+}
+
+String _availabilityLabelForWhse1(Product product) {
+  if (product.whse1InStock) return 'In Stock';
+  if (product.whse1OutOfStock) return 'Out of Stock';
+  if (product.whse1ComingSoon) return 'Coming Soon';
+  return '';
+}
+
+String _availabilityLabelForWhse2(Product product) {
+  if (product.whse2InStock) return 'In Stock';
+  if (product.whse2OutOfStock) return 'Out of Stock';
+  if (product.whse2ComingSoon) return 'Coming Soon';
+  return '';
 }
 
 /// Order line title: description with an optional blue NEW badge (catalog column).
@@ -1304,15 +2005,36 @@ class Customer {
     required this.paymentTerms,
   });
 
+  /// Converts a parsed numeric cell to a 0–100 "percent off" value.
+  /// Values strictly between 0 and 1 are treated as decimal fractions (0.10 → 10%).
+  /// Values ≥ 1 are whole percents (10 → 10%; 1 → 1%).
+  static double normalizeDiscountPercentNumber(double v) {
+    if (v.isNaN) return 0.0;
+    if (v < 0) return 0.0;
+    if (v > 0 && v < 1) return v * 100.0;
+    if (v > 100) return 100.0;
+    return v;
+  }
+
   /// Parses customers.csv `discount` cell: blank/invalid → 0; clamped to [0, 100].
+  /// Accepts optional `%` suffix; decimal fractions in (0, 1) map to percent (e.g. 0.10 → 10%).
   static double parseDiscountPercentFromRaw(String raw) {
-    final t = raw.trim();
+    var t = raw.trim();
+    if (t.isEmpty) return 0.0;
+    if (t.endsWith('%')) {
+      t = t.substring(0, t.length - 1).trim();
+    }
     if (t.isEmpty) return 0.0;
     final v = double.tryParse(t.replaceAll(',', ''));
     if (v == null || v.isNaN) return 0.0;
-    if (v < 0) return 0.0;
-    if (v > 100) return 100.0;
-    return v;
+    return normalizeDiscountPercentNumber(v);
+  }
+
+  static String _discountFieldFromJson(Map<String, dynamic> json) {
+    final v = json['discount'];
+    if (v == null) return '';
+    if (v is String) return v.trim();
+    return v.toString();
   }
 
   String get displayName => companyName.trim().isNotEmpty ? companyName : id;
@@ -1341,20 +2063,16 @@ class Customer {
 
   static Customer fromJson(Map<String, dynamic> json) {
     String s(String key) => (json[key] as String?)?.trim() ?? '';
-    final discStr = s('discount');
+    final discStr = _discountFieldFromJson(json);
     final embedded = json['discountPercent'];
     final double pct;
     if (embedded is num) {
       final d = embedded.toDouble();
-      if (d.isNaN) {
-        pct = parseDiscountPercentFromRaw(discStr);
-      } else if (d < 0) {
-        pct = 0.0;
-      } else if (d > 100) {
-        pct = 100.0;
-      } else {
-        pct = d;
-      }
+      pct = d.isNaN
+          ? parseDiscountPercentFromRaw(discStr)
+          : normalizeDiscountPercentNumber(d);
+    } else if (embedded is String) {
+      pct = parseDiscountPercentFromRaw(embedded);
     } else {
       pct = parseDiscountPercentFromRaw(discStr);
     }
@@ -2034,6 +2752,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Timer? _scanDebounceTimer;
   Timer? _refocusTimer;
+  /// Single follow-up pulse / keyboard hide for [_requestScannerFocus] (prevents stacked retries).
+  Timer? _scannerFocusRetryTimer;
+  Timer? _scannerFocusHideKeyboardTimer;
+  DateTime? _lastScannerFocusRequestTime;
+  bool _scannerFocusReclaimInFlight = false;
   Timer? _scanFeedbackTimer;
 
   /// Cancels stale tail-cutoff pauses so rapid error scans are not clipped by an older timer.
@@ -2070,9 +2793,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   String? _catalogSubCategoryOptionsCacheKey;
   List<String>? _catalogSubCategoryOptionsCache;
 
-  late final AudioPlayer _goodScanPlayer;
-  late final AudioPlayer _goodScanPlayer2;
-  late final AudioPlayer _errorScanPlayer;
+  /// Created in [_doInitAudio] so cold start does not allocate native players in [initState].
+  AudioPlayer? _goodScanPlayer;
+  AudioPlayer? _goodScanPlayer2;
+  AudioPlayer? _errorScanPlayer;
+
+  Future<void>? _audioInitFuture;
 
   /// After a successful [AudioPlayer.setSource], replay with seek+resume only (good-scan latency).
   bool _goodScanPlayer1SourceReady = false;
@@ -2113,6 +2839,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Debug Setup: full-catalog Excel export (does not touch quote workspace state).
   bool _exportingFullCatalogExcel = false;
+
+  /// Debug Setup: master update sheet exports (does not touch quote workspace state).
+  bool _exportingMasterUpdateSheets = false;
+
+  /// Setup: isolated master products workbook build (file-only; no quote workspace state).
+  bool _buildingUpdatedMasterSheet = false;
 
   /// After a CSV/sheet customer reload, used to re-select a locally added customer.
   Customer? _pendingRestoreCustomerAfterLocalMerge;
@@ -2171,6 +2903,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   static const int _scanInputDebounceMs = 28;
   static const int _scannerRefocusDelayMs = 35;
   static const int _tabReturnRefocusDelayMs = 120;
+  /// Collapses burst calls (same-frame / input churn) without blocking tab refocus (~16ms vs ~35ms).
+  static const int _scannerFocusRequestCooldownMs = 12;
+  static const int _scannerFocusSingleRetryDelayMs = 80;
+  /// Yield after the first frame before cold-start I/O and isolate work.
+  static const Duration _startupDeferAfterFirstFrame = Duration(milliseconds: 150);
+  /// [rootBundle.loadString] can synchronously decode large assets; defer slightly so frames stay light.
+  static const Duration _startupBundleLoadDelay = Duration(milliseconds: 120);
+
   String? _lastProcessedScanUpc;
   DateTime? _lastProcessedScanTime;
 
@@ -2212,21 +2952,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   final Map<int, int> _scanStartOrderListBuildCount = {};
   int _currentScanSampleId = 0;
 
+  /// When false, [_scheduleScannerRefocus] no-ops so focus timers do not run during heavy startup.
+  bool _scannerStartupRefocusEnabled = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     FocusManager.instance.addListener(_handleGlobalFocusChange);
 
-    _goodScanPlayer = AudioPlayer();
-    _goodScanPlayer2 = AudioPlayer();
-    _errorScanPlayer = AudioPlayer();
-
-    unawaited(_loadProductsOnStartup());
-    _loadCustomersFromAssets();
-
+    // Startup order (after first frame + short yield): customers → product
+    // refresh → quote maintenance → scanner focus (after UI-heavy work).
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      _requestScannerFocus();
+      await Future<void>.delayed(_startupDeferAfterFirstFrame);
+      if (!mounted) return;
+      await _loadCustomersFromAssets();
+      if (!mounted) return;
+      unawaited(_loadProductsOnStartup());
       try {
         final beforeId = _currentQuoteId;
         await _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers();
@@ -2241,16 +2983,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         debugPrint('[Startup] prune-all failed: $e\n$st');
       }
       _discardWorkingOrderIfNoCustomerSelected();
+      if (!mounted) return;
+      _scannerStartupRefocusEnabled = true;
+      _requestScannerFocus();
+      // Keep startup focus recovery reliable, but avoid pulses during prune / first paints.
+      for (final ms in [90, 320]) {
+        Future<void>.delayed(Duration(milliseconds: ms), () {
+          if (!mounted || _editDialogOpen) return;
+          if (!_scannerFocusNode.hasFocus) _requestScannerFocus();
+        });
+      }
     });
-
-    // Keep startup focus recovery reliable, but avoid a long chain of delayed
-    // pulses. `_requestScannerFocus()` already performs internal retry pulses.
-    for (final ms in [90, 320]) {
-      Future.delayed(Duration(milliseconds: ms), () {
-        if (!mounted || _editDialogOpen) return;
-        if (!_scannerFocusNode.hasFocus) _requestScannerFocus();
-      });
-    }
 
     _scannerFocusNode.addListener(() {
       if (!_scannerFocusNode.hasFocus &&
@@ -2434,8 +3177,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  Future<void> _initAudio() async {
+  Future<void> _initAudio() {
+    _audioInitFuture ??= _doInitAudio();
+    return _audioInitFuture!;
+  }
+
+  Future<void> _doInitAudio() async {
     try {
+      _goodScanPlayer ??= AudioPlayer();
+      _goodScanPlayer2 ??= AudioPlayer();
+      _errorScanPlayer ??= AudioPlayer();
+      final goodScan = _goodScanPlayer!;
+      final goodScan2 = _goodScanPlayer2!;
+      final errorScan = _errorScanPlayer!;
+
       final ctx = AudioContext(
         android: AudioContextAndroid(
           audioFocus: AndroidAudioFocus.gainTransientMayDuck,
@@ -2448,25 +3203,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       await AudioPlayer.global.setAudioContext(ctx);
 
       final scanAudioCache = AudioCache(prefix: '');
-      _goodScanPlayer.audioCache = scanAudioCache;
-      _goodScanPlayer2.audioCache = scanAudioCache;
-      _errorScanPlayer.audioCache = scanAudioCache;
+      goodScan.audioCache = scanAudioCache;
+      goodScan2.audioCache = scanAudioCache;
+      errorScan.audioCache = scanAudioCache;
 
-      await _goodScanPlayer.setReleaseMode(ReleaseMode.stop);
-      await _goodScanPlayer2.setReleaseMode(ReleaseMode.stop);
-      await _errorScanPlayer.setReleaseMode(ReleaseMode.stop);
+      await goodScan.setReleaseMode(ReleaseMode.stop);
+      await goodScan2.setReleaseMode(ReleaseMode.stop);
+      await errorScan.setReleaseMode(ReleaseMode.stop);
 
       // Short UI sounds: lowLatency is faster on many devices, but some Android OEM
       // builds fail silently with SoundPool; mediaPlayer is slower but reliable.
       final goodMode = Platform.isAndroid
           ? PlayerMode.mediaPlayer
           : PlayerMode.lowLatency;
-      await _goodScanPlayer.setPlayerMode(goodMode);
-      await _goodScanPlayer2.setPlayerMode(goodMode);
+      await goodScan.setPlayerMode(goodMode);
+      await goodScan2.setPlayerMode(goodMode);
 
       // Slightly reduce good scan volume to avoid audible clipping/distortion.
-      await _goodScanPlayer.setVolume(0.75);
-      await _goodScanPlayer2.setVolume(0.75);
+      await goodScan.setVolume(0.75);
+      await goodScan2.setVolume(0.75);
 
       // Do not pre-load or prepare players in init: on Android, early prepare + stop/pause
       // can break first/double beep. Sources are set on first play and then reused via seek+resume.
@@ -2495,6 +3250,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     FocusManager.instance.removeListener(_handleGlobalFocusChange);
     _scanDebounceTimer?.cancel();
     _refocusTimer?.cancel();
+    _scannerFocusRetryTimer?.cancel();
+    _scannerFocusHideKeyboardTimer?.cancel();
     _scanFeedbackTimer?.cancel();
     _errorBuzzTailPauseTimer?.cancel();
     _quoteNameBarcodeDebounce?.cancel();
@@ -2502,9 +3259,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _manualEntryFocusTraceTimeout?.cancel();
     _quoteNameController.removeListener(_onQuoteNameChanged);
 
-    _goodScanPlayer.dispose();
-    _goodScanPlayer2.dispose();
-    _errorScanPlayer.dispose();
+    _goodScanPlayer?.dispose();
+    _goodScanPlayer2?.dispose();
+    _errorScanPlayer?.dispose();
 
     _scannerFocusNode.dispose();
     _scannerController.dispose();
@@ -2582,6 +3339,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   void _scheduleScannerRefocus() {
+    if (!_scannerStartupRefocusEnabled) return;
     final startedAt = DateTime.now();
     _refocusTimer?.cancel();
     _refocusTimer = Timer(
@@ -2678,17 +3436,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   void _requestScannerFocus() {
     if (_suspendScannerFocusRecovery) return;
-    debugPrint(
-      '[DependentsDiag] _requestScannerFocus: enter mounted=$mounted '
-      'editDialogOpen=$_editDialogOpen',
-    );
+
     final primary = FocusManager.instance.primaryFocus;
     final scannerAlreadyFocused = _scannerFocusNode.hasFocus;
     if (scannerAlreadyFocused && !_editDialogOpen && _scanTabActive) {
       _perfLog('focus restore skipped (scanner already focused)');
-      debugPrint(
-        '[DependentsDiag] _requestScannerFocus: early return (scanner already focused)',
-      );
+      debugPrint('[ScannerFocus] reclaim skipped (already focused)');
       return;
     }
 
@@ -2703,92 +3456,82 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           'primaryFocusMatchesScanner=${primary == _scannerFocusNode}',
         );
       }
+      debugPrint('[ScannerFocus] reclaim skipped (should not reclaim)');
+      return;
+    }
+
+    if (_scannerFocusReclaimInFlight) {
+      debugPrint('[ScannerFocus] reclaim skipped (in-flight)');
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastScannerFocusRequestTime != null &&
+        now.difference(_lastScannerFocusRequestTime!).inMilliseconds <
+            _scannerFocusRequestCooldownMs) {
       debugPrint(
-        '[DependentsDiag] _requestScannerFocus: early return (!shouldReclaim)',
+        '[ScannerFocus] reclaim skipped (cooldown '
+        '${now.difference(_lastScannerFocusRequestTime!).inMilliseconds}ms)',
       );
       return;
     }
 
-    if (_manualEntryFocusTraceActive) {
-      debugPrint(
-        '[ScannerFocus][Request] calling requestFocus(scanner). '
-        'scannerHasFocus=${_scannerFocusNode.hasFocus} primaryFocusMatchesScanner=${primary == _scannerFocusNode}',
-      );
-    }
+    _scannerFocusReclaimInFlight = true;
+    try {
+      _lastScannerFocusRequestTime = now;
+      debugPrint('[ScannerFocus] reclaim requested');
 
-    debugPrint(
-      '[DependentsDiag] _requestScannerFocus: before FocusScope.of(context).requestFocus(scanner)',
-    );
-    FocusScope.of(context).requestFocus(_scannerFocusNode);
-    debugPrint(
-      '[DependentsDiag] _requestScannerFocus: after FocusScope.of(context).requestFocus(scanner)',
-    );
-
-    if (_suspendScannerFocusRecovery) return;
-
-    // Only schedule retry pulses when we are actively recovering lost focus.
-    // This avoids repeated delayed focus work during normal scan flow.
-    if (!scannerAlreadyFocused) {
-      const delays = [30, 120];
-      for (final ms in delays) {
+      if (_manualEntryFocusTraceActive) {
         debugPrint(
-          '[DependentsDiag] _requestScannerFocus: before Future.delayed(${ms}ms) retry pulse',
+          '[ScannerFocus][Request] calling requestFocus(scanner). '
+          'scannerHasFocus=${_scannerFocusNode.hasFocus} primaryFocusMatchesScanner=${primary == _scannerFocusNode}',
         );
-        Future.delayed(Duration(milliseconds: ms), () {
+      }
+
+      FocusScope.of(context).requestFocus(_scannerFocusNode);
+
+      if (_suspendScannerFocusRecovery) return;
+
+      _scannerFocusRetryTimer?.cancel();
+      _scannerFocusRetryTimer = Timer(
+        const Duration(milliseconds: _scannerFocusSingleRetryDelayMs),
+        () {
+          _scannerFocusRetryTimer = null;
           if (_suspendScannerFocusRecovery) return;
-          debugPrint(
-            '[DependentsDiag] _requestScannerFocus: Future.delayed(${ms}ms) retry fired '
-            'mounted=$mounted editDialogOpen=$_editDialogOpen',
-          );
           if (!_shouldReclaimScannerFocus()) return;
           if (!_scannerFocusNode.hasFocus) {
-            debugPrint(
-              '[DependentsDiag] _requestScannerFocus: before FocusScope retry ${ms}ms requestFocus(scanner)',
-            );
+            debugPrint('[ScannerFocus] reclaim retry (still unfocused)');
             FocusScope.of(context).requestFocus(_scannerFocusNode);
-            debugPrint(
-              '[DependentsDiag] _requestScannerFocus: after FocusScope retry ${ms}ms requestFocus(scanner)',
-            );
           }
-        });
-        debugPrint(
-          '[DependentsDiag] _requestScannerFocus: after Future.delayed(${ms}ms) scheduled',
-        );
-      }
-    }
-
-    if (_suspendScannerFocusRecovery) return;
-
-    // Hide the keyboard after focusing the hidden scanner input.
-    // Delay slightly to avoid racing with the user's attempt to focus another
-    // text field (which can leave the keyboard suppressed).
-    debugPrint(
-      '[DependentsDiag] _requestScannerFocus: before Future.delayed(60ms) TextInput.hide',
-    );
-    Future.delayed(const Duration(milliseconds: 60), () {
-      if (_suspendScannerFocusRecovery) return;
-      debugPrint(
-        '[DependentsDiag] _requestScannerFocus: Future.delayed(60ms) hide keyboard fired '
-        'mounted=$mounted editDialogOpen=$_editDialogOpen',
+        },
       );
-      if (!mounted || _editDialogOpen) return;
-      if (!_scannerFocusNode.hasFocus) return;
 
-      final primary = FocusManager.instance.primaryFocus;
-      if (primary != _scannerFocusNode) return;
+      if (_suspendScannerFocusRecovery) return;
 
-      // If the app already moved focus into a normal entry field, don't hide
-      // the keyboard.
-      if (_quickEntryFocusNode.hasFocus || _quoteNameFocusNode.hasFocus) {
-        return;
-      }
+      // Hide the keyboard after focusing the hidden scanner input.
+      // Delay slightly to avoid racing with the user's attempt to focus another
+      // text field (which can leave the keyboard suppressed).
+      _scannerFocusHideKeyboardTimer?.cancel();
+      _scannerFocusHideKeyboardTimer = Timer(const Duration(milliseconds: 60), () {
+        _scannerFocusHideKeyboardTimer = null;
+        if (_suspendScannerFocusRecovery) return;
+        if (!mounted || _editDialogOpen) return;
+        if (!_scannerFocusNode.hasFocus) return;
 
-      SystemChannels.textInput.invokeMethod('TextInput.hide');
-    });
-    debugPrint(
-      '[DependentsDiag] _requestScannerFocus: after Future.delayed(60ms) scheduled',
-    );
-    debugPrint('[DependentsDiag] _requestScannerFocus: exit');
+        final hidePrimary = FocusManager.instance.primaryFocus;
+        if (hidePrimary != _scannerFocusNode) return;
+
+        // If the app already moved focus into a normal entry field, don't hide
+        // the keyboard.
+        if (_quickEntryFocusNode.hasFocus || _quoteNameFocusNode.hasFocus) {
+          return;
+        }
+
+        SystemChannels.textInput.invokeMethod('TextInput.hide');
+      });
+    } finally {
+      _scannerFocusReclaimInFlight = false;
+    }
   }
 
   /// Scanner-only focus recovery used after scan processing paths where
@@ -2852,8 +3595,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     // for faster repeated error feedback; see [_playErrorBuzz].
     _errorBuzzTailPauseTimer?.cancel();
     _errorBuzzTailPauseTimer = null;
+    final errorPlayer = _errorScanPlayer;
+    if (errorPlayer == null) return;
     try {
-      await _errorScanPlayer.pause();
+      await errorPlayer.pause();
     } catch (_) {}
   }
 
@@ -2940,6 +3685,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<void> _playGoodScanBeep({required bool isSingle}) async {
     try {
+      await _initAudio();
+      if (!mounted) return;
+
       if (kDebugMode) {
         debugPrint('Playing ${isSingle ? 'single' : 'double'} beep');
         if (!isSingle) {
@@ -2962,7 +3710,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           );
           return;
         }
-        final player = isSingle ? _goodScanPlayer : _goodScanPlayer2;
+        final player = isSingle ? _goodScanPlayer! : _goodScanPlayer2!;
         if (isSingle) {
           if (!_goodScanPlayer1SourceReady) {
             await player.setSourceBytes(bytes, mimeType: 'audio/mpeg');
@@ -2989,18 +3737,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // Use separate players so we never swap source on the same player (avoids second-play silent on Android).
       if (isSingle) {
         if (!_goodScanPlayer1SourceReady) {
-          await _goodScanPlayer.setSource(_goodScanAssetSource);
+          await _goodScanPlayer!.setSource(_goodScanAssetSource);
           if (!mounted) return;
           _goodScanPlayer1SourceReady = true;
         }
-        await _goodScanPlayer.seek(Duration.zero);
-        await _goodScanPlayer.resume();
+        await _goodScanPlayer!.seek(Duration.zero);
+        await _goodScanPlayer!.resume();
       } else {
         if (!_goodScanPlayer2SourceReady) {
           if (kDebugMode) {
             debugPrint('[Audio] player2 setSource($_goodScan2Asset)');
           }
-          await _goodScanPlayer2.setSource(_goodScan2AssetSource);
+          await _goodScanPlayer2!.setSource(_goodScan2AssetSource);
           if (!mounted) return;
           // Brief yield so the second player finishes preparing (first load only;
           // lowLatency mode usually needs less time than legacy media player).
@@ -3011,8 +3759,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             debugPrint('[Audio] player2 source prepared');
           }
         }
-        await _goodScanPlayer2.seek(Duration.zero);
-        await _goodScanPlayer2.resume();
+        await _goodScanPlayer2!.seek(Duration.zero);
+        await _goodScanPlayer2!.resume();
       }
       if (kDebugMode) {
         debugPrint('Play attempt');
@@ -3033,37 +3781,40 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Future<void> _playErrorBuzz() async {
     bool soundPlayed = false;
     try {
+      await _initAudio();
+      if (!mounted) return;
+      final errorScan = _errorScanPlayer!;
       // Avoid stop() before play: on some Android devices it puts MediaPlayer in error state (-38)
       if (!_errorScanPlayerVolumeRateSet) {
-        await _errorScanPlayer.setVolume(1.0);
-        await _errorScanPlayer.setPlaybackRate(1.0);
+        await errorScan.setVolume(1.0);
+        await errorScan.setPlaybackRate(1.0);
         _errorScanPlayerVolumeRateSet = true;
       }
       if (Platform.isWindows) {
         final bytes = _windowsErrorScanBytes;
         if (bytes != null) {
           if (!_errorScanPlayerSourceReady) {
-            await _errorScanPlayer.setSourceBytes(
+            await errorScan.setSourceBytes(
               bytes,
               mimeType: 'audio/mpeg',
             );
             if (!mounted) return;
             _errorScanPlayerSourceReady = true;
           } else {
-            await _errorScanPlayer.seek(Duration.zero);
+            await errorScan.seek(Duration.zero);
           }
-          await _errorScanPlayer.resume();
+          await errorScan.resume();
           soundPlayed = true;
         }
       } else {
         if (!_errorScanPlayerSourceReady) {
-          await _errorScanPlayer.setSource(_errorScanAssetSource);
+          await errorScan.setSource(_errorScanAssetSource);
           if (!mounted) return;
           _errorScanPlayerSourceReady = true;
         } else {
-          await _errorScanPlayer.seek(Duration.zero);
+          await errorScan.seek(Duration.zero);
         }
-        await _errorScanPlayer.resume();
+        await errorScan.resume();
         soundPlayed = true;
       }
       if (soundPlayed) {
@@ -3076,7 +3827,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             _errorBuzzTailPauseTimer = null;
             if (!mounted) return;
             try {
-              await _errorScanPlayer.pause();
+              await errorScan.pause();
             } catch (_) {}
           },
         );
@@ -3175,11 +3926,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       'productType="$normType" quoteId=${_currentQuoteId ?? 'null'} '
       'customer="${customer.displayName}"',
     );
-  }
-
-  /// products.csv `Discount` column: only YES (trimmed, case-insensitive) is eligible.
-  bool _parseDiscountEligibility(String value) {
-    return value.trim().toUpperCase() == 'YES';
   }
 
   bool _parseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
@@ -3911,6 +4657,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _quoteBucketsByBucketKey.clear();
     _configuredRawQuoteBucketKeys.clear();
     try {
+      await Future<void>.delayed(_startupBundleLoadDelay);
+      if (!mounted) return;
       final raw = await rootBundle.loadString(
         'assets/data/product_type_buckets.json',
       );
@@ -5510,274 +6258,38 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  double _parsePrice(String value) {
-    final cleaned = value.replaceAll('\$', '').replaceAll(',', '').trim();
-    return double.tryParse(cleaned) ?? 0.0;
-  }
-
-  int _parseInt(String value) {
-    return int.tryParse(value.trim()) ?? 0;
-  }
-
-  /// Normalizes CSV header labels for case-insensitive, spacing/hyphen-tolerant matching.
-  String _normalizedProductHeaderKey(String s) {
-    return s.trim().toLowerCase().replaceAll(RegExp(r'[\s\-]+'), '');
-  }
-
-  /// Builds column index map: first occurrence wins for duplicate header names.
-  Map<String, int> _productHeaderIndexMap(List<String> header) {
-    final Map<String, int> map = {};
-    for (int i = 0; i < header.length; i++) {
-      final nk = _normalizedProductHeaderKey(header[i]);
-      if (nk.isEmpty) continue;
-      map.putIfAbsent(nk, () => i);
-    }
-    return map;
-  }
-
-  int _requireProductColumnIndex(
-    Map<String, int> byNorm,
-    String logicalName,
-    List<String> normalizedKeys,
-    List<String> headerForError,
-  ) {
-    for (final nk in normalizedKeys) {
-      final i = byNorm[nk];
-      if (i != null) return i;
-    }
-    throw FormatException(
-      'Products CSV missing required column "$logicalName" '
-      '(tried normalized keys: $normalizedKeys). '
-      'Headers: ${headerForError.join(', ')}',
+  Future<void> _parseAndStoreProducts(
+    String rawCsv, {
+    required String sourceLabel,
+  }) async {
+    final result = await compute(
+      _parseProductsCatalogCsvIsolate,
+      _ProductsCsvIsolateJob(rawCsv: rawCsv, sourceLabel: sourceLabel),
     );
-  }
-
-  int? _optionalProductColumnIndex(
-    Map<String, int> byNorm,
-    List<String> normalizedKeys,
-  ) {
-    for (final nk in normalizedKeys) {
-      final i = byNorm[nk];
-      if (i != null) return i;
-    }
-    return null;
-  }
-
-  String _productCell(List<dynamic> row, int col) {
-    if (col < 0 || col >= row.length) return '';
-    return row[col].toString();
-  }
-
-  void _parseAndStoreProducts(String rawCsv, {required String sourceLabel}) {
-    void setProductsDebugLine(String line) {
-      if (mounted) {
-        setState(() => _productsLoadDebugLine = line);
-      } else {
-        _productsLoadDebugLine = line;
-      }
-    }
-
-    final rows = const CsvToListConverter(
-      shouldParseNumbers: false,
-    ).convert(rawCsv);
-
-    if (rows.isEmpty) {
-      _productsByUpc.clear();
-      _productsByItemNumber.clear();
-      _catalogCount = 0;
-      _catalogSource = '$sourceLabel (empty)';
-      setProductsDebugLine('Products Loaded: 0 (empty file)');
-      return;
-    }
-
-    final header = rows.first
-        .map((e) => e.toString().trim())
-        .toList(growable: false);
-    final byNorm = _productHeaderIndexMap(header);
-
-    final idxItemNumber = _requireProductColumnIndex(
-      byNorm,
-      'Item Number',
-      const ['itemnumber'],
-      header,
-    );
-    final idxDescription = _requireProductColumnIndex(
-      byNorm,
-      'Description',
-      const ['description'],
-      header,
-    );
-    final idxUpc = _requireProductColumnIndex(byNorm, 'UPC', const [
-      'upc',
-    ], header);
-    final idxPrice = _requireProductColumnIndex(byNorm, 'Price', const [
-      'price',
-    ], header);
-    final idxDiscount = _requireProductColumnIndex(byNorm, 'DISCOUNT', const [
-      'discount',
-    ], header);
-    final idxNet = _optionalProductColumnIndex(byNorm, const ['net']);
-    final idxPs = _optionalProductColumnIndex(byNorm, const ['ps']);
-    final idxListPrice = _optionalProductColumnIndex(byNorm, const [
-      'listprice',
-    ]);
-    final idxNewRelease = _optionalProductColumnIndex(byNorm, const [
-      'newrelease',
-    ]);
-    final idxProductType = _requireProductColumnIndex(
-      byNorm,
-      'Product Type',
-      const ['producttype'],
-      header,
-    );
-    final idxCategory = _requireProductColumnIndex(byNorm, 'Category', const [
-      'category',
-    ], header);
-    final idxSubCategory = _requireProductColumnIndex(
-      byNorm,
-      'Sub-Category',
-      const ['subcategory'],
-      header,
-    );
-    final idxMinOrderQty = _requireProductColumnIndex(
-      byNorm,
-      'MinOrder Qty',
-      const ['minorderqty'],
-      header,
-    );
-    final idxCaseQty = _requireProductColumnIndex(byNorm, 'Case Qty', const [
-      'caseqty',
-    ], header);
-
-    final maxColIndex = [
-      idxItemNumber,
-      idxDescription,
-      idxUpc,
-      idxPrice,
-      idxDiscount,
-      idxProductType,
-      idxCategory,
-      idxSubCategory,
-      idxMinOrderQty,
-      idxCaseQty,
-      if (idxNet != null) idxNet,
-      if (idxPs != null) idxPs,
-      if (idxListPrice != null) idxListPrice,
-      if (idxNewRelease != null) idxNewRelease,
-    ].reduce((a, b) => a > b ? a : b);
-
-    final Map<String, Product> newProductsByUpc = {};
-    final Map<String, Product> newProductsByItemNumber = {};
-
-    final int totalDataRows = rows.length - 1;
-    int processedRows = 0;
-    int skippedMissingKeyRows = 0;
-    int skippedParseErrorRows = 0;
-    int duplicateUpcCount = 0;
-    int duplicateItemNumberCount = 0;
-    int discountEligibleCount = 0;
-    String? firstErrorMessage;
-
-    for (int i = 1; i < rows.length; i++) {
-      final row = rows[i];
-      if (row.isEmpty || row.every((e) => e.toString().trim().isEmpty)) {
-        skippedParseErrorRows++;
-        continue;
-      }
-
-      try {
-        final itemNumber = normalizeItemNumber(
-          _productCell(row, idxItemNumber),
-        );
-        final description = _productCell(row, idxDescription).trim();
-        final upc = _productCell(row, idxUpc).trim();
-        final upcLookup = _normalizeUpcLookupKey(upc);
-        final price = _parsePrice(_productCell(row, idxPrice));
-        final listPrice = idxListPrice == null
-            ? 0.0
-            : _parsePrice(_productCell(row, idxListPrice));
-        final discountRaw = _productCell(row, idxDiscount).trim();
-        final discountEligible = _parseDiscountEligibility(discountRaw);
-        final netRaw = idxNet == null ? '' : _productCell(row, idxNet).trim();
-        final isNet = _parseYesFlag(netRaw);
-        final psRaw = idxPs == null ? '' : _productCell(row, idxPs).trim();
-        final isPs = _parseYesFlag(psRaw);
-        final isNewRelease = idxNewRelease == null
-            ? false
-            : _parseYesFlag(_productCell(row, idxNewRelease).trim());
-        if (discountEligible) discountEligibleCount++;
-        final productType = _productCell(row, idxProductType).trim();
-        final category = _productCell(row, idxCategory).trim();
-        final subCategory = _productCell(row, idxSubCategory).trim();
-        final minOrderQty = _parseInt(_productCell(row, idxMinOrderQty));
-        final caseQty = _parseInt(_productCell(row, idxCaseQty));
-
-        if (itemNumber.isEmpty || upcLookup.isEmpty) {
-          skippedMissingKeyRows++;
-          continue;
-        }
-
-        final product = Product(
-          itemNumber: itemNumber,
-          description: description,
-          upc: upc,
-          price: price,
-          listPrice: listPrice,
-          productType: productType,
-          discountRaw: discountRaw,
-          discountEligible: discountEligible,
-          netRaw: netRaw,
-          isNet: isNet,
-          psRaw: psRaw,
-          isPs: isPs,
-          isNewRelease: isNewRelease,
-          category: category,
-          subCategory: subCategory,
-          minOrderQty: minOrderQty == 0 ? 1 : minOrderQty,
-          caseQty: caseQty,
-        );
-
-        if (newProductsByUpc.containsKey(upcLookup)) {
-          duplicateUpcCount++;
-        }
-        if (newProductsByItemNumber.containsKey(itemNumber)) {
-          duplicateItemNumberCount++;
-        }
-
-        newProductsByUpc[upcLookup] = product;
-        newProductsByItemNumber[itemNumber] = product;
-        processedRows++;
-      } catch (e) {
-        skippedParseErrorRows++;
-        if (firstErrorMessage == null) {
-          firstErrorMessage = 'Row ${i + 1} parse error: $e';
-        }
-      }
-    }
 
     _productsByUpc
       ..clear()
-      ..addAll(newProductsByUpc);
+      ..addAll(result.productsByUpc);
 
     _productsByItemNumber
       ..clear()
-      ..addAll(newProductsByItemNumber);
+      ..addAll(result.productsByItemNumber);
 
-    _catalogCount = _productsByUpc.length;
-    _catalogSource = sourceLabel;
+    _catalogCount = result.catalogCount;
+    _catalogSource = result.catalogSource;
 
-    final int skippedRows = skippedMissingKeyRows + skippedParseErrorRows;
+    _productsLoadDebugLine = result.productsLoadDebugLine;
 
-    setProductsDebugLine('Products Loaded: $_catalogCount');
-
-    _debugLogMissingProductTypeMappings();
+    if (!result.isEmptyFile) {
+      _debugLogMissingProductTypeMappings();
+    }
   }
 
   Future<void> _loadProductsOnStartup() async {
-    await _initAudio();
     await _loadQuoteBucketConfig();
     final ok = await _loadProductsFromWeb();
     if (ok) {
+      await _initAudio();
       if (mounted) {
         setState(() {
           _loadingProducts = false;
@@ -5792,19 +6304,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Future<void> _loadProductsFromAssets() async {
-    debugPrint('[Products] _loadProductsFromAssets called');
+    if (kDebugMode) debugPrint('[Products] _loadProductsFromAssets called');
     try {
-      await _initAudio();
-      await _loadQuoteBucketConfig();
-      debugPrint('[Products] Attempting to load assets/data/products.csv');
+      if (kDebugMode) {
+        debugPrint('[Products] Attempting to load assets/data/products.csv');
+      }
+      await Future<void>.delayed(_startupBundleLoadDelay);
+      if (!mounted) return;
       final rawCsv = await rootBundle.loadString('assets/data/products.csv');
-      debugPrint(
-        '[Products] products.csv loaded successfully '
-        '(${rawCsv.length} characters)',
-      );
-      debugPrint('[Products] parse started');
-      _parseAndStoreProducts(rawCsv, sourceLabel: 'Built-in catalog');
-      debugPrint('[Products] parse completed');
+      if (kDebugMode) {
+        debugPrint(
+          '[Products] products.csv loaded successfully '
+          '(${rawCsv.length} characters)',
+        );
+        debugPrint('[Products] parse started');
+      }
+      await _parseAndStoreProducts(rawCsv, sourceLabel: 'Built-in catalog');
+      if (kDebugMode) debugPrint('[Products] parse completed');
+
+      await _initAudio();
 
       setState(() {
         _loadingProducts = false;
@@ -5816,6 +6334,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } catch (e, st) {
       debugPrint('[Products] Error loading built-in products.csv: $e');
       debugPrint('[Products] Stack: $st');
+      await _initAudio();
       if (mounted) {
         setState(() {
           _loadingProducts = false;
@@ -5839,12 +6358,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     debugPrint('[Customers] _loadCustomersFromAssets called');
     try {
       debugPrint('[Customers] Attempting to load assets/data/customers.csv');
+      await Future<void>.delayed(_startupBundleLoadDelay);
+      if (!mounted) return;
       final rawCsv = await rootBundle.loadString('assets/data/customers.csv');
       debugPrint(
         '[Customers] customers.csv loaded successfully '
         '(${rawCsv.length} characters)',
       );
-      _parseAndStoreCustomers(rawCsv);
+      await _parseAndStoreCustomers(rawCsv);
       debugPrint('[Customers] parse completed');
     } catch (e, st) {
       debugPrint('[Customers] Failed to load assets/data/customers.csv: $e');
@@ -5904,14 +6425,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return;
       }
 
-      debugPrint('[Products] parse started (phone CSV)');
-      _parseAndStoreProducts(rawCsv, sourceLabel: file.name);
-      debugPrint('[Products] parse completed (phone CSV)');
-      debugPrint(
-        '[Products] Loaded CSV from phone "${file.name}" '
-        '(${rawCsv.length} characters). Catalog now has $_catalogCount '
-        'products from source "$_catalogSource".',
-      );
+      if (kDebugMode) debugPrint('[Products] parse started (phone CSV)');
+      await _parseAndStoreProducts(rawCsv, sourceLabel: file.name);
+      if (kDebugMode) {
+        debugPrint('[Products] parse completed (phone CSV)');
+        debugPrint(
+          '[Products] Loaded CSV from phone "${file.name}" '
+          '(${rawCsv.length} characters). Catalog now has $_catalogCount '
+          'products from source "$_catalogSource".',
+        );
+      }
 
       setState(() {
         _readyToScan = true;
@@ -5944,13 +6467,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
     }
     try {
-      debugPrint(
-        '[Products][Verify] Load from web — full URL: $_productsCsvUrl',
-      );
-      debugPrint(
-        '[Products][Verify] gid query param: '
-        '${Uri.parse(_productsCsvUrl).queryParameters['gid'] ?? '(missing)'}',
-      );
+      if (kDebugMode) {
+        debugPrint(
+          '[Products][Verify] Load from web — full URL: $_productsCsvUrl',
+        );
+        debugPrint(
+          '[Products][Verify] gid query param: '
+          '${Uri.parse(_productsCsvUrl).queryParameters['gid'] ?? '(missing)'}',
+        );
+      }
       final response = await http.get(Uri.parse(_productsCsvUrl));
 
       if (response.statusCode != 200) {
@@ -5966,12 +6491,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       final csvString = response.body;
-      debugPrint(
-        '[Products][Verify] HTTP body length (chars): ${csvString.length}',
-      );
+      if (kDebugMode) {
+        debugPrint(
+          '[Products][Verify] HTTP body length (chars): ${csvString.length}',
+        );
+      }
       int productCount = 0;
 
-      _parseAndStoreProducts(csvString, sourceLabel: 'Google Sheets CSV');
+      await _parseAndStoreProducts(csvString, sourceLabel: 'Google Sheets CSV');
       productCount = _catalogCount;
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6027,7 +6554,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       final csvString = response.body;
-      _parseAndStoreCustomers(csvString);
+      await _parseAndStoreCustomers(csvString);
       final count = _customers.length;
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6333,248 +6860,38 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   /// Customers.csv headers: Id, CompanyName, Address, Address2, City, State, Zip, Phone, Fax, Email, Contact, SalesRepName, PriceList, Discount, PaymentTerms.
-  void _parseAndStoreCustomers(String rawCsv) {
+  Future<void> _parseAndStoreCustomers(String rawCsv) async {
     debugPrint('[Customers] parse started');
-
-    void setCustomersDebugLine(String line) {
-      if (mounted) {
-        setState(() => _customersLoadDebugLine = line);
-      } else {
-        _customersLoadDebugLine = line;
-      }
-    }
-
-    void printCustomerLoadReport({
-      required int totalRowsRead,
-      required int customersLoaded,
-      required int customersWithDiscount,
-      required int skippedRows,
-      required int duplicateKeyRows,
-    }) {
-      debugPrint('----- CUSTOMER LOAD REPORT -----');
-      debugPrint('Total rows read: $totalRowsRead');
-      debugPrint('Customers loaded: $customersLoaded');
-      debugPrint('Customers with discount > 0: $customersWithDiscount');
-      debugPrint('Skipped rows: $skippedRows');
-      if (duplicateKeyRows > 0) {
-        debugPrint(
-          'Duplicate key rows skipped: $duplicateKeyRows '
-          '(first occurrence kept; key is CSV Id, or CompanyName if Id empty)',
-        );
-      } else {
-        debugPrint('Duplicate key rows skipped: 0');
-      }
-      if (customersLoaded == 0) {
-        debugPrint(
-          '[Customers] Zero customers in memory: check CSV content, headers, '
-          'required columns (Id and/or CompanyName), empty data rows, or '
-          'parse errors above.',
-        );
-      }
-      setCustomersDebugLine('Customers Loaded: $customersLoaded');
-    }
+    final result = await compute(_parseCustomersCatalogCsvIsolate, rawCsv);
+    _debugPrintCustomerLoadReportFromResult(result);
 
     void applyEmpty() {
       _pendingRestoreCustomerAfterLocalMerge = _selectedCustomer;
+      final debugLine = 'Customers Loaded: ${result.customersLoaded}';
       if (mounted) {
         setState(() {
           _customers = [];
           _customersByKey.clear();
           _selectedCustomer = null;
+          _customersLoadDebugLine = debugLine;
         });
       } else {
         _customers = [];
         _customersByKey.clear();
         _selectedCustomer = null;
+        _customersLoadDebugLine = debugLine;
       }
       scheduleMicrotask(() => _reapplyLocalAddedCustomers());
       _discardWorkingOrderIfNoCustomerSelected();
     }
 
-    final trimmed = rawCsv.trim();
-    if (trimmed.isEmpty) {
-      debugPrint('[Customers] CSV text is empty after trim.');
-      printCustomerLoadReport(
-        totalRowsRead: 0,
-        customersLoaded: 0,
-        customersWithDiscount: 0,
-        skippedRows: 0,
-        duplicateKeyRows: 0,
-      );
+    if (result.outcome == _CustomersCsvIsolateOutcome.earlyFailure) {
       applyEmpty();
       return;
     }
 
-    final firstLine = rawCsv.split('\n').first;
-    final useTab = firstLine.split('\t').length > firstLine.split(',').length;
-    List<List<dynamic>> rows;
-    try {
-      rows = CsvToListConverter(
-        shouldParseNumbers: false,
-        fieldDelimiter: useTab ? '\t' : ',',
-      ).convert(rawCsv);
-    } catch (e) {
-      debugPrint('[Customers] CSV parse failed: $e');
-      printCustomerLoadReport(
-        totalRowsRead: 0,
-        customersLoaded: 0,
-        customersWithDiscount: 0,
-        skippedRows: 0,
-        duplicateKeyRows: 0,
-      );
-      applyEmpty();
-      return;
-    }
-
-    if (rows.isEmpty) {
-      debugPrint('[Customers] CSV parse produced no rows.');
-      printCustomerLoadReport(
-        totalRowsRead: 0,
-        customersLoaded: 0,
-        customersWithDiscount: 0,
-        skippedRows: 0,
-        duplicateKeyRows: 0,
-      );
-      applyEmpty();
-      return;
-    }
-
-    final headerRow = rows[0].map((e) => e.toString().trim()).toList();
-    debugPrint('[Customers] Headers found: ${headerRow.join(', ')}');
-    int col(String name) {
-      final i = headerRow.indexOf(name);
-      return i >= 0 ? i : -1;
-    }
-
-    int colIgnoreCase(String name) {
-      final lower = name.toLowerCase();
-      for (int i = 0; i < headerRow.length; i++) {
-        if (headerRow[i].toLowerCase() == lower) return i;
-      }
-      return -1;
-    }
-
-    final idxId = col('Id');
-    final idxCompanyName = col('CompanyName');
-    final idxAddress = col('Address');
-    final idxAddress2 = col('Address2');
-    final idxCity = col('City');
-    final idxState = col('State');
-    final idxZip = col('Zip');
-    final idxPhone = col('Phone');
-    final idxFax = col('Fax');
-    final idxEmail = col('Email');
-    final idxContact = col('Contact');
-    final idxSalesRepName = col('SalesRepName');
-    final idxPriceList = col('PriceList');
-    final idxDiscount = colIgnoreCase('discount');
-    final idxPaymentTerms = col('PaymentTerms');
-    if (idxId < 0 && idxCompanyName < 0) {
-      debugPrint(
-        '[Customers] Missing required columns: need Id and/or CompanyName.',
-      );
-      debugPrint(
-        '[Customers] Column index: Id=$idxId, CompanyName=$idxCompanyName, '
-        'Discount=$idxDiscount',
-      );
-      printCustomerLoadReport(
-        totalRowsRead: rows.length > 1 ? rows.length - 1 : 0,
-        customersLoaded: 0,
-        customersWithDiscount: 0,
-        skippedRows: rows.length > 1 ? rows.length - 1 : 0,
-        duplicateKeyRows: 0,
-      );
-      applyEmpty();
-      return;
-    }
-
-    final totalRowsRead = rows.length > 1 ? rows.length - 1 : 0;
-    final list = <Customer>[];
-    final byKey = <String, Customer>{};
-    var skippedRows = 0;
-    var duplicateKeyRows = 0;
-    var discountNonZero = 0;
-    var duplicateLogBudget = 5;
-
-    for (int i = 1; i < rows.length; i++) {
-      final row = rows[i];
-      try {
-        if (row.every((c) => c.toString().trim().isEmpty)) {
-          skippedRows++;
-          continue;
-        }
-
-        String get(int index) => index >= 0 && index < row.length
-            ? row[index].toString().trim()
-            : '';
-
-        final idPart = idxId >= 0 ? get(idxId) : '';
-        final company = get(idxCompanyName);
-        final lookupKey = idPart.isNotEmpty ? idPart : company;
-        if (lookupKey.isEmpty) {
-          skippedRows++;
-          continue;
-        }
-        if (byKey.containsKey(lookupKey)) {
-          duplicateKeyRows++;
-          skippedRows++;
-          if (duplicateLogBudget > 0) {
-            duplicateLogBudget--;
-            debugPrint(
-              '[Customers] Duplicate key "$lookupKey" at CSV row ${i + 1}: '
-              'skipped (first row at key wins).',
-            );
-          }
-          continue;
-        }
-
-        final idForModel = idPart.isNotEmpty ? idPart : company;
-        final discountCell = idxDiscount >= 0 ? get(idxDiscount) : '';
-        final pct = Customer.parseDiscountPercentFromRaw(discountCell);
-
-        final customer = Customer(
-          id: idForModel,
-          companyName: company,
-          address: get(idxAddress),
-          address2: get(idxAddress2),
-          city: get(idxCity),
-          state: get(idxState),
-          zip: get(idxZip),
-          phone: get(idxPhone),
-          fax: get(idxFax),
-          email: get(idxEmail),
-          contact: get(idxContact),
-          salesRepName: get(idxSalesRepName),
-          priceList: get(idxPriceList),
-          discount: discountCell,
-          discountPercent: pct,
-          paymentTerms: get(idxPaymentTerms),
-        );
-
-        byKey[lookupKey] = customer;
-        list.add(customer);
-        if (pct > 0) discountNonZero++;
-      } catch (e) {
-        skippedRows++;
-        debugPrint('[Customers] Skipping row ${i + 1}: $e');
-      }
-    }
-
-    if (duplicateKeyRows > 5) {
-      debugPrint(
-        '[Customers] ... ${duplicateKeyRows - 5} more duplicate key row(s) '
-        'not shown (see Duplicate key rows skipped count in report).',
-      );
-    }
-
-    printCustomerLoadReport(
-      totalRowsRead: totalRowsRead,
-      customersLoaded: list.length,
-      customersWithDiscount: discountNonZero,
-      skippedRows: skippedRows,
-      duplicateKeyRows: duplicateKeyRows,
-    );
-
+    final list = result.customers;
+    final byKey = result.customersByKey;
     final previous = _selectedCustomer;
     Customer? resolvedSelection;
     if (previous != null && list.isNotEmpty) {
@@ -6588,6 +6905,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     _pendingRestoreCustomerAfterLocalMerge = previous;
+    final debugLine = 'Customers Loaded: ${result.customersLoaded}';
     if (mounted) {
       setState(() {
         _customers = list;
@@ -6595,6 +6913,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ..clear()
           ..addAll(byKey);
         _selectedCustomer = resolvedSelection;
+        _customersLoadDebugLine = debugLine;
       });
     } else {
       _customers = list;
@@ -6602,6 +6921,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ..clear()
         ..addAll(byKey);
       _selectedCustomer = resolvedSelection;
+      _customersLoadDebugLine = debugLine;
     }
     scheduleMicrotask(() => _reapplyLocalAddedCustomers());
   }
@@ -9222,6 +9542,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                   textTheme: textTheme,
                                                   colorScheme: colorScheme,
                                                 ),
+                                                _warehouseAvailabilityLinesWidget(
+                                                  context,
+                                                  product,
+                                                  padding: const EdgeInsets.only(
+                                                    top: 4,
+                                                  ),
+                                                ),
                                               ],
                                             )
                                           : Row(
@@ -9326,6 +9653,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                         textTheme: textTheme,
                                                         colorScheme:
                                                             colorScheme,
+                                                      ),
+                                                      _warehouseAvailabilityLinesWidget(
+                                                        context,
+                                                        product,
+                                                        padding:
+                                                            const EdgeInsets.only(
+                                                              top: 4,
+                                                            ),
                                                       ),
                                                     ],
                                                   ),
@@ -9965,6 +10300,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'isNewRelease': line.product.isNewRelease,
         'category': line.product.category,
         'subCategory': line.product.subCategory,
+        'whse1InStock': line.product.whse1InStock,
+        'whse2InStock': line.product.whse2InStock,
+        'whse1OutOfStock': line.product.whse1OutOfStock,
+        'whse2OutOfStock': line.product.whse2OutOfStock,
+        'whse1ComingSoon': line.product.whse1ComingSoon,
+        'whse2ComingSoon': line.product.whse2ComingSoon,
         'quoteBucketKey': bucket.bucketKey,
         'quoteBucketLabel': bucket.displayLabel,
         'quantity': line.quantity,
@@ -10156,6 +10497,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'isNewRelease': product.isNewRelease,
         'category': product.category,
         'subCategory': product.subCategory,
+        'whse1InStock': product.whse1InStock,
+        'whse2InStock': product.whse2InStock,
+        'whse1OutOfStock': product.whse1OutOfStock,
+        'whse2OutOfStock': product.whse2OutOfStock,
+        'whse1ComingSoon': product.whse1ComingSoon,
+        'whse2ComingSoon': product.whse2ComingSoon,
         'quoteBucketKey': bucket.bucketKey,
         'quoteBucketLabel': bucket.displayLabel,
         'quantity': 1,
@@ -10453,25 +10800,30 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           t('Category'),
           t('Sub-Category'),
           t('Qty'),
+          t('Minimum Order Quantity'),
+          t('Case Quantity'),
         ]);
 
         debugPrint('[ExportDiag] row build start');
         for (var i = 0; i < products.length; i++) {
           final product = products[i];
           final pr = _applyPricingLogic(product, customer);
+          final discountable = _productIsDiscountEligible(product);
           sheet.appendRow([
             t(product.itemNumber),
             t(product.description),
             t(product.upc),
             xlsx.DoubleCellValue(pr.listPrice),
             xlsx.DoubleCellValue(pr.price),
-            t(pr.discountCol),
-            t(pr.netCol),
+            t(discountable ? 'YES' : ''),
+            t(discountable ? '' : 'YES'),
             t(pr.psCol),
             t(product.productType),
             t(product.category),
             t(product.subCategory),
             xlsx.IntCellValue(1),
+            xlsx.IntCellValue(product.minOrderQty),
+            xlsx.IntCellValue(product.caseQty),
           ]);
           if (i % 400 == 0 && i > 0) {
             debugPrint(
@@ -10506,6 +10858,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           18, // Category
           18, // Sub-Category
           8, // Qty
+          12, // Minimum Order Quantity
+          12, // Case Quantity
         ];
         for (var c = 0; c < colWidths.length; c++) {
           sheet.setColumnWidth(c, colWidths[c]);
@@ -10700,6 +11054,758 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
       }
     } finally {
+      _suspendScannerFocusRecovery = false;
+    }
+  }
+
+  String _masterUpdateDebugTimestampSuffix() {
+    final now = DateTime.now();
+    return '${now.year.toString().padLeft(4, '0')}'
+        '${now.month.toString().padLeft(2, '0')}'
+        '${now.day.toString().padLeft(2, '0')}_'
+        '${now.hour.toString().padLeft(2, '0')}'
+        '${now.minute.toString().padLeft(2, '0')}'
+        '${now.second.toString().padLeft(2, '0')}';
+  }
+
+  /// Writes one .xlsx using [ExportDiag] logging. Does not mutate quote/order state.
+  Future<bool> _exportDiagEncodeWriteXlsxFile({
+    required xlsx.Excel excel,
+    required File file,
+    required String diagFileTag,
+  }) async {
+    debugPrint('[ExportDiag] $diagFileTag excel.encode() start');
+    final bytes = excel.encode();
+    final bytesNull = bytes == null;
+    final bytesLen = bytes?.length ?? 0;
+    debugPrint(
+      '[ExportDiag] $diagFileTag encode result isNull=$bytesNull bytesLength=$bytesLen',
+    );
+    if (bytes == null || bytes.isEmpty) {
+      debugPrint('[ExportDiag] $diagFileTag encode returned null/empty');
+      return false;
+    }
+    debugPrint('[ExportDiag] $diagFileTag writeAsBytes start path=${file.path}');
+    await file.writeAsBytes(bytes, flush: true);
+    debugPrint('[ExportDiag] $diagFileTag writeAsBytes complete');
+    final existsAfter = await file.exists();
+    final lenAfter = existsAfter ? await file.length() : 0;
+    debugPrint(
+      '[ExportDiag] $diagFileTag file exists=$existsAfter size=$lenAfter',
+    );
+    if (!existsAfter || lenAfter <= 0) {
+      debugPrint(
+        '[ExportDiag] $diagFileTag write verification failed path=${file.path}',
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /// Single .xlsx pick for master build staging; cancel returns null (no snackbars).
+  Future<String?> _pickMasterBuildXlsxFile(String dialogTitle) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['xlsx'],
+      dialogTitle: dialogTitle,
+    );
+    if (result == null || result.files.isEmpty) return null;
+    final path = result.files.first.path;
+    if (path == null || path.isEmpty) return null;
+    return path;
+  }
+
+  /// File-only master workbook build: Quote + Products + PS + New Release → one .xlsx.
+  /// Does not use catalog, [_orderLines], quotes, or tabs.
+  Future<void> _buildUpdatedMasterProductsSheetFlow() async {
+    if (!kDebugMode) return;
+    if (_buildingUpdatedMasterSheet) return;
+    if (!mounted) return;
+
+    final fileSet = await showDialog<_MasterBuildFileSet>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) {
+        String? quotePath;
+        String? productsPath;
+        String? psPath;
+        String? newReleasePath;
+        String? whse1InStockPath;
+        String? whse2InStockPath;
+        String? whse1OutOfStockPath;
+        String? whse2OutOfStockPath;
+        String? whse1ComingSoonPath;
+        String? whse2ComingSoonPath;
+
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            Widget fileRow({
+              required String label,
+              required String? path,
+              required Future<void> Function() onPick,
+            }) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    OutlinedButton(
+                      onPressed: onPick,
+                      child: Text(label),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      path == null ? '—' : p.basename(path),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: _kSecondaryText,
+                          ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            final allSet = quotePath != null &&
+                productsPath != null &&
+                psPath != null &&
+                newReleasePath != null &&
+                whse1InStockPath != null &&
+                whse2InStockPath != null &&
+                whse1OutOfStockPath != null &&
+                whse2OutOfStockPath != null &&
+                whse1ComingSoonPath != null &&
+                whse2ComingSoonPath != null;
+
+            return AlertDialog(
+              title: const Text('Build Updated Master Products Sheet'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    fileRow(
+                      label: 'Quote file',
+                      path: quotePath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Quote workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => quotePath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Quote selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Products file',
+                      path: productsPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Products workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => productsPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Products selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'PS file',
+                      path: psPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select PS workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => psPath = path);
+                          debugPrint('[MasterBuildDiag] PS selected: $path');
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'New Release file',
+                      path: newReleasePath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select New Release workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => newReleasePath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] New Release selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Whse 1 In Stock (IN Stock WHSE1.xlsx)',
+                      path: whse1InStockPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Whse 1 In Stock workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => whse1InStockPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Whse 1 In Stock selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Whse 2 In Stock (IN Stock WHSE2.xlsx)',
+                      path: whse2InStockPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Whse 2 In Stock workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => whse2InStockPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Whse 2 In Stock selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Whse 1 Out of Stock',
+                      path: whse1OutOfStockPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Whse 1 Out of Stock workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => whse1OutOfStockPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Whse 1 Out of Stock selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Whse 2 Out of Stock',
+                      path: whse2OutOfStockPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Whse 2 Out of Stock workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => whse2OutOfStockPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Whse 2 Out of Stock selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Whse 1 Coming Soon',
+                      path: whse1ComingSoonPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Whse 1 Coming Soon workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => whse1ComingSoonPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Whse 1 Coming Soon selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                    fileRow(
+                      label: 'Whse 2 Coming Soon',
+                      path: whse2ComingSoonPath,
+                      onPick: () async {
+                        final path = await _pickMasterBuildXlsxFile(
+                          'Master build: select Whse 2 Coming Soon workbook (.xlsx)',
+                        );
+                        if (!dialogContext.mounted) return;
+                        if (path != null) {
+                          setLocalState(() => whse2ComingSoonPath = path);
+                          debugPrint(
+                            '[MasterBuildDiag] Whse 2 Coming Soon selected: $path',
+                          );
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: allSet
+                      ? () {
+                          debugPrint(
+                            '[MasterBuildDiag] Build pressed with all files selected',
+                          );
+                          Navigator.of(dialogContext).pop(
+                            _MasterBuildFileSet(
+                              quotePath: quotePath!,
+                              productsPath: productsPath!,
+                              psPath: psPath!,
+                              newReleasePath: newReleasePath!,
+                              whse1InStockPath: whse1InStockPath!,
+                              whse2InStockPath: whse2InStockPath!,
+                              whse1OutOfStockPath: whse1OutOfStockPath!,
+                              whse2OutOfStockPath: whse2OutOfStockPath!,
+                              whse1ComingSoonPath: whse1ComingSoonPath!,
+                              whse2ComingSoonPath: whse2ComingSoonPath!,
+                            ),
+                          );
+                        }
+                      : null,
+                  child: const Text('Build Master Sheet'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (fileSet == null || !mounted) return;
+
+    setState(() => _buildingUpdatedMasterSheet = true);
+    try {
+      final report = await runUpdatedMasterProductsBuild(
+        quoteFilePath: fileSet.quotePath,
+        productsFilePath: fileSet.productsPath,
+        psFilePath: fileSet.psPath,
+        newReleaseFilePath: fileSet.newReleasePath,
+        whse1InStockFilePath: fileSet.whse1InStockPath,
+        whse2InStockFilePath: fileSet.whse2InStockPath,
+        whse1OutOfStockFilePath: fileSet.whse1OutOfStockPath,
+        whse2OutOfStockFilePath: fileSet.whse2OutOfStockPath,
+        whse1ComingSoonFilePath: fileSet.whse1ComingSoonPath,
+        whse2ComingSoonFilePath: fileSet.whse2ComingSoonPath,
+      );
+
+      if (!report.success || report.bytes == null) {
+        debugPrint(
+          '[MasterBuildDiag] build failed: ${report.errorMessage}',
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Master build failed: ${report.errorMessage ?? "unknown"}',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
+      final docs = await getApplicationDocumentsDirectory();
+      if (!mounted) return;
+      final stamp = _masterUpdateDebugTimestampSuffix();
+      final outFile = File(
+        p.join(docs.path, 'MASTER_PRODUCTS_UPDATED_$stamp.xlsx'),
+      );
+      await outFile.writeAsBytes(report.bytes!, flush: true);
+      final existsAfter = await outFile.exists();
+      final lenAfter = existsAfter ? await outFile.length() : 0;
+      debugPrint(
+        '[MasterBuildDiag] output path=${outFile.path} exists=$existsAfter '
+        'length=$lenAfter',
+      );
+
+      if (!existsAfter || lenAfter <= 0) {
+        debugPrint(
+          '[MasterBuildDiag] write verification failed path=${outFile.path} '
+          'exists=$existsAfter length=$lenAfter',
+        );
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text('Master build failed'),
+              content: SelectableText(
+                'The file was not written correctly.\n\nPath:\n${outFile.path}',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('OK'),
+                ),
+              ],
+            );
+          },
+        );
+        return;
+      }
+
+      if (!mounted) return;
+      final pathStr = outFile.path;
+      final totalRows = report.finalDataRowCount;
+      final addedRows = report.addedFromNewRelease;
+      final removedRows = report.removedRows;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) {
+          debugPrint('[MasterBuildDiag] completion dialog shown');
+          final body =
+              'Path:\n$pathStr\n\n'
+              'Total rows: $totalRows\n'
+              'Added rows: $addedRows\n'
+              'Removed rows: $removedRows';
+          return AlertDialog(
+            title: const Text('Master Products Build Complete'),
+            content: SingleChildScrollView(
+              child: SelectableText(body),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  try {
+                    await Share.shareXFiles([
+                      XFile(
+                        pathStr,
+                        mimeType:
+                            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                      ),
+                    ]);
+                  } catch (_) {
+                    if (ctx.mounted) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(
+                          content: Text('Unable to share file'),
+                        ),
+                      );
+                    }
+                  }
+                },
+                child: const Text('Share File'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  if (mounted) {
+                    await _openCsvWithSystemHandler(File(pathStr));
+                  }
+                },
+                child: const Text('Open File'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: pathStr));
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(content: Text('Path copied')),
+                    );
+                  }
+                },
+                child: const Text('Copy Path'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e, st) {
+      debugPrint('[MasterBuildDiag] exception $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Master build failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _buildingUpdatedMasterSheet = false);
+      } else {
+        _buildingUpdatedMasterSheet = false;
+      }
+    }
+  }
+
+  /// Debug-only: Excel workbooks for Master sheet updates (list price, PS, new release).
+  /// Does not load into UI workspace or mutate [_orderLines] / quotes / tabs.
+  Future<void> _exportMasterUpdateSheetsFlow() async {
+    if (!kDebugMode) return;
+    debugPrint('[ExportDiag] MASTER_UPDATE start');
+    if (_exportingMasterUpdateSheets) return;
+    if (_productsByItemNumber.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Load products first.')));
+      return;
+    }
+    if (_customers.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Load customers CSV first.')),
+      );
+      return;
+    }
+
+    _suspendScannerFocusRecovery = true;
+    try {
+      final customer = await _showSimpleCustomerPickerForCatalogTests();
+      if (!mounted || customer == null) return;
+
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: const Text('Export Master Update Sheets'),
+            content: const Text(
+              'Generate Master update Excel files from the loaded product catalog. '
+              'Continue?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Continue'),
+              ),
+            ],
+          );
+        },
+      );
+      if (confirm != true || !mounted) return;
+
+      if (!mounted) return;
+      setState(() => _exportingMasterUpdateSheets = true);
+
+      final stamp = _masterUpdateDebugTimestampSuffix();
+      final products = _sortByItemNumberAscending<Product>(
+        _allProducts,
+        (p) => p.itemNumber,
+      );
+
+      final listPriceRows = products.length;
+      final psProducts =
+          products.where((p) => p.isPs).toList(growable: false);
+      final newProducts =
+          products.where((p) => p.isNewRelease).toList(growable: false);
+      final psRows = psProducts.length;
+      final newRows = newProducts.length;
+
+      debugPrint(
+        '[ExportDiag] MASTER_UPDATE row counts '
+        'List_Price_Update=$listPriceRows PS_Update=$psRows New_Update=$newRows',
+      );
+
+      final docs = await getApplicationDocumentsDirectory();
+      if (!mounted) return;
+
+      xlsx.TextCellValue txt(String v) => xlsx.TextCellValue(v);
+
+      // --- List Price (all loaded products; list price matches [_applyPricingLogic].)
+      final excelListPrice = xlsx.Excel.createExcel();
+      final listPriceDefault =
+          excelListPrice.getDefaultSheet() ?? excelListPrice.tables.keys.first;
+      excelListPrice.rename(listPriceDefault, 'List Price Update');
+      final sheetListPrice = excelListPrice['List Price Update'];
+      sheetListPrice.appendRow([txt('Item Number'), txt('List Price')]);
+      for (var i = 0; i < products.length; i++) {
+        final product = products[i];
+        final pr = _applyPricingLogic(product, customer);
+        sheetListPrice.appendRow([
+          txt(product.itemNumber),
+          xlsx.DoubleCellValue(pr.listPrice),
+        ]);
+        if (i % 400 == 0 && i > 0) {
+          await Future<void>.delayed(Duration.zero);
+          if (!mounted) return;
+        }
+      }
+
+      // --- PS only
+      final excelPs = xlsx.Excel.createExcel();
+      final psDefault = excelPs.getDefaultSheet() ?? excelPs.tables.keys.first;
+      excelPs.rename(psDefault, 'PS Update');
+      final sheetPs = excelPs['PS Update'];
+      sheetPs.appendRow([txt('Item Number'), txt('PS')]);
+      for (final p in psProducts) {
+        sheetPs.appendRow([txt(p.itemNumber), txt('YES')]);
+      }
+
+      // --- New release only
+      final excelNew = xlsx.Excel.createExcel();
+      final newDefault = excelNew.getDefaultSheet() ?? excelNew.tables.keys.first;
+      excelNew.rename(newDefault, 'New Update');
+      final sheetNew = excelNew['New Update'];
+      sheetNew.appendRow([txt('Item Number'), txt('New Release')]);
+      for (final p in newProducts) {
+        sheetNew.appendRow([txt(p.itemNumber), txt('YES')]);
+      }
+
+      // --- Combined pack
+      final excelPack = xlsx.Excel.createExcel();
+      final packDefault = excelPack.getDefaultSheet() ?? excelPack.tables.keys.first;
+      excelPack.rename(packDefault, 'List Price Update');
+      final packList = excelPack['List Price Update'];
+      packList.appendRow([txt('Item Number'), txt('List Price')]);
+      for (var i = 0; i < products.length; i++) {
+        final product = products[i];
+        final pr = _applyPricingLogic(product, customer);
+        packList.appendRow([
+          txt(product.itemNumber),
+          xlsx.DoubleCellValue(pr.listPrice),
+        ]);
+        if (i % 400 == 0 && i > 0) {
+          await Future<void>.delayed(Duration.zero);
+          if (!mounted) return;
+        }
+      }
+      final packPs = excelPack['PS Update'];
+      packPs.appendRow([txt('Item Number'), txt('PS')]);
+      for (final p in psProducts) {
+        packPs.appendRow([txt(p.itemNumber), txt('YES')]);
+      }
+      final packNew = excelPack['New Update'];
+      packNew.appendRow([txt('Item Number'), txt('New Release')]);
+      for (final p in newProducts) {
+        packNew.appendRow([txt(p.itemNumber), txt('YES')]);
+      }
+
+      final pathListPrice =
+          p.join(docs.path, 'MASTER_UPDATE_LIST_PRICE_$stamp.xlsx');
+      final pathPs = p.join(docs.path, 'MASTER_UPDATE_PS_$stamp.xlsx');
+      final pathNew = p.join(docs.path, 'MASTER_UPDATE_NEW_$stamp.xlsx');
+      final pathPack = p.join(docs.path, 'MASTER_UPDATE_PACK_$stamp.xlsx');
+
+      final okList = await _exportDiagEncodeWriteXlsxFile(
+        excel: excelListPrice,
+        file: File(pathListPrice),
+        diagFileTag: 'MASTER_UPDATE_LIST_PRICE',
+      );
+      if (!mounted) return;
+      if (!okList) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Master update export failed: list price encode/write.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final okPs = await _exportDiagEncodeWriteXlsxFile(
+        excel: excelPs,
+        file: File(pathPs),
+        diagFileTag: 'MASTER_UPDATE_PS',
+      );
+      if (!mounted) return;
+      if (!okPs) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Master update export failed: PS encode/write.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final okNew = await _exportDiagEncodeWriteXlsxFile(
+        excel: excelNew,
+        file: File(pathNew),
+        diagFileTag: 'MASTER_UPDATE_NEW',
+      );
+      if (!mounted) return;
+      if (!okNew) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Master update export failed: New encode/write.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final okPack = await _exportDiagEncodeWriteXlsxFile(
+        excel: excelPack,
+        file: File(pathPack),
+        diagFileTag: 'MASTER_UPDATE_PACK',
+      );
+      if (!mounted) return;
+      if (!okPack) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Master update export failed: pack encode/write.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final body =
+          'Files created (4):\n'
+          '• MASTER_UPDATE_LIST_PRICE_$stamp.xlsx\n'
+          '• MASTER_UPDATE_PS_$stamp.xlsx\n'
+          '• MASTER_UPDATE_NEW_$stamp.xlsx\n'
+          '• MASTER_UPDATE_PACK_$stamp.xlsx\n\n'
+          'Data rows (excluding headers):\n'
+          '• List Price Update: $listPriceRows\n'
+          '• PS Update: $psRows\n'
+          '• New Update: $newRows\n\n'
+          'Paths:\n'
+          '$pathListPrice\n'
+          '$pathPs\n'
+          '$pathNew\n'
+          '$pathPack';
+
+      debugPrint('[ExportDiag] MASTER_UPDATE completion dialog shown');
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) {
+          return AlertDialog(
+            title: const Text('Master update export complete'),
+            content: SingleChildScrollView(
+              child: SelectableText(body),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e, st) {
+      debugPrint('Master update sheets export failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Master update export failed: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _exportingMasterUpdateSheets = false);
+      } else {
+        _exportingMasterUpdateSheets = false;
+      }
       _suspendScannerFocusRecovery = false;
     }
   }
@@ -11368,6 +12474,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final isNewRelease = (map['isNewRelease'] as bool?) ?? false;
         final category = (map['category'] as String?) ?? '';
         final subCategory = (map['subCategory'] as String?) ?? '';
+        final whse1InStock = (map['whse1InStock'] as bool?) ?? false;
+        final whse2InStock = (map['whse2InStock'] as bool?) ?? false;
+        final whse1OutOfStock = (map['whse1OutOfStock'] as bool?) ?? false;
+        final whse2OutOfStock = (map['whse2OutOfStock'] as bool?) ?? false;
+        final whse1ComingSoon = (map['whse1ComingSoon'] as bool?) ?? false;
+        final whse2ComingSoon = (map['whse2ComingSoon'] as bool?) ?? false;
         final quantity = _quantityFromJson(map['quantity']);
         final scans = (map['scans'] as int?) ?? 1;
 
@@ -11393,6 +12505,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             subCategory: subCategory,
             minOrderQty: 1,
             caseQty: 1,
+            whse1InStock: whse1InStock,
+            whse2InStock: whse2InStock,
+            whse1OutOfStock: whse1OutOfStock,
+            whse2OutOfStock: whse2OutOfStock,
+            whse1ComingSoon: whse1ComingSoon,
+            whse2ComingSoon: whse2ComingSoon,
           );
         }
 
@@ -12041,6 +13159,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ? _exportFullCatalogExcelQuoteFlow
           : null,
       exportingFullCatalogExcel: _exportingFullCatalogExcel,
+      onExportMasterUpdateSheets:
+          kDebugMode ? _exportMasterUpdateSheetsFlow : null,
+      exportingMasterUpdateSheets: _exportingMasterUpdateSheets,
+      onBuildUpdatedMasterProductsSheet:
+          kDebugMode ? _buildUpdatedMasterProductsSheetFlow : null,
+      buildingUpdatedMasterSheet: _buildingUpdatedMasterSheet,
     );
   }
 
@@ -12750,6 +13874,13 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                             color: colorScheme.primary,
                           ),
                         ),
+                        const SizedBox(height: 3),
+                        _warehouseAvailabilityLinesWidget(
+                          context,
+                          line.product,
+                          textAlign: textAlign,
+                          padding: EdgeInsets.zero,
+                        ),
                       ];
                     }
 
@@ -13182,6 +14313,43 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
   }
 }
 
+/// Two-line warehouse availability for product detail surfaces (always shown).
+Widget _warehouseAvailabilityLinesWidget(
+  BuildContext context,
+  Product product, {
+  TextAlign textAlign = TextAlign.start,
+  EdgeInsetsGeometry padding = const EdgeInsets.only(bottom: 10),
+}) {
+  final textTheme = Theme.of(context).textTheme;
+  final style = textTheme.bodySmall?.copyWith(height: 1.15);
+  final cross = textAlign == TextAlign.center
+      ? CrossAxisAlignment.center
+      : CrossAxisAlignment.start;
+  return Padding(
+    padding: padding,
+    child: Column(
+      crossAxisAlignment: cross,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Availability Whse 1: ${_availabilityLabelForWhse1(product)}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: textAlign,
+          style: style,
+        ),
+        Text(
+          'Availability Whse 2: ${_availabilityLabelForWhse2(product)}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: textAlign,
+          style: style,
+        ),
+      ],
+    ),
+  );
+}
+
 /// Read-only ECatalog product detail (bottom sheet body).
 class _ECatalogProductDetailSheet extends StatelessWidget {
   const _ECatalogProductDetailSheet({
@@ -13324,6 +14492,7 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
             label: 'Case qty',
             value: product.caseQty > 0 ? '${product.caseQty}' : '',
           ),
+          _warehouseAvailabilityLinesWidget(context, product),
           if (flags.isNotEmpty) ...[
             const SizedBox(height: 4),
             Text(
@@ -13855,6 +15024,11 @@ class _OrderLineCardRow extends StatelessWidget {
                 ),
                 const SizedBox(height: 1),
                 line3Expanded,
+                _warehouseAvailabilityLinesWidget(
+                  context,
+                  line.product,
+                  padding: const EdgeInsets.only(top: 2),
+                ),
               ],
             )
           : Stack(
@@ -13892,6 +15066,11 @@ class _OrderLineCardRow extends StatelessWidget {
                         ),
                         const SizedBox(height: 1),
                         line3Collapsed,
+                        _warehouseAvailabilityLinesWidget(
+                          context,
+                          line.product,
+                          padding: const EdgeInsets.only(top: 2),
+                        ),
                       ],
                     ),
                   ),
@@ -13937,6 +15116,11 @@ class _OrderLineCardRow extends StatelessWidget {
                   fontSize: 13,
                   height: 1.12,
                 ),
+              ),
+              _warehouseAvailabilityLinesWidget(
+                context,
+                line.product,
+                padding: const EdgeInsets.only(top: 2),
               ),
             ],
           ),
@@ -14287,6 +15471,10 @@ class _SetupTab extends StatelessWidget {
     this.onBuildFullCatalogTestQuote,
     this.onExportFullCatalogExcel,
     this.exportingFullCatalogExcel = false,
+    this.onExportMasterUpdateSheets,
+    this.exportingMasterUpdateSheets = false,
+    this.onBuildUpdatedMasterProductsSheet,
+    this.buildingUpdatedMasterSheet = false,
   });
 
   final VoidCallback onLoadProducts;
@@ -14297,6 +15485,10 @@ class _SetupTab extends StatelessWidget {
   final Future<void> Function()? onBuildFullCatalogTestQuote;
   final Future<void> Function()? onExportFullCatalogExcel;
   final bool exportingFullCatalogExcel;
+  final Future<void> Function()? onExportMasterUpdateSheets;
+  final bool exportingMasterUpdateSheets;
+  final Future<void> Function()? onBuildUpdatedMasterProductsSheet;
+  final bool buildingUpdatedMasterSheet;
 
   @override
   Widget build(BuildContext context) {
@@ -14364,6 +15556,36 @@ class _SetupTab extends StatelessWidget {
                 exportingFullCatalogExcel
                     ? 'EXPORTING…'
                     : 'Export Full Catalog Test Quote (Excel)',
+              ),
+            ),
+          ],
+          if (onExportMasterUpdateSheets != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: exportingMasterUpdateSheets
+                  ? null
+                  : () {
+                      unawaited(onExportMasterUpdateSheets!());
+                    },
+              child: Text(
+                exportingMasterUpdateSheets
+                    ? 'EXPORTING…'
+                    : 'Export Master Update Sheets',
+              ),
+            ),
+          ],
+          if (onBuildUpdatedMasterProductsSheet != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: buildingUpdatedMasterSheet
+                  ? null
+                  : () {
+                      unawaited(onBuildUpdatedMasterProductsSheet!());
+                    },
+              child: Text(
+                buildingUpdatedMasterSheet
+                    ? 'BUILDING…'
+                    : 'Build Updated Master Products Sheet',
               ),
             ),
           ],

@@ -18,6 +18,8 @@ dependencies:
   http: ^1.2.0
   mobile_scanner: ^7.1.4
   excel: ^4.0.6
+  unorm_dart: ^0.3.2
+  diacritic: ^0.1.6
 
 flutter:
   uses-material-design: true
