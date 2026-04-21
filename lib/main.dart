@@ -45,7 +45,7 @@ class _MasterBuildFileSet {
 }
 
 const String _productsCsvUrl =
-    'https://docs.google.com/spreadsheets/d/1GEdA9FySq966sRK1NDnVh4fKBmdPA8ERFq-xeVRxSWw/export?format=csv&gid=1048546199';
+    'https://docs.google.com/spreadsheets/d/1UWduf2UklzxcnCA4dd6eKJN8QJb5gWm17k8F70fx1u8/export?format=csv&gid=1691211520';
 
 const String _customersCsvUrl =
     'https://docs.google.com/spreadsheets/d/1C9KzyNN7P7YVYvjpuCizXtxDdpfsp20UKewBAtStdCg/export?format=csv&gid=1371098168';
@@ -352,6 +352,9 @@ class Product {
   final bool whse2OutOfStock;
   final bool whse1ComingSoon;
   final bool whse2ComingSoon;
+  /// Raw CSV text from Whse 1 Availability / Whse 2 Availability (2-column format only).
+  final String whse1AvailabilityDisplay;
+  final String whse2AvailabilityDisplay;
 
   Product({
     required this.itemNumber,
@@ -377,6 +380,8 @@ class Product {
     this.whse2OutOfStock = false,
     this.whse1ComingSoon = false,
     this.whse2ComingSoon = false,
+    this.whse1AvailabilityDisplay = '',
+    this.whse2AvailabilityDisplay = '',
   });
 }
 
@@ -482,6 +487,25 @@ bool _piParseDiscountEligibility(String value) {
 
 bool _piParseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
 
+/// Single warehouse column: "In Stock" | "Out of Stock" | "Coming Soon".
+/// Normalizes with [trim], lowercases, collapses internal whitespace; unknown → all false.
+/// At most one of the three flags is true.
+({bool inStock, bool outOfStock, bool comingSoon})
+    _piParseWarehouseAvailabilityTriState(String raw) {
+  final collapsed = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+  final n = collapsed.toLowerCase();
+  if (n == 'in stock') {
+    return (inStock: true, outOfStock: false, comingSoon: false);
+  }
+  if (n == 'out of stock') {
+    return (inStock: false, outOfStock: true, comingSoon: false);
+  }
+  if (n == 'coming soon') {
+    return (inStock: false, outOfStock: false, comingSoon: true);
+  }
+  return (inStock: false, outOfStock: false, comingSoon: false);
+}
+
 /// Keeps parity counters referenced so analyzer stays clean without changing outcomes.
 void _productsCsvSinkUnused(Object? _) {}
 
@@ -538,36 +562,57 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
   final idxNewRelease = _piOptionalProductColumnIndex(byNorm, const [
     'newrelease',
   ]);
-  final idxWhse1In = _piOptionalProductColumnIndex(byNorm, const [
-    'whse1instock',
+  final idxWhse1Availability = _piOptionalProductColumnIndex(byNorm, const [
+    'whse1availability',
   ]);
-  final idxWhse2In = _piOptionalProductColumnIndex(byNorm, const [
-    'whse2instock',
+  final idxWhse2Availability = _piOptionalProductColumnIndex(byNorm, const [
+    'whse2availability',
   ]);
-  final idxWhse1Out = _piOptionalProductColumnIndex(byNorm, const [
-    'whse1outofstock',
-  ]);
-  final idxWhse2Out = _piOptionalProductColumnIndex(byNorm, const [
-    'whse2outofstock',
-  ]);
-  final idxWhse1Soon = _piOptionalProductColumnIndex(byNorm, const [
-    'whse1comingsoon',
-  ]);
-  final idxWhse2Soon = _piOptionalProductColumnIndex(byNorm, const [
-    'whse2comingsoon',
-  ]);
-  final missingWhseHeaders = <String>[];
-  if (idxWhse1In == null) missingWhseHeaders.add('Whse 1 In Stock');
-  if (idxWhse2In == null) missingWhseHeaders.add('Whse 2 In Stock');
-  if (idxWhse1Out == null) missingWhseHeaders.add('Whse 1 Out of Stock');
-  if (idxWhse2Out == null) missingWhseHeaders.add('Whse 2 Out of Stock');
-  if (idxWhse1Soon == null) missingWhseHeaders.add('Whse 1 Coming Soon');
-  if (idxWhse2Soon == null) missingWhseHeaders.add('Whse 2 Coming Soon');
-  if (missingWhseHeaders.isNotEmpty) {
+  final warehouseViaAvailabilityColumns =
+      idxWhse1Availability != null && idxWhse2Availability != null;
+
+  int? idxWhse1In;
+  int? idxWhse2In;
+  int? idxWhse1Out;
+  int? idxWhse2Out;
+  int? idxWhse1Soon;
+  int? idxWhse2Soon;
+  if (!warehouseViaAvailabilityColumns) {
+    idxWhse1In = _piOptionalProductColumnIndex(byNorm, const [
+      'whse1instock',
+    ]);
+    idxWhse2In = _piOptionalProductColumnIndex(byNorm, const [
+      'whse2instock',
+    ]);
+    idxWhse1Out = _piOptionalProductColumnIndex(byNorm, const [
+      'whse1outofstock',
+    ]);
+    idxWhse2Out = _piOptionalProductColumnIndex(byNorm, const [
+      'whse2outofstock',
+    ]);
+    idxWhse1Soon = _piOptionalProductColumnIndex(byNorm, const [
+      'whse1comingsoon',
+    ]);
+    idxWhse2Soon = _piOptionalProductColumnIndex(byNorm, const [
+      'whse2comingsoon',
+    ]);
+    final missingWhseHeaders = <String>[];
+    if (idxWhse1In == null) missingWhseHeaders.add('Whse 1 In Stock');
+    if (idxWhse2In == null) missingWhseHeaders.add('Whse 2 In Stock');
+    if (idxWhse1Out == null) missingWhseHeaders.add('Whse 1 Out of Stock');
+    if (idxWhse2Out == null) missingWhseHeaders.add('Whse 2 Out of Stock');
+    if (idxWhse1Soon == null) missingWhseHeaders.add('Whse 1 Coming Soon');
+    if (idxWhse2Soon == null) missingWhseHeaders.add('Whse 2 Coming Soon');
+    if (missingWhseHeaders.isNotEmpty) {
+      debugPrint(
+        '[WhseDiag] Optional warehouse columns missing '
+        '(${missingWhseHeaders.length}/6): ${missingWhseHeaders.join(', ')}; '
+        'defaulting to false',
+      );
+    }
+  } else {
     debugPrint(
-      '[WhseDiag] Optional warehouse columns missing '
-      '(${missingWhseHeaders.length}/6): ${missingWhseHeaders.join(', ')}; '
-      'defaulting to false',
+      '[WhseDiag] Using Whse 1 Availability / Whse 2 Availability columns',
     );
   }
   final idxProductType = _piRequireProductColumnIndex(
@@ -622,12 +667,17 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
     if (idxPs != null) idxPs,
     if (idxListPrice != null) idxListPrice,
     if (idxNewRelease != null) idxNewRelease,
-    if (idxWhse1In != null) idxWhse1In,
-    if (idxWhse2In != null) idxWhse2In,
-    if (idxWhse1Out != null) idxWhse1Out,
-    if (idxWhse2Out != null) idxWhse2Out,
-    if (idxWhse1Soon != null) idxWhse1Soon,
-    if (idxWhse2Soon != null) idxWhse2Soon,
+    if (warehouseViaAvailabilityColumns) ...[
+      idxWhse1Availability,
+      idxWhse2Availability,
+    ] else ...[
+      if (idxWhse1In != null) idxWhse1In,
+      if (idxWhse2In != null) idxWhse2In,
+      if (idxWhse1Out != null) idxWhse1Out,
+      if (idxWhse2Out != null) idxWhse2Out,
+      if (idxWhse1Soon != null) idxWhse1Soon,
+      if (idxWhse2Soon != null) idxWhse2Soon,
+    ],
   ].reduce((a, b) => a > b ? a : b);
 
   final Map<String, Product> newProductsByUpc = {};
@@ -669,24 +719,49 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
       final isNewRelease = idxNewRelease == null
           ? false
           : _piParseYesFlag(_piProductCell(row, idxNewRelease).trim());
-      final whse1InStock = idxWhse1In == null
-          ? false
-          : _piParseYesFlag(_piProductCell(row, idxWhse1In).trim());
-      final whse2InStock = idxWhse2In == null
-          ? false
-          : _piParseYesFlag(_piProductCell(row, idxWhse2In).trim());
-      final whse1OutOfStock = idxWhse1Out == null
-          ? false
-          : _piParseYesFlag(_piProductCell(row, idxWhse1Out).trim());
-      final whse2OutOfStock = idxWhse2Out == null
-          ? false
-          : _piParseYesFlag(_piProductCell(row, idxWhse2Out).trim());
-      final whse1ComingSoon = idxWhse1Soon == null
-          ? false
-          : _piParseYesFlag(_piProductCell(row, idxWhse1Soon).trim());
-      final whse2ComingSoon = idxWhse2Soon == null
-          ? false
-          : _piParseYesFlag(_piProductCell(row, idxWhse2Soon).trim());
+      late final bool whse1InStock;
+      late final bool whse2InStock;
+      late final bool whse1OutOfStock;
+      late final bool whse2OutOfStock;
+      late final bool whse1ComingSoon;
+      late final bool whse2ComingSoon;
+      late final String whse1AvailabilityDisplay;
+      late final String whse2AvailabilityDisplay;
+      if (warehouseViaAvailabilityColumns) {
+        final rawW1 = _piProductCell(row, idxWhse1Availability);
+        final rawW2 = _piProductCell(row, idxWhse2Availability);
+        whse1AvailabilityDisplay = rawW1.trim();
+        whse2AvailabilityDisplay = rawW2.trim();
+        final w1 = _piParseWarehouseAvailabilityTriState(rawW1);
+        whse1InStock = w1.inStock;
+        whse1OutOfStock = w1.outOfStock;
+        whse1ComingSoon = w1.comingSoon;
+        final w2 = _piParseWarehouseAvailabilityTriState(rawW2);
+        whse2InStock = w2.inStock;
+        whse2OutOfStock = w2.outOfStock;
+        whse2ComingSoon = w2.comingSoon;
+      } else {
+        whse1AvailabilityDisplay = '';
+        whse2AvailabilityDisplay = '';
+        whse1InStock = idxWhse1In == null
+            ? false
+            : _piParseYesFlag(_piProductCell(row, idxWhse1In).trim());
+        whse2InStock = idxWhse2In == null
+            ? false
+            : _piParseYesFlag(_piProductCell(row, idxWhse2In).trim());
+        whse1OutOfStock = idxWhse1Out == null
+            ? false
+            : _piParseYesFlag(_piProductCell(row, idxWhse1Out).trim());
+        whse2OutOfStock = idxWhse2Out == null
+            ? false
+            : _piParseYesFlag(_piProductCell(row, idxWhse2Out).trim());
+        whse1ComingSoon = idxWhse1Soon == null
+            ? false
+            : _piParseYesFlag(_piProductCell(row, idxWhse1Soon).trim());
+        whse2ComingSoon = idxWhse2Soon == null
+            ? false
+            : _piParseYesFlag(_piProductCell(row, idxWhse2Soon).trim());
+      }
       if (discountEligible) discountEligibleCount++;
       final productType = _piProductCell(row, idxProductType).trim();
       final category = _piProductCell(row, idxCategory).trim();
@@ -723,6 +798,8 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
         whse2OutOfStock: whse2OutOfStock,
         whse1ComingSoon: whse1ComingSoon,
         whse2ComingSoon: whse2ComingSoon,
+        whse1AvailabilityDisplay: whse1AvailabilityDisplay,
+        whse2AvailabilityDisplay: whse2AvailabilityDisplay,
       );
 
       if (newProductsByUpc.containsKey(upcLookup)) {
@@ -1028,6 +1105,8 @@ _CustomersCsvIsolateResult _parseCustomersCatalogCsvIsolate(String rawCsv) {
 }
 
 String _availabilityLabelForWhse1(Product product) {
+  final display = product.whse1AvailabilityDisplay.trim();
+  if (display.isNotEmpty) return display;
   if (product.whse1InStock) return 'In Stock';
   if (product.whse1OutOfStock) return 'Out of Stock';
   if (product.whse1ComingSoon) return 'Coming Soon';
@@ -1035,6 +1114,8 @@ String _availabilityLabelForWhse1(Product product) {
 }
 
 String _availabilityLabelForWhse2(Product product) {
+  final display = product.whse2AvailabilityDisplay.trim();
+  if (display.isNotEmpty) return display;
   if (product.whse2InStock) return 'In Stock';
   if (product.whse2OutOfStock) return 'Out of Stock';
   if (product.whse2ComingSoon) return 'Coming Soon';
@@ -14322,28 +14403,43 @@ Widget _warehouseAvailabilityLinesWidget(
 }) {
   final textTheme = Theme.of(context).textTheme;
   final style = textTheme.bodySmall?.copyWith(height: 1.15);
+  final effectiveStyle = style ?? textTheme.bodySmall ?? const TextStyle();
   final cross = textAlign == TextAlign.center
       ? CrossAxisAlignment.center
       : CrossAxisAlignment.start;
+
+  Widget availabilityLine(String label, String value) {
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: label,
+            style: effectiveStyle.copyWith(fontWeight: FontWeight.w700),
+          ),
+          TextSpan(
+            text: value,
+            style: effectiveStyle.copyWith(fontWeight: FontWeight.w400),
+          ),
+        ],
+      ),
+      textAlign: textAlign,
+      softWrap: true,
+    );
+  }
+
   return Padding(
     padding: padding,
     child: Column(
       crossAxisAlignment: cross,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'Availability Whse 1: ${_availabilityLabelForWhse1(product)}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: textAlign,
-          style: style,
+        availabilityLine(
+          'Availability Whse 1: ',
+          _availabilityLabelForWhse1(product),
         ),
-        Text(
-          'Availability Whse 2: ${_availabilityLabelForWhse2(product)}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: textAlign,
-          style: style,
+        availabilityLine(
+          'Availability Whse 2: ',
+          _availabilityLabelForWhse2(product),
         ),
       ],
     ),
