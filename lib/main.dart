@@ -3547,7 +3547,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     final now = DateTime.now();
-    if (_lastScannerFocusRequestTime != null &&
+    // Cooldown is only for redundant pulses when the scanner already holds focus.
+    // When unfocused, parallel startup (init + product load) can call within a few
+    // ms; throttling those drops real reclaim attempts and wedge scanners never bind.
+    if (_scannerFocusNode.hasFocus &&
+        _lastScannerFocusRequestTime != null &&
         now.difference(_lastScannerFocusRequestTime!).inMilliseconds <
             _scannerFocusRequestCooldownMs) {
       debugPrint(
@@ -3613,6 +3617,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } finally {
       _scannerFocusReclaimInFlight = false;
     }
+  }
+
+  /// After catalog data is ready, reclaim scanner focus once the frame has built
+  /// the hidden [TextField] (avoids requestFocus racing a [setState] layout).
+  void _requestScannerFocusAfterCatalogReady() {
+    _requestScannerFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _requestScannerFocus();
+    });
   }
 
   /// Scanner-only focus recovery used after scan processing paths where
@@ -6377,7 +6391,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _readyToScan = true;
           _status = 'Ready to scan';
         });
-        _requestScannerFocus();
+        _requestScannerFocusAfterCatalogReady();
       }
       return;
     }
@@ -6411,7 +6425,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _status = 'Ready to scan';
       });
 
-      _requestScannerFocus();
+      _requestScannerFocusAfterCatalogReady();
     } catch (e, st) {
       debugPrint('[Products] Error loading built-in products.csv: $e');
       debugPrint('[Products] Stack: $st');
@@ -7395,6 +7409,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _logScanPerfStep(sampleId, 'scan processing started');
       }
       final raw = value.trim();
+      debugPrint('[ScanLookup] input=<$raw>');
       final upc = digitsOnly(raw);
 
       if (raw.isEmpty || upc.isEmpty) {
@@ -7557,6 +7572,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Otherwise [_scanInputDebounceMs] idle debounce coalesces keystrokes for
   /// scanners that do not send a suffix.
   void _onScannerChanged(String value) {
+    debugPrint('[ScannerInput] raw=<$value>');
     if (_manualEntryFocusTraceActive) {
       debugPrint(
         '[ScannerInput] onChanged (trace active): value="$value" scannerHasFocus=${_scannerFocusNode.hasFocus} '
@@ -7617,6 +7633,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     // Capture-and-clear at commit time so queued processing cannot erase
     // in-flight input from the next physical scan.
     _scannerController.clear();
+    debugPrint('[ScannerInput] committed=<$cleaned>');
     final int sampleId = _startScanPerfSample(cleaned);
     _currentScanSampleId = sampleId;
     _logScanPerfStep(sampleId, 'barcode text fully received ($trigger)');
