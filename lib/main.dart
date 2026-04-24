@@ -1425,6 +1425,56 @@ class OrderImportPrepareOutcome {
 
 String _orderImportNormalizeItemKey(String value) => value.trim().toUpperCase();
 
+bool _orderImportIsExcelFileName(String fileName) {
+  final ext = p.extension(fileName).toLowerCase();
+  return ext == '.xlsx' || ext == '.xls';
+}
+
+String _orderImportExcelCellAsText(dynamic cell) {
+  if (cell == null) return '';
+  final dynamic value = cell.value;
+  if (value == null) return '';
+  if (value is xlsx.TextCellValue) return value.value.toString().trim();
+  if (value is xlsx.IntCellValue) return value.value.toString();
+  if (value is xlsx.DoubleCellValue) return value.value.toString();
+  if (value is xlsx.BoolCellValue) return value.value ? 'TRUE' : 'FALSE';
+  final dynamic maybeValue = value.value;
+  if (maybeValue != null) return maybeValue.toString().trim();
+  return value.toString().trim();
+}
+
+OrderImportCsvParseOutcome parseOrderImportExcelBytes(
+  List<int> bytes, {
+  required String sourceLabel,
+}) {
+  if (bytes.isEmpty) {
+    throw FormatException('Excel file is empty.');
+  }
+  final workbook = xlsx.Excel.decodeBytes(bytes);
+  if (workbook.tables.isEmpty) {
+    throw FormatException('Excel file has no worksheets.');
+  }
+  final defaultSheet = workbook.getDefaultSheet();
+  final sheetName = (defaultSheet != null && workbook.tables[defaultSheet] != null)
+      ? defaultSheet
+      : workbook.tables.keys.first;
+  final sheet = workbook.tables[sheetName];
+  if (sheet == null) {
+    throw FormatException('Unable to read worksheet from "$sourceLabel".');
+  }
+  if (sheet.rows.length < 2) {
+    throw FormatException('Excel has no data rows (only a header).');
+  }
+
+  final csvRows = <List<String>>[];
+  for (final row in sheet.rows) {
+    csvRows.add(row.map(_orderImportExcelCellAsText).toList(growable: false));
+  }
+
+  final csvLikeText = const ListToCsvConverter().convert(csvRows);
+  return parseOrderImportCsv(csvLikeText);
+}
+
 String _orderImportNormalizedImportHeaderLabel(String s) {
   return s.trim().toLowerCase().replaceAll(RegExp(r'[\s\-]+'), '');
 }
@@ -5739,10 +5789,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Resolves catalog products per CSV row, applies file-side MOQ rounding, and
   /// tags lines that already exist on the order (import merge identity).
-  OrderImportPrepareOutcome _prepareOrderImportLines(
+  Future<OrderImportPrepareOutcome> _prepareOrderImportLines(
     List<OrderImportCsvRow> rows, {
     required int totalRowsProcessed,
-  }) {
+  }) async {
+    const int matchBatchSize = 250;
+    const int progressLogInterval = 1000;
     var csvMoqAdjustedRows = 0;
     final skippedRows = <OrderImportSkippedRow>[];
 
@@ -5752,7 +5804,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     ];
 
     final lines = <OrderImportPreparedLine>[];
-    for (final r in rows) {
+    for (var i = 0; i < rows.length; i++) {
+      final r = rows[i];
       final item = r.item;
       final rowQuantity = r.quantity;
       final product = matchOrderImportProduct(
@@ -5799,6 +5852,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         product,
         importedQty,
       );
+
+      final processed = i + 1;
+      if (processed % progressLogInterval == 0) {
+        debugPrint('[ImportOrder] match progress: $processed/${rows.length}');
+      }
+      if (processed % matchBatchSize == 0) {
+        // Yield to keep the UI responsive during large imports.
+        await Future<void>.delayed(Duration.zero);
+      }
     }
     return OrderImportPrepareOutcome(
       lines: lines,
@@ -6163,14 +6225,39 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _orderImportRouteTraceKeys.clear();
     _orderImportTouchedQuoteIds.clear();
     try {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Select Order File'),
+          content: const Text(
+            'Please choose your file from:\nOneDrive → Import folder',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+
       _editDialogOpen = true;
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['csv'],
+        allowedExtensions: ['csv', 'xlsx', 'xls'],
         withData: true,
         allowMultiple: true,
       );
       _editDialogOpen = false;
+      debugPrint(
+        '[ImportOrder] picker returned '
+        '${result == null ? 'cancel' : '${result.files.length} file(s)'}',
+      );
 
       if (result == null || result.files.isEmpty) {
         return;
@@ -6181,24 +6268,33 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final contributingFileNames = <String>[];
 
       for (final file in result.files) {
-        String? raw;
-        if (file.bytes != null) {
-          raw = utf8.decode(file.bytes!);
-        } else if (file.path != null) {
-          raw = await File(file.path!).readAsString();
+        debugPrint('[ImportOrder] file name: ${file.name}');
+        debugPrint('[ImportOrder] path: ${file.path ?? '(none)'}');
+        debugPrint(
+          '[ImportOrder] bytes length: ${file.bytes?.length ?? 0}',
+        );
+
+        final ext = p.extension(file.name).toLowerCase();
+        final isExcel = _orderImportIsExcelFileName(file.name);
+        List<int>? fileBytes = file.bytes;
+        if (fileBytes == null && file.path != null && file.path!.isNotEmpty) {
+          fileBytes = await File(file.path!).readAsBytes();
         }
 
-        if (raw == null || raw.trim().isEmpty) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Skipped empty file: ${file.name}')),
-            );
-          }
-          continue;
+        if (fileBytes == null) {
+          throw FormatException(
+            'Could not read "${file.name}". The file provider returned no path '
+            'and no bytes. Try downloading it locally and import again.',
+          );
         }
+        debugPrint('[ImportOrder] raw length: ${fileBytes.length}');
 
         try {
-          final outcome = parseOrderImportCsv(raw);
+          debugPrint('[ImportOrder] parse starting');
+          final outcome = isExcel
+              ? parseOrderImportExcelBytes(fileBytes, sourceLabel: file.name)
+              : parseOrderImportCsv(utf8.decode(fileBytes, allowMalformed: true));
+          debugPrint('[ImportOrder] parse complete: rows=${outcome.rows.length}');
           combinedRows.addAll(outcome.rows);
           allParseSkipped.addAll(outcome.skippedRows);
           contributingFileNames.add(file.name);
@@ -6206,8 +6302,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           if (!mounted) return;
           ScaffoldMessenger.of(
             context,
-          ).showSnackBar(SnackBar(content: Text('${file.name}: ${e.message}')));
+          ).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${file.name}: ${e.message} '
+                '(detected type: ${ext.isEmpty ? 'unknown' : ext})',
+              ),
+            ),
+          );
           return;
+        } catch (e) {
+          debugPrint('[ImportOrder] import failed: $e');
+          rethrow;
         }
       }
 
@@ -6249,8 +6355,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ? 'imp_${DateTime.now().millisecondsSinceEpoch}'
           : null;
       _quoteImportLoggedBucketKeys.clear();
+      debugPrint('[ImportOrder] import started');
       final totalRowsProcessed = combinedRows.length + allParseSkipped.length;
-      final prepare = _prepareOrderImportLines(
+      debugPrint('[ImportOrder] match starting');
+      final prepare = await _prepareOrderImportLines(
         combinedRows,
         totalRowsProcessed: totalRowsProcessed,
       );
@@ -6276,10 +6384,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         prepare: prepare,
         duplicateChoices: dupChoices,
       );
+      debugPrint('[ImportOrder] match complete');
       if (applyOutcome == null) {
         return;
       }
+      debugPrint('[ImportOrder] quote save starting');
       await _saveQuote();
+      debugPrint('[ImportOrder] quote save complete');
       await _pruneSupersededEmptyDuplicateQuotesForCustomer(_selectedCustomer!);
       await _syncOrderImportTouchedQuotesInActiveIndex();
       await _debugLogImportApplyQuoteSnapshot(
@@ -6339,13 +6450,21 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         notImportedRowCount: skippedRows.length,
         itemsNotImportedCsvFile: skippedCsvFile,
       );
+      debugPrint('[ImportOrder] import success');
     } catch (e, st) {
       _editDialogOpen = false;
+      debugPrint('[ImportOrder] import failed: $e');
       debugPrint('[OrderImport] failed: $e\n$st');
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Import failed: $e')));
+      ).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Import failed: ${e is FormatException ? e.message : e.toString()}',
+          ),
+        ),
+      );
     } finally {
       _quoteImportDebugSession = null;
       _quoteImportLoggedBucketKeys.clear();
@@ -15542,18 +15661,24 @@ class _OrderListTab extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
+          Text(
+            'Order files: OneDrive → Import folder',
+            style: Theme.of(context).textTheme.bodySmall,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 4),
           FilledButton.icon(
             style: _orderTabActionButtonStyle,
             onPressed: loadingProducts ? null : () => onImportOrder(),
             icon: const Icon(Icons.file_upload_outlined),
-            label: const Text('Import Order'),
+            label: const Text('Import Order (OneDrive → Import folder)'),
           ),
           const SizedBox(height: 4),
           FilledButton.icon(
             style: _orderTabActionButtonStyle,
             onPressed: loadingProducts ? null : () => onExportAllQuotes(),
             icon: const Icon(Icons.file_download_outlined),
-            label: const Text('Export All Quotes'),
+            label: const Text('Export Order (Saved to OneDrive / Share)'),
           ),
           const SizedBox(height: 4),
           FilledButton.icon(
@@ -15640,6 +15765,18 @@ class _SetupTab extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Select files from Downloads folder',
+            style: Theme.of(context).textTheme.bodySmall,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            'These are local working files (Downloads)',
+            style: Theme.of(context).textTheme.bodySmall,
+            textAlign: TextAlign.center,
           ),
           const SizedBox(height: 12),
           FilledButton.tonal(
