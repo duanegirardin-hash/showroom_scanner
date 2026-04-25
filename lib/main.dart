@@ -1629,7 +1629,9 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
 Product? matchOrderImportProduct(
   String itemLabel,
   Map<String, Product> productsByItemNumber,
-  Map<String, Product> productsByUpc,
+  Map<String, Product> productsByUpc, {
+  List<int>? numericItemFallbackWidths,
+}
 ) {
   final itemKey = _orderImportNormalizeItemKey(itemLabel);
   if (itemKey.isEmpty) return null;
@@ -1640,15 +1642,18 @@ Product? matchOrderImportProduct(
   final isNumericItemLabel = RegExp(r'^\d+$').hasMatch(itemKey);
   if (isNumericItemLabel) {
     final candidateWidths =
-        productsByItemNumber.keys
-            .where(
-              (k) => k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
-            )
-            .map((k) => k.length)
-            .toSet()
-            .toList()
-          ..sort();
+        numericItemFallbackWidths ??
+        (productsByItemNumber.keys
+              .where(
+                (k) =>
+                    k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
+              )
+              .map((k) => k.length)
+              .toSet()
+              .toList()
+          ..sort());
     for (final width in candidateWidths) {
+      if (width <= itemKey.length) continue;
       final padded = itemKey.padLeft(width, '0');
       final byPaddedItem = productsByItemNumber[padded];
       if (byPaddedItem != null) {
@@ -3567,6 +3572,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   void _requestScannerFocus() {
     if (_suspendScannerFocusRecovery) return;
+    if (!mounted) return;
 
     final primary = FocusManager.instance.primaryFocus;
     final scannerAlreadyFocused = _scannerFocusNode.hasFocus;
@@ -3623,6 +3629,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         );
       }
 
+      if (!mounted) return;
       FocusScope.of(context).requestFocus(_scannerFocusNode);
 
       if (_suspendScannerFocusRecovery) return;
@@ -3633,6 +3640,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         () {
           _scannerFocusRetryTimer = null;
           if (_suspendScannerFocusRecovery) return;
+          if (!mounted) return;
           if (!_shouldReclaimScannerFocus()) return;
           if (!_scannerFocusNode.hasFocus) {
             debugPrint('[ScannerFocus] reclaim retry (still unfocused)');
@@ -5701,55 +5709,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  /// Sum of quantities on [lines] that match [product] under import-merge rules.
-  /// Returns null when no matching line exists (treat as new import line).
-  int? _sumExistingQtyOnLinesForImportMerge(
-    Product product,
-    List<OrderLine> lines,
-  ) {
-    var sum = 0;
-    var any = false;
-    for (final line in lines) {
-      if (_productsMatchForOrderImportMerge(line.product, product)) {
-        sum += line.quantity;
-        any = true;
-      }
-    }
-    return any ? sum : null;
-  }
-
-  /// Same merge behavior as [_mergeImportedProductIntoOrder], for a throwaway
-  /// line list used while preparing an import batch (same-batch duplicate detection).
-  void _mergeImportedProductIntoOrderLinesSnapshot(
-    List<OrderLine> lines,
-    Product product,
-    int addQty,
-  ) {
-    final matching = <OrderLine>[];
-    for (final line in lines) {
-      if (_productsMatchForOrderImportMerge(line.product, product)) {
-        matching.add(line);
-      }
-    }
-
-    if (matching.isEmpty) {
-      lines.insert(0, OrderLine(product: product, quantity: addQty, scans: 1));
-      return;
-    }
-
-    final primary = matching.first;
-    var qtyToAdd = addQty;
-    for (var i = 1; i < matching.length; i++) {
-      final dup = matching[i];
-      qtyToAdd += dup.quantity;
-      lines.remove(dup);
-    }
-    primary.quantity += qtyToAdd;
-    primary.scans += 1;
-    lines.remove(primary);
-    lines.insert(0, primary);
-  }
-
   /// Collapses all import-merge matches to a single primary line with [newQuantity].
   void _replaceImportMergedOrderLinesQuantity(
     Product product,
@@ -5798,10 +5757,56 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     var csvMoqAdjustedRows = 0;
     final skippedRows = <OrderImportSkippedRow>[];
 
-    final workingOrderLines = <OrderLine>[
-      for (final l in _orderLines)
-        OrderLine(product: l.product, quantity: l.quantity, scans: l.scans),
-    ];
+    String? normalizedUpcForImportMerge(String raw) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) return null;
+      final compact = trimmed.replaceAll(RegExp(r'\s+'), '');
+      final digits = digitsOnly(compact);
+      if (digits.isNotEmpty) {
+        if (RegExp(r'^0+$').hasMatch(digits)) return null;
+        return digits;
+      }
+      final upper = compact.toUpperCase();
+      if (upper.isEmpty) return null;
+      if (RegExp(r'^0+$').hasMatch(upper)) return null;
+      return upper;
+    }
+
+    String? normalizedItemForImportMerge(String raw) {
+      final n = normalizeItemNumber(raw);
+      return n.isEmpty ? null : n;
+    }
+
+    String canonicalUpcMergeKey(String upc) {
+      if (upc.length == 12 && upc.startsWith('0')) {
+        return upc.substring(1);
+      }
+      return upc;
+    }
+
+    final qtyByUpcMergeKey = <String, int>{};
+    final qtyByItemMergeKeyWithoutUpc = <String, int>{};
+    for (final line in _orderLines) {
+      final lineUpc = normalizedUpcForImportMerge(line.product.upc);
+      if (lineUpc != null) {
+        final key = canonicalUpcMergeKey(lineUpc);
+        qtyByUpcMergeKey[key] = (qtyByUpcMergeKey[key] ?? 0) + line.quantity;
+        continue;
+      }
+      final lineItem = normalizedItemForImportMerge(line.product.itemNumber);
+      if (lineItem != null) {
+        qtyByItemMergeKeyWithoutUpc[lineItem] =
+            (qtyByItemMergeKeyWithoutUpc[lineItem] ?? 0) + line.quantity;
+      }
+    }
+
+    final numericItemFallbackWidths =
+        _productsByItemNumber.keys
+            .where((k) => RegExp(r'^\d+$').hasMatch(k))
+            .map((k) => k.length)
+            .toSet()
+            .toList()
+          ..sort();
 
     final lines = <OrderImportPreparedLine>[];
     for (var i = 0; i < rows.length; i++) {
@@ -5812,6 +5817,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         item,
         _productsByItemNumber,
         _productsByUpc,
+        numericItemFallbackWidths: numericItemFallbackWidths,
       );
       if (product == null) {
         skippedRows.add(
@@ -5832,10 +5838,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (importedQty != rowQuantity) {
         csvMoqAdjustedRows++;
       }
-      final existingSum = _sumExistingQtyOnLinesForImportMerge(
-        product,
-        workingOrderLines,
-      );
+      int? existingSum;
+      final productUpc = normalizedUpcForImportMerge(product.upc);
+      if (productUpc != null) {
+        existingSum = qtyByUpcMergeKey[canonicalUpcMergeKey(productUpc)];
+      } else {
+        final productItem = normalizedItemForImportMerge(product.itemNumber);
+        if (productItem != null) {
+          existingSum = qtyByItemMergeKeyWithoutUpc[productItem];
+        }
+      }
       lines.add(
         OrderImportPreparedLine(
           displayItem: item,
@@ -5847,11 +5859,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           sourcePrice: r.price,
         ),
       );
-      _mergeImportedProductIntoOrderLinesSnapshot(
-        workingOrderLines,
-        product,
-        importedQty,
-      );
+      if (productUpc != null) {
+        final key = canonicalUpcMergeKey(productUpc);
+        qtyByUpcMergeKey[key] = (qtyByUpcMergeKey[key] ?? 0) + importedQty;
+      } else {
+        final productItem = normalizedItemForImportMerge(product.itemNumber);
+        if (productItem != null) {
+          qtyByItemMergeKeyWithoutUpc[productItem] =
+              (qtyByItemMergeKeyWithoutUpc[productItem] ?? 0) + importedQty;
+        }
+      }
 
       final processed = i + 1;
       if (processed % progressLogInterval == 0) {
@@ -7266,8 +7283,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       debugPrint(
         '[DependentsDiag] customer picker finally: dispose search, _editDialogOpen=false',
       );
-      searchController.dispose();
       _editDialogOpen = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        searchController.dispose();
+      });
     }
   }
 
@@ -7284,7 +7303,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     debugPrint(
       '[DependentsDiag] _showSelectCustomerDialog: before _requestScannerFocus()',
     );
-    _requestScannerFocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _requestScannerFocus();
+    });
     debugPrint(
       '[DependentsDiag] _showSelectCustomerDialog: after _requestScannerFocus()',
     );
