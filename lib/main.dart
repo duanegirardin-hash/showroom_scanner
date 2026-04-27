@@ -769,7 +769,9 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
       final minOrderQty = _piParseInt(_piProductCell(row, idxMinOrderQty));
       final caseQty = _piParseInt(_piProductCell(row, idxCaseQty));
 
-      if (itemNumber.isEmpty || upcLookup.isEmpty) {
+      // Item number is the required identity for catalog indexing.
+      // Blank UPC rows are still valid for item-number lookups.
+      if (itemNumber.isEmpty) {
         skippedMissingKeyRows++;
         continue;
       }
@@ -802,7 +804,7 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
         whse2AvailabilityDisplay: whse2AvailabilityDisplay,
       );
 
-      if (newProductsByUpc.containsKey(upcLookup)) {
+      if (upcLookup.isNotEmpty && newProductsByUpc.containsKey(upcLookup)) {
         duplicateUpcCount++;
         final existing = newProductsByUpc[upcLookup]!;
         debugPrint(
@@ -816,7 +818,9 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
         duplicateItemNumberCount++;
       }
 
-      newProductsByUpc[upcLookup] = product;
+      if (upcLookup.isNotEmpty) {
+        newProductsByUpc[upcLookup] = product;
+      }
       newProductsByItemNumber[itemNumber] = product;
       processedRows++;
     } catch (e) {
@@ -1277,6 +1281,7 @@ List<List<String>> orderExportCsvRows({
 /// Single usable data row after CSV parsing (header excluded).
 class OrderImportCsvRow {
   final String item;
+  final String upc;
   final int quantity;
 
   /// From an optional Description column when the import header names it.
@@ -1287,6 +1292,7 @@ class OrderImportCsvRow {
 
   const OrderImportCsvRow({
     required this.item,
+    this.upc = '',
     required this.quantity,
     this.description = '',
     this.price = '',
@@ -1408,6 +1414,7 @@ class OrderImportPreparedLine {
 class OrderImportPrepareOutcome {
   final List<OrderImportPreparedLine> lines;
   final List<OrderImportSkippedRow> skippedRows;
+  final List<OrderImportItemsWithoutUpcRow> itemsWithoutUpcRows;
 
   /// Rows where grouped CSV quantity differed from MOQ-rounded import quantity.
   final int csvMoqAdjustedRows;
@@ -1418,8 +1425,31 @@ class OrderImportPrepareOutcome {
   const OrderImportPrepareOutcome({
     required this.lines,
     required this.skippedRows,
+    required this.itemsWithoutUpcRows,
     required this.csvMoqAdjustedRows,
     required this.totalRowsProcessed,
+  });
+}
+
+class OrderImportItemsWithoutUpcRow {
+  final String itemNumber;
+  final int quantity;
+  final String originalUpc;
+  final String resolutionStatus;
+  final String description;
+  final String price;
+  final String minimumOrderQuantity;
+  final String caseQuantity;
+
+  const OrderImportItemsWithoutUpcRow({
+    required this.itemNumber,
+    required this.quantity,
+    required this.originalUpc,
+    required this.resolutionStatus,
+    this.description = '',
+    this.price = '',
+    this.minimumOrderQuantity = '',
+    this.caseQuantity = '',
   });
 }
 
@@ -1511,6 +1541,43 @@ _orderImportOptionalDescriptionPriceColumns(List<dynamic> headerRow) {
   return (descriptionCol: descriptionCol, priceCol: priceCol);
 }
 
+({int itemCol, int qtyCol, int? upcCol}) _orderImportCoreColumns(
+  List<dynamic> headerRow,
+) {
+  int? itemCol;
+  int? qtyCol;
+  int? upcCol;
+  for (var i = 0; i < headerRow.length; i++) {
+    final nk = _orderImportNormalizedImportHeaderLabel(headerRow[i].toString());
+    if (nk.isEmpty) continue;
+    if (itemCol == null &&
+        (nk == 'item' ||
+            nk == 'itemnumber' ||
+            nk == 'itemno' ||
+            nk == 'item#' ||
+            nk == 'sku')) {
+      itemCol = i;
+    }
+    if (qtyCol == null &&
+        (nk == 'quantity' ||
+            nk == 'qty' ||
+            nk == 'qtyordered' ||
+            nk == 'orderqty' ||
+            nk == 'orderedqty')) {
+      qtyCol = i;
+    }
+    if (upcCol == null &&
+        (nk == 'upc' ||
+            nk == 'upccode' ||
+            nk == 'upcnumber' ||
+            nk == 'barcode' ||
+            nk == 'ean')) {
+      upcCol = i;
+    }
+  }
+  return (itemCol: itemCol ?? 0, qtyCol: qtyCol ?? 1, upcCol: upcCol);
+}
+
 String _orderImportNormalizeUpcLookupKey(String value) {
   final trimmed = value.trim();
   final digits = trimmed.replaceAll(RegExp(r'[^0-9]'), '').trim();
@@ -1539,6 +1606,7 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
 
   final list = <OrderImportCsvRow>[];
   final skippedRows = <OrderImportSkippedRow>[];
+  final (:itemCol, :qtyCol, :upcCol) = _orderImportCoreColumns(rows[0]);
   final (:descriptionCol, :priceCol) =
       _orderImportOptionalDescriptionPriceColumns(rows[0]);
 
@@ -1564,8 +1632,9 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
       );
       continue;
     }
-    if (row.length < 2) {
-      final itemOnly = row[0].toString().trim();
+    if (row.length <= qtyCol) {
+      final itemOnly =
+          (itemCol < row.length ? row[itemCol].toString().trim() : '');
       skippedRows.add(
         OrderImportSkippedRow(
           item: itemOnly,
@@ -1577,11 +1646,14 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
       );
       continue;
     }
-    final item = row[0].toString().trim();
-    final qtyStr = row[1].toString().trim();
+    final item = itemCol < row.length ? row[itemCol].toString().trim() : '';
+    final upc = upcCol != null && upcCol < row.length
+        ? row[upcCol].toString().trim()
+        : '';
+    final qtyStr = row[qtyCol].toString().trim();
     final rowDescription = _orderImportOptionalCsvCell(row, descriptionCol);
     final rowPrice = _orderImportOptionalCsvCell(row, priceCol);
-    if (item.isEmpty) {
+    if (item.isEmpty && upc.isEmpty) {
       skippedRows.add(
         OrderImportSkippedRow(
           item: '',
@@ -1609,6 +1681,7 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
     list.add(
       OrderImportCsvRow(
         item: item,
+        upc: upc,
         quantity: qty,
         description: rowDescription,
         price: rowPrice,
@@ -1625,19 +1698,48 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
   return OrderImportCsvParseOutcome(rows: list, skippedRows: skippedRows);
 }
 
-/// Match import label to catalog: [Product.itemNumber] first, then [Product.upc].
+/// Match import row to catalog: UPC first (when present), then item number.
 Product? matchOrderImportProduct(
   String itemLabel,
   Map<String, Product> productsByItemNumber,
   Map<String, Product> productsByUpc, {
+  String upcLabel = '',
   List<int>? numericItemFallbackWidths,
 }
 ) {
+  Product? lookupByUpcRaw(String raw) {
+    final upc = _orderImportNormalizeUpcLookupKey(raw);
+    if (upc.isEmpty) return null;
+    Product? product = productsByUpc[upc];
+    if (product == null && upc.length == 12 && upc.startsWith('0')) {
+      product = productsByUpc[upc.substring(1)];
+    }
+    if (product == null && upc.length == 11) {
+      product = productsByUpc['0$upc'];
+    }
+    return product;
+  }
+
+  final explicitUpc = upcLabel.trim();
+  if (explicitUpc.isNotEmpty) {
+    final byExplicitUpc = lookupByUpcRaw(explicitUpc);
+    if (byExplicitUpc != null) return byExplicitUpc;
+  } else {
+    // Legacy import formats often place UPC in the first identifier column.
+    final byLegacyInlineUpc = lookupByUpcRaw(itemLabel);
+    if (byLegacyInlineUpc != null) return byLegacyInlineUpc;
+  }
+
   final itemKey = _orderImportNormalizeItemKey(itemLabel);
   if (itemKey.isEmpty) return null;
 
   final byItem = productsByItemNumber[itemKey];
-  if (byItem != null) return byItem;
+  if (byItem != null) {
+    debugPrint(
+      '[ImportOrderMatch] matched product item=${byItem.itemNumber} upc=${byItem.upc}',
+    );
+    return byItem;
+  }
 
   final isNumericItemLabel = RegExp(r'^\d+$').hasMatch(itemKey);
   if (isNumericItemLabel) {
@@ -1658,24 +1760,16 @@ Product? matchOrderImportProduct(
       final byPaddedItem = productsByItemNumber[padded];
       if (byPaddedItem != null) {
         debugPrint(
+          '[ImportOrderMatch] matched product item=${byPaddedItem.itemNumber} upc=${byPaddedItem.upc}',
+        );
+        debugPrint(
           '[ImportMatch] item-number leading-zero fallback matched "$itemKey" -> "$padded"',
         );
         return byPaddedItem;
       }
     }
   }
-
-  final upc = _orderImportNormalizeUpcLookupKey(itemLabel);
-  if (upc.isEmpty) return null;
-
-  Product? product = productsByUpc[upc];
-  if (product == null && upc.length == 12 && upc.startsWith('0')) {
-    product = productsByUpc[upc.substring(1)];
-  }
-  if (product == null && upc.length == 11) {
-    product = productsByUpc['0$upc'];
-  }
-  return product;
+  return null;
 }
 
 Future<File> saveOrderExportCsv({
@@ -2996,6 +3090,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// [Export All Quotes] appends this file to the share payload when the export customer id matches.
   String? _lastItemsNotImportedCsvPath;
   String? _lastItemsNotImportedCsvCustomerId;
+  String? _lastItemsNotImportedCsvCustomerName;
+  List<OrderImportSkippedRow> _lastItemsNotImportedRows = const [];
+  String? _lastItemsNotImportedRowsCustomerId;
+  String? _lastItemsNotImportedRowsCustomerName;
+  List<OrderImportItemsWithoutUpcRow> _lastItemsWithoutUpcRows = const [];
+  String? _lastItemsWithoutUpcRowsCustomerId;
+  String? _lastItemsWithoutUpcRowsCustomerName;
 
   /// When non-null, [_ensureRoutingForProduct] logs each bucket once per CSV import session.
   String? _quoteImportDebugSession;
@@ -5088,6 +5189,135 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return '"${value.replaceAll('"', '""')}"';
   }
 
+  String _csvPreserveLeadingZerosCell(String rawValue) {
+    final trimmed = rawValue.trim();
+    if (trimmed.isEmpty) return '';
+    // Excel/Sheets: force text so values like 00123 stay zero-padded.
+    return '="$trimmed"';
+  }
+
+  Product _productForExportedQuoteLine(Map<String, dynamic> lineMap) {
+    final upc = (lineMap['upc'] as String?)?.trim() ?? '';
+    final itemNumber = (lineMap['itemNumber'] as String?)?.trim() ?? '';
+    final description = (lineMap['description'] as String?)?.trim() ?? '';
+    final price = (lineMap['price'] as num?)?.toDouble() ?? 0.0;
+    final productType = (lineMap['productType'] as String?)?.trim() ?? '';
+    final discountRaw = (lineMap['discountRaw'] as String?)?.trim() ?? '';
+    final discountEligible = (lineMap['discountEligible'] as bool?) ?? false;
+    final netRaw = (lineMap['netRaw'] as String?)?.trim() ?? '';
+    final isNet = (lineMap['isNet'] as bool?) ?? _parseYesFlag(netRaw);
+    final psRaw = (lineMap['psRaw'] as String?)?.trim() ?? '';
+    final isPs = (lineMap['isPs'] as bool?) ?? _parseYesFlag(psRaw);
+    final isNewRelease = (lineMap['isNewRelease'] as bool?) ?? false;
+    final category = (lineMap['category'] as String?)?.trim() ?? '';
+    final subCategory = (lineMap['subCategory'] as String?)?.trim() ?? '';
+    final whse1InStock = (lineMap['whse1InStock'] as bool?) ?? false;
+    final whse2InStock = (lineMap['whse2InStock'] as bool?) ?? false;
+    final whse1OutOfStock = (lineMap['whse1OutOfStock'] as bool?) ?? false;
+    final whse2OutOfStock = (lineMap['whse2OutOfStock'] as bool?) ?? false;
+    final whse1ComingSoon = (lineMap['whse1ComingSoon'] as bool?) ?? false;
+    final whse2ComingSoon = (lineMap['whse2ComingSoon'] as bool?) ?? false;
+    final whse1AvailabilityDisplay =
+        (lineMap['whse1AvailabilityDisplay'] as String?)?.trim() ?? '';
+    final whse2AvailabilityDisplay =
+        (lineMap['whse2AvailabilityDisplay'] as String?)?.trim() ?? '';
+    final minOrderQty = _quantityFromJson(lineMap['minOrderQty']);
+    final caseQty = _quantityFromJson(lineMap['caseQty']);
+    final listPrice = (lineMap['listPrice'] as num?)?.toDouble() ?? 0.0;
+
+    Product? product = _productsByUpc[_normalizeUpcLookupKey(upc)];
+    if (product == null) {
+      // Keep export layout unchanged; only enrich missing product fields by
+      // resolving with the same normalized products.csv item key logic used
+      // elsewhere in import/export flows.
+      product = _lookupProductForNotImportedExportRow(
+        rawItemNumber: itemNumber,
+        rawUpc: upc,
+        includeUpcFallback: false,
+      );
+    }
+    if (product == null) {
+      final normalizedItem = normalizeItemNumber(itemNumber);
+      if (normalizedItem.isNotEmpty) {
+        product = _productsByItemNumber[normalizedItem];
+      }
+    }
+    if (product != null) return product;
+
+    return Product(
+      itemNumber: itemNumber.isEmpty ? upc : itemNumber,
+      description: description.isEmpty ? 'Unknown' : description,
+      upc: upc,
+      price: price,
+      listPrice: listPrice,
+      productType: productType,
+      discountRaw: discountRaw,
+      discountEligible: discountEligible,
+      netRaw: netRaw,
+      isNet: isNet,
+      psRaw: psRaw,
+      isPs: isPs,
+      isNewRelease: isNewRelease,
+      category: category,
+      subCategory: subCategory,
+      minOrderQty: minOrderQty <= 0 ? 1 : minOrderQty,
+      caseQty: caseQty <= 0 ? 1 : caseQty,
+      whse1InStock: whse1InStock,
+      whse2InStock: whse2InStock,
+      whse1OutOfStock: whse1OutOfStock,
+      whse2OutOfStock: whse2OutOfStock,
+      whse1ComingSoon: whse1ComingSoon,
+      whse2ComingSoon: whse2ComingSoon,
+      whse1AvailabilityDisplay: whse1AvailabilityDisplay,
+      whse2AvailabilityDisplay: whse2AvailabilityDisplay,
+    );
+  }
+
+  Product? _lookupProductForNotImportedExportRow({
+    required String rawItemNumber,
+    required String rawUpc,
+    bool includeUpcFallback = true,
+  }) {
+    final itemKey = _orderImportNormalizeItemKey(rawItemNumber);
+    if (itemKey.isNotEmpty) {
+      final byItem = _productsByItemNumber[itemKey];
+      if (byItem != null) return byItem;
+
+      final isNumericItemLabel = RegExp(r'^\d+$').hasMatch(itemKey);
+      if (isNumericItemLabel) {
+        final candidateWidths =
+            (_productsByItemNumber.keys
+                  .where(
+                    (k) =>
+                        k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
+                  )
+                  .map((k) => k.length)
+                  .toSet()
+                  .toList()
+                ..sort());
+        for (final width in candidateWidths) {
+          if (width <= itemKey.length) continue;
+          final padded = itemKey.padLeft(width, '0');
+          final byPaddedItem = _productsByItemNumber[padded];
+          if (byPaddedItem != null) return byPaddedItem;
+        }
+      }
+    }
+
+    if (!includeUpcFallback) return null;
+
+    final upcKey = _orderImportNormalizeUpcLookupKey(rawUpc);
+    if (upcKey.isEmpty) return null;
+    Product? byUpc = _productsByUpc[upcKey];
+    if (byUpc == null && upcKey.length == 12 && upcKey.startsWith('0')) {
+      byUpc = _productsByUpc[upcKey.substring(1)];
+    }
+    if (byUpc == null && upcKey.length == 11) {
+      byUpc = _productsByUpc['0$upcKey'];
+    }
+    return byUpc;
+  }
+
   String _orderImportNotImportedReasonForCsv(OrderImportSkippedRow r) {
     final reason = r.reason.trim();
     if (reason == 'Item not found') return 'Not found in product catalog';
@@ -5110,6 +5340,81 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return out.join('\n');
   }
 
+  Future<List<OrderImportSkippedRow>> _readNotImportedRowsFromCsvFile(
+    File csvFile,
+  ) async {
+    try {
+      final raw = await csvFile.readAsString();
+      final rows = const CsvToListConverter(
+        shouldParseNumbers: false,
+      ).convert(raw);
+      if (rows.isEmpty) return const [];
+      if (kDebugMode) {
+        final headerRow = rows.first;
+        debugPrint(
+          '[NotImportedDebug] source csv path=${csvFile.path} '
+          'headerColumns=${headerRow.length} '
+          'headerRaw=${headerRow.map((c) => c.toString()).join(' | ')}',
+        );
+      }
+      final out = <OrderImportSkippedRow>[];
+      for (var i = 1; i < rows.length; i++) {
+        final row = rows[i];
+        if (row.isEmpty) continue;
+        if (kDebugMode && i <= 10) {
+          debugPrint(
+            '[NotImportedDebug] parsed row#$i columnCount=${row.length} '
+            'rawColumns=${row.map((c) => c.toString()).join(' | ')}',
+          );
+        }
+        final item = row[0].toString().trim();
+        final reason = row.length > 1 ? row[1].toString().trim() : '';
+        if (item.isEmpty && reason.isEmpty) continue;
+        out.add(
+          OrderImportSkippedRow(
+            item: item,
+            quantity: '',
+            description: '',
+            price: '',
+            reason: reason,
+          ),
+        );
+      }
+      return out;
+    } catch (e) {
+      debugPrint('[ExportAll] failed parsing ITEMS_NOT_IMPORTED csv: $e');
+      return const [];
+    }
+  }
+
+  Future<List<OrderImportSkippedRow>> _resolveLastNotImportedRowsForCustomer(
+    Customer customer,
+  ) async {
+    final rowsCustomerMatch = _sameLogicalCustomerQuoteRows(
+      customerIdA: customer.id,
+      customerNameA: customer.displayName,
+      customerIdB: _lastItemsNotImportedRowsCustomerId ?? '',
+      customerNameB: _lastItemsNotImportedRowsCustomerName ?? '',
+    );
+    if (rowsCustomerMatch && _lastItemsNotImportedRows.isNotEmpty) {
+      return List<OrderImportSkippedRow>.from(_lastItemsNotImportedRows);
+    }
+    final csvCustomerMatch = _sameLogicalCustomerQuoteRows(
+      customerIdA: customer.id,
+      customerNameA: customer.displayName,
+      customerIdB: _lastItemsNotImportedCsvCustomerId ?? '',
+      customerNameB: _lastItemsNotImportedCsvCustomerName ?? '',
+    );
+    if (_lastItemsNotImportedCsvPath != null && csvCustomerMatch) {
+      final file = File(_lastItemsNotImportedCsvPath!);
+      if (await file.exists()) {
+        final parsed = await _readNotImportedRowsFromCsvFile(file);
+        if (parsed.isNotEmpty) return parsed;
+      }
+    }
+    return const [];
+  }
+
   Future<File> _writeItemsNotImportedCsv({
     required String customerDisplayName,
     required List<OrderImportSkippedRow> skippedRows,
@@ -5130,6 +5435,55 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       debugPrint('[ItemsNotImported] csv created: ${out.path}');
     }
     return out;
+  }
+
+  String _formatItemsWithoutUpcRowsCsv(
+    List<OrderImportItemsWithoutUpcRow> rows,
+  ) {
+    final out = <String>[
+      'Item Number,Quantity,Original UPC,Resolution Status,Description,Price,Minimum Order Quantity,Case Quantity',
+    ];
+    for (final r in rows) {
+      out.add(
+        '${_csvEscape(_csvPreserveLeadingZerosCell(r.itemNumber))},'
+        '${_csvEscape(r.quantity.toString())},'
+        '${_csvEscape(_csvPreserveLeadingZerosCell(r.originalUpc))},'
+        '${_csvEscape(r.resolutionStatus)},'
+        '${_csvEscape(r.description)},'
+        '${_csvEscape(r.price)},'
+        '${_csvEscape(r.minimumOrderQuantity)},'
+        '${_csvEscape(r.caseQuantity)}',
+      );
+    }
+    return out.join('\n');
+  }
+
+  Future<List<OrderImportItemsWithoutUpcRow>>
+  _resolveItemsWithoutUpcRowsForCustomer(Customer customer) async {
+    final rowsCustomerMatch = _sameLogicalCustomerQuoteRows(
+      customerIdA: customer.id,
+      customerNameA: customer.displayName,
+      customerIdB: _lastItemsWithoutUpcRowsCustomerId ?? '',
+      customerNameB: _lastItemsWithoutUpcRowsCustomerName ?? '',
+    );
+    if (!rowsCustomerMatch || _lastItemsWithoutUpcRows.isEmpty) {
+      return const [];
+    }
+    return List<OrderImportItemsWithoutUpcRow>.from(_lastItemsWithoutUpcRows);
+  }
+
+  Future<File> _writeItemsWithoutUpcCsv({
+    required String customerDisplayName,
+    required List<OrderImportItemsWithoutUpcRow> rows,
+  }) async {
+    const filename = 'items_without_UPC.csv';
+    final csvText = _formatItemsWithoutUpcRowsCsv(rows);
+    return exportOrderCsvToShowroomExportsLayout(
+      customerDisplayName: customerDisplayName,
+      filename: filename,
+      csvText: csvText,
+      persistExportDebugAction: 'items_without_UPC',
+    );
   }
 
   void _debugLogQuoteLifecycleExport(String message) {
@@ -5353,6 +5707,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final quotesDir = await _getQuotesDirectory();
       final exportedFiles = <File>[];
+      const allItemsFilename = 'All_Exported_Quote_Items.csv';
+      final allItemsRows = <String>[
+        'Import Status,Quote Number,Customer,PO Number,Quantity,Item Number,Description,UPC,List Price,Price,DISCOUNT,NET,PS,New Release,Whse 1 Availability,Whse 2 Availability,Product Type,Category,Sub-Category,Minimum Order Quantity,Case Quantity',
+      ];
+      var allItemsImportedRowCount = 0;
+      var allItemsNotImportedRowCount = 0;
       final skippedMissingOnDisk = <String>[];
       final exportedQuoteIds = <String>{};
       var movedToArchiveCount = 0;
@@ -5440,6 +5800,68 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             );
             continue;
           }
+          final quoteNameRaw = (quoteData['name'] as String?)?.trim() ?? '';
+          final quoteNumber = quoteNameRaw.isNotEmpty
+              ? quoteNameRaw
+              : info.name.trim();
+          final quoteCustomerMap = quoteData['customer'];
+          Customer quoteCustomer = customer;
+          var quoteCustomerName = customerName;
+          if (quoteCustomerMap is Map<String, dynamic>) {
+            try {
+              quoteCustomer = Customer.fromJson(
+                Map<String, dynamic>.from(quoteCustomerMap),
+              );
+              final n = quoteCustomer.displayName.trim();
+              if (n.isNotEmpty) quoteCustomerName = n;
+            } catch (_) {}
+          }
+          final poNumber = ((quoteData['poNumber'] as String?) ??
+                  (quoteData['po'] as String?) ??
+                  (quoteData['purchaseOrderNumber'] as String?) ??
+                  '')
+              .trim();
+          final quoteLines =
+              quoteData['lines'] as List<dynamic>? ??
+              quoteData['items'] as List<dynamic>? ??
+              const [];
+          for (final lineJson in quoteLines) {
+            if (lineJson is! Map) continue;
+            final lineMap = Map<String, dynamic>.from(lineJson);
+            final qty = _quantityFromJson(lineMap['quantity']);
+            final product = _productForExportedQuoteLine(lineMap);
+            final pricing = _applyPricingLogic(product, quoteCustomer);
+            debugPrint(
+              '[ExportAllQuotes] exporting item=${product.itemNumber} '
+              'description=${product.description} upc=${product.upc} '
+              'price=${pricing.price.toStringAsFixed(2)}',
+            );
+            final row = <String>[
+              _csvEscape('IMPORTED'),
+              _csvEscape(quoteNumber),
+              _csvEscape(quoteCustomerName),
+              _csvEscape(poNumber),
+              '$qty',
+              _csvEscape(_csvPreserveLeadingZerosCell(product.itemNumber)),
+              _csvEscape(product.description),
+              _csvEscape(_csvPreserveLeadingZerosCell(product.upc)),
+              _csvEscape(pricing.listPrice.toStringAsFixed(2)),
+              _csvEscape(pricing.price.toStringAsFixed(2)),
+              _csvEscape(pricing.discountCol),
+              _csvEscape(pricing.netCol),
+              _csvEscape(pricing.psCol),
+              _csvEscape(product.isNewRelease ? 'YES' : ''),
+              _csvEscape(_availabilityLabelForWhse1(product)),
+              _csvEscape(_availabilityLabelForWhse2(product)),
+              _csvEscape(product.productType),
+              _csvEscape(product.category),
+              _csvEscape(product.subCategory),
+              '${product.minOrderQty}',
+              '${product.caseQty}',
+            ];
+            allItemsRows.add(row.join(','));
+            allItemsImportedRowCount++;
+          }
           final csvText = _formatQuoteAsCsv(quoteData);
           final exportedOn = DateTime.now();
           final filename = _buildExportOrderCsvFilename(
@@ -5486,6 +5908,98 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
       }
 
+      final notImportedRows = await _resolveLastNotImportedRowsForCustomer(
+        customer,
+      );
+      final itemsWithoutUpcRows = await _resolveItemsWithoutUpcRowsForCustomer(
+        customer,
+      );
+      for (final r in notImportedRows) {
+        final itemRaw = r.item;
+        final qtyRaw = r.quantity.trim();
+        final normalizedItemKey = _piNormalizeItemNumber(
+          itemRaw.replaceAll(RegExp(r'[\r\n\t]'), '').trim(),
+        );
+        debugPrint('[NotImportedExport] raw item=$itemRaw');
+        debugPrint('[NotImportedExport] normalized key=$normalizedItemKey');
+        final matchedProduct = normalizedItemKey.isEmpty
+            ? null
+            : _productsByItemNumber[normalizedItemKey];
+        debugPrint(
+          '[NotImportedExport] item=$itemRaw key=$normalizedItemKey '
+          'found=${matchedProduct != null} desc=${matchedProduct?.description} '
+          'upc=${matchedProduct?.upc}',
+        );
+        final pricing = matchedProduct == null
+            ? null
+            : _applyPricingLogic(matchedProduct, customer);
+        final row = <String>[
+          _csvEscape('NOT IMPORTED'),
+          '',
+          _csvEscape(customerName),
+          '',
+          _csvEscape(qtyRaw),
+          _csvEscape(_csvPreserveLeadingZerosCell(itemRaw)),
+          _csvEscape(matchedProduct?.description ?? ''),
+          _csvEscape(
+            _csvPreserveLeadingZerosCell(matchedProduct?.upc.trim() ?? ''),
+          ),
+          _csvEscape(
+            pricing == null ? '' : pricing.listPrice.toStringAsFixed(2),
+          ),
+          _csvEscape(pricing == null ? '' : pricing.price.toStringAsFixed(2)),
+          _csvEscape(pricing?.discountCol ?? ''),
+          _csvEscape(pricing?.netCol ?? ''),
+          _csvEscape(pricing?.psCol ?? ''),
+          _csvEscape(matchedProduct?.isNewRelease == true ? 'YES' : ''),
+          _csvEscape(
+            matchedProduct == null ? '' : _availabilityLabelForWhse1(matchedProduct),
+          ),
+          _csvEscape(
+            matchedProduct == null ? '' : _availabilityLabelForWhse2(matchedProduct),
+          ),
+          _csvEscape(matchedProduct?.productType ?? ''),
+          _csvEscape(matchedProduct?.category ?? ''),
+          _csvEscape(matchedProduct?.subCategory ?? ''),
+          matchedProduct == null ? '' : '${matchedProduct.minOrderQty}',
+          matchedProduct == null ? '' : '${matchedProduct.caseQty}',
+        ];
+        allItemsRows.add(row.join(','));
+        allItemsNotImportedRowCount++;
+      }
+
+      if (itemsWithoutUpcRows.isNotEmpty) {
+        final itemsWithoutUpcFile = await _writeItemsWithoutUpcCsv(
+          customerDisplayName: customerName,
+          rows: itemsWithoutUpcRows,
+        );
+        if (kDebugMode) {
+          debugPrint(
+            '[ExportAll] items_without_UPC.csv rows=${itemsWithoutUpcRows.length}',
+          );
+        }
+        exportedFiles.add(itemsWithoutUpcFile);
+      }
+
+      if (allItemsRows.length > 1) {
+        final allItemsFile = await exportOrderCsvToShowroomExportsLayout(
+          customerDisplayName: customerName,
+          filename: allItemsFilename,
+          csvText: allItemsRows.join('\n'),
+          persistExportDebugAction: 'export_all_quotes_all_items',
+        );
+        debugPrint(
+          '[ExportAll] All_Exported_Quote_Items.csv rows: '
+          'IMPORTED=$allItemsImportedRowCount '
+          'NOT_IMPORTED=$allItemsNotImportedRowCount '
+          'TOTAL=${allItemsImportedRowCount + allItemsNotImportedRowCount}',
+        );
+        if (kDebugMode) {
+          debugPrint('[ExportAll] combined csv added: ${allItemsFile.path}');
+        }
+        exportedFiles.add(allItemsFile);
+      }
+
       if (mounted && movedToArchiveCount > 0) {
         setState(() {});
       }
@@ -5493,11 +6007,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final quoteCsvFilesExported = exportedFiles.length;
       if (exportedFiles.isNotEmpty &&
           _lastItemsNotImportedCsvPath != null &&
-          _lastItemsNotImportedCsvCustomerId == customer.id) {
+          _sameLogicalCustomerQuoteRows(
+            customerIdA: customer.id,
+            customerNameA: customer.displayName,
+            customerIdB: _lastItemsNotImportedCsvCustomerId ?? '',
+            customerNameB: _lastItemsNotImportedCsvCustomerName ?? '',
+          )) {
         final notImported = File(_lastItemsNotImportedCsvPath!);
         if (await notImported.exists()) {
           final base = p.basename(notImported.path);
-          if (base.startsWith('ITEMS_NOT_IMPORTED_') && base.endsWith('.csv')) {
+          if (base.startsWith('ITEMS_NOT_IMPORTED') && base.endsWith('.csv')) {
             final pathNorm = p.normalize(notImported.path);
             final already = exportedFiles.any(
               (f) => p.normalize(f.path) == pathNorm,
@@ -5756,6 +6275,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     const int progressLogInterval = 1000;
     var csvMoqAdjustedRows = 0;
     final skippedRows = <OrderImportSkippedRow>[];
+    final itemsWithoutUpcRows = <OrderImportItemsWithoutUpcRow>[];
 
     String? normalizedUpcForImportMerge(String raw) {
       final trimmed = raw.trim();
@@ -5782,6 +6302,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return upc.substring(1);
       }
       return upc;
+    }
+
+    Product? lookupByUpcOnly(String raw) {
+      final upc = _orderImportNormalizeUpcLookupKey(raw);
+      if (upc.isEmpty) return null;
+      Product? product = _productsByUpc[upc];
+      if (product == null && upc.length == 12 && upc.startsWith('0')) {
+        product = _productsByUpc[upc.substring(1)];
+      }
+      if (product == null && upc.length == 11) {
+        product = _productsByUpc['0$upc'];
+      }
+      return product;
     }
 
     final qtyByUpcMergeKey = <String, int>{};
@@ -5813,12 +6346,35 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final r = rows[i];
       final item = r.item;
       final rowQuantity = r.quantity;
+      final explicitUpc = r.upc.trim();
+      final hasExplicitUpc = explicitUpc.isNotEmpty;
+      final matchedByUpc = hasExplicitUpc ? lookupByUpcOnly(explicitUpc) : null;
       final product = matchOrderImportProduct(
         item,
         _productsByItemNumber,
         _productsByUpc,
+        upcLabel: r.upc,
         numericItemFallbackWidths: numericItemFallbackWidths,
       );
+      final shouldReportMissingOrFailedUpc =
+          !hasExplicitUpc || matchedByUpc == null;
+      if (shouldReportMissingOrFailedUpc) {
+        final resolved = product != null;
+        itemsWithoutUpcRows.add(
+          OrderImportItemsWithoutUpcRow(
+            itemNumber: item,
+            quantity: rowQuantity,
+            originalUpc: explicitUpc,
+            resolutionStatus: resolved
+                ? 'RESOLVED_BY_ITEM_NUMBER'
+                : 'NOT_FOUND',
+            description: resolved ? product.description : '',
+            price: resolved ? product.price.toStringAsFixed(2) : '',
+            minimumOrderQuantity: resolved ? '${product.minOrderQty}' : '',
+            caseQuantity: resolved ? '${product.caseQty}' : '',
+          ),
+        );
+      }
       if (product == null) {
         skippedRows.add(
           OrderImportSkippedRow(
@@ -5859,6 +6415,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           sourcePrice: r.price,
         ),
       );
+      debugPrint(
+        '[ImportOrderLine] creating matched line item=$item '
+        'productDescription=${product.description} productUpc=${product.upc}',
+      );
       if (productUpc != null) {
         final key = canonicalUpcMergeKey(productUpc);
         qtyByUpcMergeKey[key] = (qtyByUpcMergeKey[key] ?? 0) + importedQty;
@@ -5882,6 +6442,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return OrderImportPrepareOutcome(
       lines: lines,
       skippedRows: skippedRows,
+      itemsWithoutUpcRows: itemsWithoutUpcRows,
       csvMoqAdjustedRows: csvMoqAdjustedRows,
       totalRowsProcessed: totalRowsProcessed,
     );
@@ -6419,6 +6980,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ...allParseSkipped,
         ...applyOutcome.skippedRows,
       ];
+      _lastItemsWithoutUpcRows = List<OrderImportItemsWithoutUpcRow>.from(
+        prepare.itemsWithoutUpcRows,
+      );
+      _lastItemsWithoutUpcRowsCustomerId = _selectedCustomer!.id;
+      _lastItemsWithoutUpcRowsCustomerName = _selectedCustomer!.displayName;
       File? skippedCsvFile;
       if (skippedRows.isNotEmpty) {
         try {
@@ -6429,12 +6995,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           // Single tracked file per import cycle (export/share uses this only).
           _lastItemsNotImportedCsvPath = skippedCsvFile.path;
           _lastItemsNotImportedCsvCustomerId = _selectedCustomer!.id;
+          _lastItemsNotImportedCsvCustomerName = _selectedCustomer!.displayName;
+          _lastItemsNotImportedRows = List<OrderImportSkippedRow>.from(
+            skippedRows,
+          );
+          _lastItemsNotImportedRowsCustomerId = _selectedCustomer!.id;
+          _lastItemsNotImportedRowsCustomerName = _selectedCustomer!.displayName;
         } catch (e, st) {
           debugPrint('[OrderImport] ITEMS_NOT_IMPORTED CSV failed: $e\n$st');
         }
       } else {
         _lastItemsNotImportedCsvPath = null;
         _lastItemsNotImportedCsvCustomerId = null;
+        _lastItemsNotImportedCsvCustomerName = null;
+        _lastItemsNotImportedRows = const [];
+        _lastItemsNotImportedRowsCustomerId = null;
+        _lastItemsNotImportedRowsCustomerName = null;
       }
 
       final quoteIdToSync = _currentQuoteId;
@@ -6510,6 +7086,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _catalogSource = result.catalogSource;
 
     _productsLoadDebugLine = result.productsLoadDebugLine;
+
+    debugPrint(
+      '[ProductsLoad] productsByItemNumber count=${_productsByItemNumber.length}',
+    );
+    debugPrint('[ProductsLoad] productsByUpc count=${_productsByUpc.length}');
+    debugPrint(
+      '[ProductsLoad] contains item 13932=${_productsByItemNumber.containsKey('13932')}',
+    );
 
     if (!result.isEmptyFile) {
       _debugLogMissingProductTypeMappings();
@@ -10529,6 +11113,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'itemNumber': line.product.itemNumber,
         'description': line.product.description,
         'price': line.product.price,
+        'listPrice': line.product.listPrice,
         'productType': line.product.productType,
         'discountRaw': line.product.discountRaw,
         'discountEligible': line.product.discountEligible,
@@ -10545,6 +11130,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'whse2OutOfStock': line.product.whse2OutOfStock,
         'whse1ComingSoon': line.product.whse1ComingSoon,
         'whse2ComingSoon': line.product.whse2ComingSoon,
+        'whse1AvailabilityDisplay': line.product.whse1AvailabilityDisplay,
+        'whse2AvailabilityDisplay': line.product.whse2AvailabilityDisplay,
+        'minOrderQty': line.product.minOrderQty,
+        'caseQty': line.product.caseQty,
         'quoteBucketKey': bucket.bucketKey,
         'quoteBucketLabel': bucket.displayLabel,
         'quantity': line.quantity,
