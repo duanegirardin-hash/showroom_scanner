@@ -84,8 +84,8 @@ class UpperCaseTextFormatter extends TextInputFormatter {
   }
 }
 
-/// Which tab owns compact order-line expand/collapse ([_ordersTabExpandedLineKey] vs [_scanTabExpandedLineKey]).
-enum _OrderLineCardCompactExpandHost { ordersTab, scanTab }
+/// Which tab owns compact order-line expand/collapse.
+enum _OrderLineCardCompactExpandHost { ordersTab, scanTab, ecatalogTab }
 
 // --- Phase 1: theme tokens (visual only; no app logic) ---
 const Color _kDeepTeal = Color(0xFF006D77);
@@ -98,8 +98,8 @@ const Color _kSecondaryText = Color(0xFF5F6368);
 const Color _kDividerWarm = Color(0xFFC9C5C0);
 const Color _kDividerWarmSoft = Color(0xFFE5E2DE);
 
-/// ECatalog Seasonal: UI sub-category labels → [Product.productType] (CSV column).
-/// Order matches showroom merchandising; used only for ECatalog filtering.
+/// ECatalog Seasonal: accepted [Product.productType] labels.
+/// Used only to scope the Seasonal merchandising chip.
 const Map<String, String> _kEcatalogSeasonalLabelToProductType = {
   'Calendar & Planner': 'CALENDAR',
   'Canada Day': 'CANADA DAY',
@@ -121,28 +121,6 @@ const Map<String, String> _kEcatalogSeasonalLabelToProductType = {
   'St Patrick\'s Day': 'ST PATRICK\'S DAY',
   'Valentine\'s Day': 'VALENTINE\'S DAY',
 };
-
-const List<String> _kEcatalogSeasonalSubcategoryLabels = [
-  'Calendar & Planner',
-  'Canada Day',
-  'Celebrate Pride',
-  'Chinese New Year',
-  'Christmas',
-  'Diwali',
-  'Easter',
-  'Fall/Winter Essentials',
-  'Father\'s Day',
-  'Graduation',
-  'Halloween',
-  'Hanukkah',
-  'Harvest',
-  'Mother\'s Day',
-  'New Years',
-  'Spring/Summer General',
-  'Spring/Summer Toys',
-  'St Patrick\'s Day',
-  'Valentine\'s Day',
-];
 
 class ShowroomScannerApp extends StatelessWidget {
   const ShowroomScannerApp({super.key});
@@ -1126,50 +1104,38 @@ String _availabilityLabelForWhse2(Product product) {
   return '';
 }
 
-/// Order line title: description with an optional blue NEW badge (catalog column).
+/// Order line title text only. Merchandising badges come from [_productFlagChips].
 Widget _orderLineTitleWithOptionalNewBadge({
   required String description,
-  required bool isNewRelease,
   required TextStyle style,
   TextAlign textAlign = TextAlign.start,
   int maxLines = 2,
 }) {
-  final title = Text(
+  return Text(
     description,
     maxLines: maxLines,
     overflow: TextOverflow.ellipsis,
     textAlign: textAlign,
     style: style,
   );
-  if (!isNewRelease) return title;
-  return Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Expanded(child: title),
-      const SizedBox(width: 6),
-      Padding(
-        padding: const EdgeInsets.only(top: 1),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.blue,
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            child: Text(
-              'NEW',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 11,
-                height: 1.1,
-              ),
-            ),
-          ),
-        ),
+}
+
+/// Shared merchandising flag chips sourced from [Product] metadata.
+List<Widget> _productFlagChips(BuildContext context, Product product) {
+  final colorScheme = Theme.of(context).colorScheme;
+  final chips = <Widget>[
+    if (product.isNewRelease)
+      _ECatalogProductDetailSheet._flagChip(context, 'NEW', Colors.blue),
+    if (product.isPs)
+      _ECatalogProductDetailSheet._flagChip(context, 'PS', colorScheme.primary),
+    if (product.isNet)
+      _ECatalogProductDetailSheet._flagChip(
+        context,
+        'NET',
+        colorScheme.tertiary,
       ),
-    ],
-  );
+  ];
+  return chips;
 }
 
 /// Cent-rounded money — single source of truth for quote line and order totals.
@@ -3034,6 +3000,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// ECatalog merchandising: `newItems` | `everyday` | `homeDecor` | `seasonal` | `sale` (PS) | null (all).
   String? _catalogMerchandising;
   bool _catalogInOrderOnly = false;
+  bool _catalogInStockOnly = false;
   String _catalogFilteredCacheKey = '';
   List<Product>? _catalogFilteredProductsCache;
   List<String>? _catalogDistinctCategories;
@@ -9628,6 +9595,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     ).showSnackBar(SnackBar(content: Text(confirmedMsg)));
   }
 
+  static const String _kEcatalogDecorAndGiftwareCategory = 'Decor & Giftware';
+
   /// ECatalog-only merchandising bucket (uses [Product.productType], [Product.category], [Product.isNewRelease]).
   bool _productMatchesEcatalogMerchandising(Product p) {
     final m = _catalogMerchandising;
@@ -9636,7 +9605,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final pt = p.productType.trim().toUpperCase();
     if (m == 'everyday') return pt == 'EVERYDAY';
     if (m == 'homeDecor') {
-      return p.category.trim().toLowerCase().contains('home decor');
+      return p.category.trim() == _kEcatalogDecorAndGiftwareCategory;
     }
     if (m == 'seasonal') {
       return _kEcatalogSeasonalLabelToProductType.values.contains(pt);
@@ -9645,17 +9614,50 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return true;
   }
 
+  bool _matchesCatalogBaseFilters(
+    Product p, {
+    required String queryLower,
+    required bool inOrderOnly,
+    required bool inStockOnly,
+  }) {
+    if (!_productMatchesEcatalogMerchandising(p)) return false;
+    if (inOrderOnly && !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
+      return false;
+    }
+    if (inStockOnly && !_isProductInStockForEcatalog(p)) return false;
+    if (queryLower.isNotEmpty &&
+        !p.itemNumber.toLowerCase().contains(queryLower) &&
+        !p.description.toLowerCase().contains(queryLower)) {
+      return false;
+    }
+    return true;
+  }
+
   List<String> _catalogCategories() {
     final n = _productsByItemNumber.length;
     final merch = _catalogMerchandising;
-    final key = '$n|${merch ?? ''}';
+    final q = _catalogSearchQuery.trim().toLowerCase();
+    final inOrderOnly = _catalogInOrderOnly;
+    final inStockOnly = _catalogInStockOnly;
+    final orderSeqSig = Object.hashAll(
+      _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
+    );
+    final key =
+        '$n|${merch ?? ''}|$q|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
     if (_catalogDistinctCategories != null &&
         _catalogDistinctCategoriesCacheKey == key) {
       return _catalogDistinctCategories!;
     }
     final set = <String>{};
     for (final p in _productsByItemNumber.values) {
-      if (!_productMatchesEcatalogMerchandising(p)) continue;
+      if (!_matchesCatalogBaseFilters(
+        p,
+        queryLower: q,
+        inOrderOnly: inOrderOnly,
+        inStockOnly: inStockOnly,
+      )) {
+        continue;
+      }
       final c = p.category.trim();
       if (c.isNotEmpty) set.add(c);
     }
@@ -9672,25 +9674,33 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return _catalogCategories().contains(raw) ? raw : null;
   }
 
-  /// Distinct sub-categories for the dropdown: CSV sub-categories, or fixed seasonal holiday list.
+  /// Distinct sub-categories for the dropdown, scoped to selected parent filters.
   List<String> _catalogSubCategoriesForSelectedCategory() {
     final n = _productsByItemNumber.length;
     final cat = _resolvedCatalogCategoryForEcatalogFilters();
     final merch = _catalogMerchandising;
-    final key = '$n|${cat ?? ''}|${merch ?? ''}';
+    final q = _catalogSearchQuery.trim().toLowerCase();
+    final inOrderOnly = _catalogInOrderOnly;
+    final inStockOnly = _catalogInStockOnly;
+    final orderSeqSig = Object.hashAll(
+      _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
+    );
+    final key =
+        '$n|${cat ?? ''}|${merch ?? ''}|$q|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
     if (_catalogSubCategoryOptionsCacheKey == key &&
         _catalogSubCategoryOptionsCache != null) {
       return _catalogSubCategoryOptionsCache!;
     }
-    if (merch == 'seasonal') {
-      final list = List<String>.from(_kEcatalogSeasonalSubcategoryLabels);
-      _catalogSubCategoryOptionsCacheKey = key;
-      _catalogSubCategoryOptionsCache = list;
-      return list;
-    }
     final set = <String>{};
     for (final p in _productsByItemNumber.values) {
-      if (!_productMatchesEcatalogMerchandising(p)) continue;
+      if (!_matchesCatalogBaseFilters(
+        p,
+        queryLower: q,
+        inOrderOnly: inOrderOnly,
+        inStockOnly: inStockOnly,
+      )) {
+        continue;
+      }
       if (cat != null && p.category.trim() != cat) continue;
       final sub = p.subCategory.trim();
       if (sub.isNotEmpty) set.add(sub);
@@ -9710,13 +9720,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ? subRaw
         : null;
     final inOrderOnly = _catalogInOrderOnly;
+    final inStockOnly = _catalogInStockOnly;
     final merch = _catalogMerchandising;
-    // Include order-line sequence so cache invalidates when lines move (e.g. rescan) with same count.
-    final orderSeqSig = Object.hashAll(
-      _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
-    );
+    // Keep ECatalog in stable catalog order. Cache invalidation only needs the
+    // order membership count for "In Order only" filtering.
     final key =
-        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|${_orderLineByKey.length}|$orderSeqSig';
+        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}';
     if (_catalogFilteredCacheKey == key &&
         _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
@@ -9726,41 +9735,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!_productMatchesEcatalogMerchandising(p)) continue;
       if (cat != null && p.category.trim() != cat) continue;
       if (subCategory != null) {
-        if (merch == 'seasonal') {
-          final wantPt = _kEcatalogSeasonalLabelToProductType[subCategory];
-          final pt = p.productType.trim().toUpperCase();
-          if (wantPt == null || pt != wantPt) continue;
-        } else {
-          if (p.subCategory.trim() != subCategory) continue;
-        }
+        if (p.subCategory.trim() != subCategory) continue;
       }
-      if (inOrderOnly &&
-          !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
+      if (!_matchesCatalogBaseFilters(
+        p,
+        queryLower: q,
+        inOrderOnly: inOrderOnly,
+        inStockOnly: inStockOnly,
+      )) {
         continue;
       }
-      final matchesQuery =
-          q.isEmpty ||
-          p.itemNumber.toLowerCase().contains(q) ||
-          p.description.toLowerCase().contains(q);
-      if (!matchesQuery) continue;
       out.add(p);
     }
-    // Match Scan / Orders tab: lines already on the order follow [_orderLines] order; others stay by item #.
-    final orderIndexByKey = <String, int>{};
-    for (var i = 0; i < _orderLines.length; i++) {
-      orderIndexByKey[_orderLineKeyForProduct(_orderLines[i].product)] = i;
-    }
-    out.sort((a, b) {
-      final ia = orderIndexByKey[_orderLineKeyForProduct(a)];
-      final ib = orderIndexByKey[_orderLineKeyForProduct(b)];
-      if (ia != null && ib != null) return ia.compareTo(ib);
-      if (ia != null) return -1;
-      if (ib != null) return 1;
-      return a.itemNumber.compareTo(b.itemNumber);
-    });
+    // Intentionally no quote-priority sort: preserve normal catalog browse order.
     _catalogFilteredCacheKey = key;
     _catalogFilteredProductsCache = out;
     return out;
+  }
+
+  bool _isProductInStockForEcatalog(Product product) {
+    if (product.whse1InStock || product.whse2InStock) return true;
+    final w1 = _availabilityLabelForWhse1(product).trim().toLowerCase();
+    final w2 = _availabilityLabelForWhse2(product).trim().toLowerCase();
+    return w1 == 'in stock' || w2 == 'in stock';
   }
 
   int _qtyInCurrentQuoteForProduct(Product product) {
@@ -9794,7 +9791,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _enqueueScan(payload, source: 'ecatalog');
   }
 
-  /// ECatalog catalog row only. Branch order: (1) PS → Reg.+Sale; (2) NET → Price;
+  /// ECatalog catalog row only. Branch order: (1) PS → Reg.+Sale; (2) NET → NET;
   /// (3) discount-eligible + customer discount → Reg.+Your Price; (4) Price.
   /// Uses [Product.isPs] / [Product.isNet] (same source as chips and [_productPricingState]).
   Widget _buildECatalogListPriceColumn({
@@ -9825,73 +9822,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
     }
 
-    if (isPs) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.bodySmall?.copyWith(
-              fontWeight: FontWeight.w500,
-              color: colorScheme.onSurfaceVariant,
-            ),
-          ),
-          Text(
-            'Sale: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w700,
-              color: Colors.green.shade800,
-            ),
-          ),
-        ],
-      );
-    }
-    if (isNet) {
-      return Text(
-        'Price: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
-      );
-    }
-    if (showRegAndYourPrice) {
-      final catalogLine = OrderLine(product: product, quantity: 1, scans: 0);
-      final yourPrice = _roundedUnitPrice(_getDiscountedUnitPrice(catalogLine));
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Reg. Price: \$${_displayRegUnitPrice(product).toStringAsFixed(2)}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.bodySmall?.copyWith(
-              fontWeight: FontWeight.w500,
-              color: colorScheme.onSurfaceVariant,
-            ),
-          ),
-          Text(
-            'Your Price: \$${yourPrice.toStringAsFixed(2)}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w700,
-              color: Colors.green.shade800,
-            ),
-          ),
-        ],
-      );
-    }
-    return Text(
-      'Price: \$${_roundedUnitPrice(product.price).toStringAsFixed(2)}',
+    final catalogLine = OrderLine(product: product, quantity: 1, scans: 0);
+    final yourPrice = showRegAndYourPrice
+        ? _roundedUnitPrice(_getDiscountedUnitPrice(catalogLine))
+        : null;
+    return _buildProductPriceSummary(
+      product: product,
+      hasDiscount: showRegAndYourPrice,
+      discountedUnitPrice: yourPrice,
+      regularStyle: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+      mutedStyle: textTheme.bodySmall?.copyWith(
+        fontWeight: FontWeight.w500,
+        color: colorScheme.onSurfaceVariant,
+      ),
+      highlightedStyle: textTheme.titleSmall?.copyWith(
+        fontWeight: FontWeight.w700,
+        color: Colors.green.shade800,
+      ),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
     );
   }
 
@@ -9950,6 +9899,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return const Center(child: CircularProgressIndicator());
     }
     final filtered = _filteredCatalogProducts();
+    final int totalCatalogProducts = _productsByItemNumber.length;
     final categories = _catalogCategories();
     final validatedCatalogCategory =
         _resolvedCatalogCategoryForEcatalogFilters();
@@ -10019,6 +9969,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                       'newItems') {
                                     _catalogMerchandising = null;
                                   }
+                                  _selectedCatalogCategory = null;
                                   _selectedCatalogSubCategory = null;
                                 });
                               },
@@ -10034,6 +9985,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                       'everyday') {
                                     _catalogMerchandising = null;
                                   }
+                                  _selectedCatalogCategory = null;
                                   _selectedCatalogSubCategory = null;
                                 });
                               },
@@ -10049,6 +10001,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                       'homeDecor') {
                                     _catalogMerchandising = null;
                                   }
+                                  _selectedCatalogCategory = null;
                                   _selectedCatalogSubCategory = null;
                                 });
                               },
@@ -10064,6 +10017,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                       'seasonal') {
                                     _catalogMerchandising = null;
                                   }
+                                  _selectedCatalogCategory = null;
                                   _selectedCatalogSubCategory = null;
                                 });
                               },
@@ -10078,6 +10032,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                   } else if (_catalogMerchandising == 'sale') {
                                     _catalogMerchandising = null;
                                   }
+                                  _selectedCatalogCategory = null;
                                   _selectedCatalogSubCategory = null;
                                 });
                               },
@@ -10097,16 +10052,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                 setState(() => _catalogInOrderOnly = selected);
                               },
                             ),
+                            FilterChip(
+                              label: const Text('In Stock Only'),
+                              selected: _catalogInStockOnly,
+                              onSelected: (selected) {
+                                setState(() => _catalogInStockOnly = selected);
+                              },
+                            ),
                             TextButton.icon(
                               onPressed:
                                   (_catalogMerchandising != null ||
                                       _catalogInOrderOnly ||
+                                      _catalogInStockOnly ||
                                       _selectedCatalogCategory != null ||
                                       _selectedCatalogSubCategory != null)
                                   ? () {
                                       setState(() {
                                         _catalogMerchandising = null;
                                         _catalogInOrderOnly = false;
+                                        _catalogInStockOnly = false;
                                         _selectedCatalogCategory = null;
                                         _selectedCatalogSubCategory = null;
                                       });
@@ -10144,13 +10108,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                   onChanged: (v) {
                                     setState(() {
                                       _selectedCatalogCategory = v;
-                                      final selectedSub =
-                                          _selectedCatalogSubCategory;
-                                      if (selectedSub != null &&
-                                          !_catalogSubCategoriesForSelectedCategory()
-                                              .contains(selectedSub)) {
-                                        _selectedCatalogSubCategory = null;
-                                      }
+                                      _selectedCatalogSubCategory = null;
                                     });
                                   },
                                 ),
@@ -10186,6 +10144,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           ),
                         ),
                         const SizedBox(height: 8),
+                        Text(
+                          'Showing ${filtered.length} of $totalCatalogProducts products',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: _kSecondaryText,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
                       ],
                     ),
                   ),
@@ -10206,15 +10171,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                   else
                     SliverList(
                       delegate: SliverChildBuilderDelegate((context, index) {
-                        final product = filtered[index];
-                        final orderLineKey = _orderLineKeyForProduct(product);
+                        final listedProduct = filtered[index];
+                        final orderLineKey = _orderLineKeyForProduct(listedProduct);
                         final line = _orderLineByKey[orderLineKey];
+                        final displayProduct = _productsByItemNumber[orderLineKey];
+                        final product =
+                            displayProduct ?? line?.product ?? listedProduct;
                         final inCurrentOrder = line != null;
                         final qtyInQuote = line?.quantity ?? 0;
                         final lineTotal = line != null
                             ? _getDiscountedLineTotal(line)
                             : 0.0;
-                        final pricingIndicator = _productPricingIndicator(
+                        final productFlagChips = _productFlagChips(
+                          context,
                           product,
                         );
                         final catLabel = product.category.trim().isEmpty
@@ -10229,6 +10198,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           padding: const EdgeInsets.only(bottom: 8),
                           child: Material(
                             type: MaterialType.card,
+                            color: qtyInQuote > 0
+                                ? colorScheme.primaryContainer.withValues(
+                                    alpha: 0.22,
+                                  )
+                                : colorScheme.surface,
                             elevation: 0.5,
                             borderRadius: BorderRadius.circular(8),
                             child: Padding(
@@ -10358,20 +10332,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                         ],
                                                       ),
                                                     ),
-                                                    if (pricingIndicator ==
-                                                        'PS')
+                                                    if (productFlagChips
+                                                        .isNotEmpty)
                                                       Padding(
                                                         padding:
                                                             const EdgeInsets.only(
                                                               left: 6,
                                                             ),
-                                                        child:
-                                                            _ECatalogProductDetailSheet._flagChip(
-                                                              context,
-                                                              'PS',
-                                                              colorScheme
-                                                                  .primary,
-                                                            ),
+                                                        child: Wrap(
+                                                          spacing: 6,
+                                                          runSpacing: 6,
+                                                          children:
+                                                              productFlagChips,
+                                                        ),
                                                       ),
                                                     Icon(
                                                       Icons.keyboard_arrow_up,
@@ -10459,20 +10432,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                               ],
                                                             ),
                                                           ),
-                                                          if (pricingIndicator ==
-                                                              'PS')
+                                                          if (productFlagChips
+                                                              .isNotEmpty)
                                                             Padding(
                                                               padding:
                                                                   const EdgeInsets.only(
                                                                     left: 6,
                                                                   ),
-                                                              child:
-                                                                  _ECatalogProductDetailSheet._flagChip(
-                                                                    context,
-                                                                    'PS',
-                                                                    colorScheme
-                                                                        .primary,
-                                                                  ),
+                                                              child: Wrap(
+                                                                spacing: 6,
+                                                                runSpacing: 6,
+                                                                children:
+                                                                    productFlagChips,
+                                                              ),
                                                             ),
                                                           Icon(
                                                             Icons
@@ -10654,17 +10626,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           ),
                         );
                         if (line != null) {
-                          return Dismissible(
+                          return KeyedSubtree(
                             key: ValueKey(orderLineKey),
-                            direction: DismissDirection.endToStart,
-                            confirmDismiss: (_) async {
-                              await _confirmDeleteLine(line);
-                              return false;
-                            },
-                            background: const _OrderLineCardDismissBackground(
+                            child: _buildOrderCard(
+                              line,
                               compactLayout: true,
+                              compactExpandHost:
+                                  _OrderLineCardCompactExpandHost.ecatalogTab,
+                              displayProduct: displayProduct ?? product,
                             ),
-                            child: ecatalogItemCard,
                           );
                         }
                         return ecatalogItemCard;
@@ -13874,7 +13844,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     bool scanTabHighlightFlash = false,
     bool compactLayout = false,
     _OrderLineCardCompactExpandHost? compactExpandHost,
+    Product? displayProduct,
   }) {
+    final Product presentationProduct = displayProduct ?? line.product;
+    final OrderLine presentationLine = identical(presentationProduct, line.product)
+        ? line
+        : OrderLine(
+            product: presentationProduct,
+            quantity: line.quantity,
+            scans: line.scans,
+          );
     final String lineKey = _orderLineKeyForProduct(line.product);
     assert(
       !compactLayout || compactExpandHost != null,
@@ -13883,20 +13862,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final String? expandedKeyForHost = switch (compactExpandHost) {
       _OrderLineCardCompactExpandHost.ordersTab => _ordersTabExpandedLineKey,
       _OrderLineCardCompactExpandHost.scanTab => _scanTabExpandedLineKey,
+      _OrderLineCardCompactExpandHost.ecatalogTab => _ecatalogExpandedItemKey,
       null => null,
     };
     final bool compactExpanded = compactLayout && expandedKeyForHost == lineKey;
     return _OrderLineCard(
       dismissibleKey: ValueKey(lineKey),
       line: line,
+      displayProduct: presentationProduct,
       scanTabHighlightFlash: scanTabHighlightFlash,
       compactLayout: compactLayout,
       expandedOrdersCompact: compactExpanded,
       restrictCardTapToProductArea: compactLayout,
-      lineHasDiscount: _lineHasDiscount(line),
-      discountedUnitPrice: _roundedUnitPrice(_getDiscountedUnitPrice(line)),
-      priceIndicator: _productPricingIndicator(line.product),
-      lineTotal: _getDiscountedLineTotal(line),
+      lineHasDiscount: _lineHasDiscount(presentationLine),
+      discountedUnitPrice: _roundedUnitPrice(
+        _getDiscountedUnitPrice(presentationLine),
+      ),
+      priceIndicator: _productPricingIndicator(presentationProduct),
+      lineTotal: _getDiscountedLineTotal(presentationLine),
       onSwipeDeletePrompt: () => _confirmDeleteLine(line),
       onCardTap: compactLayout
           ? () {
@@ -13913,6 +13896,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                       _scanTabExpandedLineKey = null;
                     } else {
                       _scanTabExpandedLineKey = lineKey;
+                    }
+                  case _OrderLineCardCompactExpandHost.ecatalogTab:
+                    if (_ecatalogExpandedItemKey == lineKey) {
+                      _ecatalogExpandedItemKey = null;
+                    } else {
+                      _ecatalogExpandedItemKey = lineKey;
                     }
                 }
               });
@@ -14692,7 +14681,6 @@ class _ScanLiveOrderControlPanel extends StatelessWidget {
                       return [
                         _orderLineTitleWithOptionalNewBadge(
                           description: line.product.description,
-                          isNewRelease: line.product.isNewRelease,
                           textAlign: textAlign,
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
@@ -15411,14 +15399,15 @@ class _ECatalogProductDetailSheet extends StatelessWidget {
 Widget _ecatalogInOrderQtyBadge(BuildContext context, int quantity) {
   final textTheme = Theme.of(context).textTheme;
   return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
     decoration: BoxDecoration(
       color: Colors.green.withValues(alpha: 0.14),
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
     ),
     child: Text(
-      '$quantity In Order',
+      'QTY $quantity',
       style: textTheme.bodySmall?.copyWith(
+        fontSize: 11,
         fontWeight: FontWeight.w600,
         color: Colors.green.shade800,
       ),
@@ -15555,6 +15544,123 @@ class _ScanTabSearchResultTile extends StatelessWidget {
       onTap: onTap,
     );
   }
+}
+
+class _ProductPriceLine {
+  const _ProductPriceLine({
+    required this.label,
+    required this.amount,
+    this.emphasized = false,
+    this.muted = false,
+  });
+
+  final String label;
+  final double amount;
+  final bool emphasized;
+  final bool muted;
+}
+
+List<_ProductPriceLine> _productPriceLines({
+  required Product product,
+  required bool hasDiscount,
+  double? discountedUnitPrice,
+}) {
+  if (product.isPs) {
+    return [
+      _ProductPriceLine(
+        label: 'Reg. Price',
+        amount: _displayRegUnitPrice(product),
+        muted: true,
+      ),
+      _ProductPriceLine(
+        label: 'Sale',
+        amount: _roundedUnitPrice(product.price),
+        emphasized: true,
+      ),
+    ];
+  }
+  if (product.isNet) {
+    return [
+      _ProductPriceLine(
+        label: 'NET',
+        amount: _roundedUnitPrice(product.price),
+        emphasized: true,
+      ),
+    ];
+  }
+  if (hasDiscount && discountedUnitPrice != null) {
+    return [
+      _ProductPriceLine(
+        label: 'Reg. Price',
+        amount: _displayRegUnitPrice(product),
+        muted: true,
+      ),
+      _ProductPriceLine(
+        label: 'Your Price',
+        amount: _roundedUnitPrice(discountedUnitPrice),
+        emphasized: true,
+      ),
+    ];
+  }
+  return [
+    _ProductPriceLine(
+      label: 'Price',
+      amount: _roundedUnitPrice(product.price),
+      emphasized: true,
+    ),
+  ];
+}
+
+Widget _buildProductPriceSummary({
+  required Product product,
+  required bool hasDiscount,
+  double? discountedUnitPrice,
+  required TextStyle? regularStyle,
+  TextStyle? mutedStyle,
+  TextStyle? highlightedStyle,
+  CrossAxisAlignment crossAxisAlignment = CrossAxisAlignment.start,
+  TextAlign textAlign = TextAlign.start,
+  int? maxLines = 1,
+  TextOverflow overflow = TextOverflow.ellipsis,
+}) {
+  final lines = _productPriceLines(
+    product: product,
+    hasDiscount: hasDiscount,
+    discountedUnitPrice: discountedUnitPrice,
+  );
+
+  if (lines.length == 1) {
+    final line = lines.first;
+    final style = line.emphasized
+        ? (highlightedStyle ?? regularStyle)
+        : (line.muted ? (mutedStyle ?? regularStyle) : regularStyle);
+    return Text(
+      '${line.label}: \$${line.amount.toStringAsFixed(2)}',
+      maxLines: maxLines,
+      overflow: overflow,
+      textAlign: textAlign,
+      style: style,
+    );
+  }
+
+  return Column(
+    crossAxisAlignment: crossAxisAlignment,
+    mainAxisSize: MainAxisSize.min,
+    children: lines
+        .map((line) {
+          final style = line.emphasized
+              ? (highlightedStyle ?? regularStyle)
+              : (line.muted ? (mutedStyle ?? regularStyle) : regularStyle);
+          return Text(
+            '${line.label}: \$${line.amount.toStringAsFixed(2)}',
+            maxLines: maxLines,
+            overflow: overflow,
+            textAlign: textAlign,
+            style: style,
+          );
+        })
+        .toList(growable: false),
+  );
 }
 
 class _ScanTabSearchResultsList extends StatelessWidget {
@@ -15696,6 +15802,7 @@ class _OrderLineCardRow extends StatelessWidget {
 
   const _OrderLineCardRow({
     required this.line,
+    this.displayProduct,
     this.compactLayout = false,
     this.expandedOrdersCompact = false,
     this.includeQtyColumn = true,
@@ -15723,6 +15830,7 @@ class _OrderLineCardRow extends StatelessWidget {
   final bool includeQtyColumn;
 
   final OrderLine line;
+  final Product? displayProduct;
   final bool lineHasDiscount;
   final double discountedUnitPrice;
   final String? priceIndicator;
@@ -15766,6 +15874,8 @@ class _OrderLineCardRow extends StatelessWidget {
       debugPrint('REBUILD_INSTRUMENT _OrderLineCardRow #$_debugRebuildCount');
     }
     final colorScheme = Theme.of(context).colorScheme;
+    final product = displayProduct ?? line.product;
+    final productFlagChips = _productFlagChips(context, product);
 
     final Widget qtyColumn = _OrderLineQtyColumn(
       line: line,
@@ -15785,88 +15895,31 @@ class _OrderLineCardRow extends StatelessWidget {
         fontWeight: FontWeight.w500,
         color: colorScheme.onSurface,
       );
+      final TextStyle highlightPriceStyle = TextStyle(
+        color: Colors.green.shade800,
+        fontWeight: FontWeight.w700,
+      );
 
-      final Widget line3Collapsed = lineHasDiscount
-          ? Text.rich(
-              TextSpan(
-                style: line3BaseStyle,
-                children: [
-                  TextSpan(
-                    text:
-                        'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · ',
-                  ),
-                  TextSpan(
-                    text:
-                        'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} → ',
-                  ),
-                  TextSpan(
-                    text: line.product.isPs
-                        ? 'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}'
-                        : 'Your Price \$${discountedUnitPrice.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      color: Colors.green.shade800,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            )
-          : line.product.isPs
-          ? Text(
-              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-              'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
-              'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: line3BaseStyle,
-            )
-          : Text(
-              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-              'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: line3BaseStyle,
-            );
+      Widget buildCompactPriceLine({required bool ellipsize}) {
+        return _buildProductPriceSummary(
+          product: product,
+          hasDiscount: lineHasDiscount,
+          discountedUnitPrice: discountedUnitPrice,
+          regularStyle: line3BaseStyle.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
+          mutedStyle: line3BaseStyle,
+          highlightedStyle: line3BaseStyle.copyWith(
+            color: highlightPriceStyle.color,
+            fontWeight: FontWeight.w700,
+          ),
+          maxLines: ellipsize ? 1 : null,
+          overflow: ellipsize ? TextOverflow.ellipsis : TextOverflow.visible,
+        );
+      }
 
-      final Widget line3Expanded = lineHasDiscount
-          ? Text.rich(
-              TextSpan(
-                style: line3BaseStyle,
-                children: [
-                  TextSpan(
-                    text:
-                        'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · ',
-                  ),
-                  TextSpan(
-                    text:
-                        'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} → ',
-                  ),
-                  TextSpan(
-                    text: line.product.isPs
-                        ? 'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}'
-                        : 'Your Price \$${discountedUnitPrice.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      color: Colors.green.shade800,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            )
-          : line.product.isPs
-          ? Text(
-              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-              'Reg. Price \$${_displayRegUnitPrice(line.product).toStringAsFixed(2)} · '
-              'Sale \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-              style: line3BaseStyle,
-            )
-          : Text(
-              'Min ${line.product.minOrderQty} · Case ${line.product.caseQty} · '
-              'Price \$${_roundedUnitPrice(line.product.price).toStringAsFixed(2)}',
-              style: line3BaseStyle,
-            );
+      final Widget line3Collapsed = buildCompactPriceLine(ellipsize: true);
+      final Widget line3Expanded = buildCompactPriceLine(ellipsize: false);
 
       final Widget compactProductBlock = expandedOrdersCompact
           ? Column(
@@ -15876,17 +15929,20 @@ class _OrderLineCardRow extends StatelessWidget {
                 _productNetworkImage(expandedImageSize, 14),
                 SizedBox(height: imageGutter + 2),
                 _orderLineTitleWithOptionalNewBadge(
-                  description: line.product.description,
-                  isNewRelease: line.product.isNewRelease,
+                  description: product.description,
                   style: const TextStyle(
                     fontWeight: FontWeight.w700,
                     fontSize: 13,
                     height: 1.12,
                   ),
                 ),
+                if (productFlagChips.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Wrap(spacing: 6, runSpacing: 6, children: productFlagChips),
+                ],
                 const SizedBox(height: 1),
                 Text(
-                  'Item ${line.product.itemNumber}',
+                  'Item ${product.itemNumber}',
                   style: TextStyle(
                     fontSize: 12,
                     height: 1.08,
@@ -15894,7 +15950,7 @@ class _OrderLineCardRow extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  'UPC ${line.product.upc}',
+                  'UPC ${product.upc}',
                   style: TextStyle(
                     fontSize: 12,
                     height: 1.08,
@@ -15905,7 +15961,7 @@ class _OrderLineCardRow extends StatelessWidget {
                 line3Expanded,
                 _warehouseAvailabilityLinesWidget(
                   context,
-                  line.product,
+                  product,
                   padding: const EdgeInsets.only(top: 2),
                 ),
               ],
@@ -15924,17 +15980,24 @@ class _OrderLineCardRow extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         _orderLineTitleWithOptionalNewBadge(
-                          description: line.product.description,
-                          isNewRelease: line.product.isNewRelease,
+                          description: product.description,
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 13,
                             height: 1.12,
                           ),
                         ),
+                        if (productFlagChips.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: productFlagChips,
+                          ),
+                        ],
                         const SizedBox(height: 1),
                         Text(
-                          'Item ${line.product.itemNumber} · UPC ${line.product.upc}',
+                          'Item ${product.itemNumber} · UPC ${product.upc}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -15947,7 +16010,7 @@ class _OrderLineCardRow extends StatelessWidget {
                         line3Collapsed,
                         _warehouseAvailabilityLinesWidget(
                           context,
-                          line.product,
+                          product,
                           padding: const EdgeInsets.only(top: 2),
                         ),
                       ],
@@ -15988,17 +16051,20 @@ class _OrderLineCardRow extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               _orderLineTitleWithOptionalNewBadge(
-                description: line.product.description,
-                isNewRelease: line.product.isNewRelease,
+                description: product.description,
                 style: const TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 13,
                   height: 1.12,
                 ),
               ),
+              if (productFlagChips.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Wrap(spacing: 6, runSpacing: 6, children: productFlagChips),
+              ],
               _warehouseAvailabilityLinesWidget(
                 context,
-                line.product,
+                product,
                 padding: const EdgeInsets.only(top: 2),
               ),
             ],
@@ -16053,6 +16119,7 @@ class _OrderLineCard extends StatelessWidget {
   const _OrderLineCard({
     required this.dismissibleKey,
     required this.line,
+    this.displayProduct,
     this.scanTabHighlightFlash = false,
     this.compactLayout = false,
     this.expandedOrdersCompact = false,
@@ -16069,6 +16136,7 @@ class _OrderLineCard extends StatelessWidget {
 
   final Key dismissibleKey;
   final OrderLine line;
+  final Product? displayProduct;
   final bool scanTabHighlightFlash;
 
   /// Denser card + line layout for Orders tab [ListView] and Scan tab [SliverList].
@@ -16119,6 +16187,7 @@ class _OrderLineCard extends StatelessWidget {
                   onTap: onCardTap,
                   child: _OrderLineCardRow(
                     line: line,
+                    displayProduct: displayProduct,
                     compactLayout: compactLayout,
                     expandedOrdersCompact: expandedOrdersCompact,
                     includeQtyColumn: false,
@@ -16146,6 +16215,7 @@ class _OrderLineCard extends StatelessWidget {
             onTap: onCardTap,
             child: _OrderLineCardRow(
               line: line,
+              displayProduct: displayProduct,
               compactLayout: compactLayout,
               expandedOrdersCompact: expandedOrdersCompact,
               includeQtyColumn: true,
