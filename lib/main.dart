@@ -1451,6 +1451,47 @@ class OrderImportItemsWithoutUpcRow {
     this.minimumOrderQuantity = '',
     this.caseQuantity = '',
   });
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'itemNumber': itemNumber,
+    'quantity': quantity,
+    'originalUpc': originalUpc,
+    'resolutionStatus': resolutionStatus,
+    'description': description,
+    'price': price,
+    'minimumOrderQuantity': minimumOrderQuantity,
+    'caseQuantity': caseQuantity,
+  };
+
+  factory OrderImportItemsWithoutUpcRow.fromJson(Map<String, dynamic> json) {
+    String resolutionStatusFromJson(Map<String, dynamic> raw) {
+      final primary = (raw['resolutionStatus'] ?? '').toString().trim();
+      if (primary.isNotEmpty) return primary;
+      // Backward-compatible fallbacks for older persisted payloads.
+      final legacy = (raw['status'] ?? raw['resolution'] ?? '')
+          .toString()
+          .trim();
+      if (legacy.isNotEmpty) return legacy;
+      return '';
+    }
+
+    int quantityFromJson(dynamic raw) {
+      if (raw is int) return raw;
+      if (raw is num) return raw.toInt();
+      return int.tryParse((raw ?? '').toString().trim()) ?? 0;
+    }
+
+    return OrderImportItemsWithoutUpcRow(
+      itemNumber: (json['itemNumber'] ?? '').toString(),
+      quantity: quantityFromJson(json['quantity']),
+      originalUpc: (json['originalUpc'] ?? '').toString(),
+      resolutionStatus: resolutionStatusFromJson(json),
+      description: (json['description'] ?? '').toString(),
+      price: (json['price'] ?? '').toString(),
+      minimumOrderQuantity: (json['minimumOrderQuantity'] ?? '').toString(),
+      caseQuantity: (json['caseQuantity'] ?? '').toString(),
+    );
+  }
 }
 
 String _orderImportNormalizeItemKey(String value) => value.trim().toUpperCase();
@@ -1502,6 +1543,11 @@ OrderImportCsvParseOutcome parseOrderImportExcelBytes(
   }
 
   final csvLikeText = const ListToCsvConverter().convert(csvRows);
+  print('[ImportFile] path=$sourceLabel');
+  print('[ImportFile] bytes=${bytes.length}');
+  print(
+    '[ImportFile] text contains 12322255=${csvLikeText.contains('12322255')}',
+  );
   return parseOrderImportCsv(csvLikeText);
 }
 
@@ -1587,6 +1633,7 @@ String _orderImportNormalizeUpcLookupKey(String value) {
 /// Reads [rawCsv], skips the first row (header), trims fields, skips empty rows.
 /// Throws [FormatException] when the file is empty, unparseable, or has no data rows after the header.
 OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
+  print('🔥 PARSER RUNNING 🔥');
   final trimmed = rawCsv.trim();
   if (trimmed.isEmpty) {
     throw FormatException('CSV file is empty.');
@@ -1612,72 +1659,30 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
 
   for (int i = 1; i < rows.length; i++) {
     final row = rows[i];
-    if (row.isEmpty) {
-      skippedRows.add(
-        const OrderImportSkippedRow(
-          item: '',
-          quantity: '',
-          reason: 'Malformed row: empty row.',
-        ),
-      );
-      continue;
-    }
-    if (row.every((c) => c.toString().trim().isEmpty)) {
-      skippedRows.add(
-        const OrderImportSkippedRow(
-          item: '',
-          quantity: '',
-          reason: 'Malformed row: all fields empty.',
-        ),
-      );
-      continue;
-    }
-    if (row.length <= qtyCol) {
-      final itemOnly =
-          (itemCol < row.length ? row[itemCol].toString().trim() : '');
-      skippedRows.add(
-        OrderImportSkippedRow(
-          item: itemOnly,
-          quantity: '',
-          description: _orderImportOptionalCsvCell(row, descriptionCol),
-          price: _orderImportOptionalCsvCell(row, priceCol),
-          reason: 'Malformed row: missing Quantity column.',
-        ),
-      );
-      continue;
-    }
     final item = itemCol < row.length ? row[itemCol].toString().trim() : '';
     final upc = upcCol != null && upcCol < row.length
         ? row[upcCol].toString().trim()
         : '';
-    final qtyStr = row[qtyCol].toString().trim();
+    final qtyStr = qtyCol < row.length ? row[qtyCol].toString().trim() : '';
     final rowDescription = _orderImportOptionalCsvCell(row, descriptionCol);
     final rowPrice = _orderImportOptionalCsvCell(row, priceCol);
-    if (item.isEmpty && upc.isEmpty) {
+    print('[ImportParse] raw row=$row');
+    if (item.isEmpty && upc.isEmpty && qtyStr.isEmpty) {
+      const reason = 'Empty item and quantity.';
+      print('[ImportParse] skipped row reason=$reason row=$row');
       skippedRows.add(
         OrderImportSkippedRow(
           item: '',
           quantity: qtyStr,
           description: rowDescription,
           price: rowPrice,
-          reason: 'Empty item.',
+          reason: reason,
         ),
       );
       continue;
     }
-    final qty = int.tryParse(qtyStr);
-    if (qty == null || qty < 1) {
-      skippedRows.add(
-        OrderImportSkippedRow(
-          item: item,
-          quantity: qtyStr,
-          description: rowDescription,
-          price: rowPrice,
-          reason: 'Invalid quantity.',
-        ),
-      );
-      continue;
-    }
+    final parsedQty = int.tryParse(qtyStr);
+    final qty = (parsedQty == null || parsedQty < 1) ? 1 : parsedQty;
     list.add(
       OrderImportCsvRow(
         item: item,
@@ -1695,6 +1700,7 @@ OrderImportCsvParseOutcome parseOrderImportCsv(String rawCsv) {
     );
   }
 
+  print('[ImportParse] rows parsed=${list.length}');
   return OrderImportCsvParseOutcome(rows: list, skippedRows: skippedRows);
 }
 
@@ -5458,6 +5464,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return out.join('\n');
   }
 
+  bool _itemsWithoutUpcRowIsNotFound(OrderImportItemsWithoutUpcRow row) {
+    final normalized = row.resolutionStatus
+        .trim()
+        .toUpperCase()
+        .replaceAll(RegExp(r'[^A-Z0-9]+'), '_');
+    if (normalized == 'NOT_FOUND') return true;
+    if (normalized == 'ITEM_NOT_FOUND') return true;
+    return normalized.contains('NOT_FOUND');
+  }
+
   Future<List<OrderImportItemsWithoutUpcRow>>
   _resolveItemsWithoutUpcRowsForCustomer(Customer customer) async {
     final rowsCustomerMatch = _sameLogicalCustomerQuoteRows(
@@ -5466,10 +5482,89 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       customerIdB: _lastItemsWithoutUpcRowsCustomerId ?? '',
       customerNameB: _lastItemsWithoutUpcRowsCustomerName ?? '',
     );
-    if (!rowsCustomerMatch || _lastItemsWithoutUpcRows.isEmpty) {
+    if (rowsCustomerMatch && _lastItemsWithoutUpcRows.isNotEmpty) {
+      return List<OrderImportItemsWithoutUpcRow>.from(_lastItemsWithoutUpcRows);
+    }
+    final persistedRows = await _readPersistedItemsWithoutUpcRowsForCustomer(
+      customer,
+    );
+    if (persistedRows.isNotEmpty) {
+      _lastItemsWithoutUpcRows = List<OrderImportItemsWithoutUpcRow>.from(
+        persistedRows,
+      );
+      _lastItemsWithoutUpcRowsCustomerId = customer.id;
+      _lastItemsWithoutUpcRowsCustomerName = customer.displayName;
+      return persistedRows;
+    }
+    return const [];
+  }
+
+  String _itemsWithoutUpcStateFilenameForCustomer(Customer customer) {
+    final token = _itemsNotImportedCustomerFilenameSegment(customer.displayName);
+    return 'import_items_without_upc_$token.json';
+  }
+
+  Future<File> _itemsWithoutUpcStateFileForCustomer(Customer customer) async {
+    final dir = await _getQuotesDirectory();
+    return File(
+      '${dir.path}/${_itemsWithoutUpcStateFilenameForCustomer(customer)}',
+    );
+  }
+
+  Future<void> _persistItemsWithoutUpcRowsForCustomer(
+    Customer customer,
+    List<OrderImportItemsWithoutUpcRow> rows,
+  ) async {
+    try {
+      final file = await _itemsWithoutUpcStateFileForCustomer(customer);
+      final payload = <String, dynamic>{
+        'customerId': customer.id.trim(),
+        'customerName': customer.displayName.trim(),
+        'updatedAt': DateTime.now().toIso8601String(),
+        'rows': rows.map((r) => r.toJson()).toList(growable: false),
+      };
+      await file.writeAsString(jsonEncode(payload), flush: true);
+    } catch (e) {
+      debugPrint('[ItemsWithoutUpc] persist failed: $e');
+    }
+  }
+
+  Future<List<OrderImportItemsWithoutUpcRow>>
+  _readPersistedItemsWithoutUpcRowsForCustomer(Customer customer) async {
+    try {
+      final file = await _itemsWithoutUpcStateFileForCustomer(customer);
+      if (!await file.exists()) return const [];
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! Map) return const [];
+      final payload = Map<String, dynamic>.from(decoded);
+      final storedCustomerId = (payload['customerId'] ?? '').toString().trim();
+      final storedCustomerName =
+          (payload['customerName'] ?? '').toString().trim();
+      if (!_sameLogicalCustomerQuoteRows(
+        customerIdA: customer.id,
+        customerNameA: customer.displayName,
+        customerIdB: storedCustomerId,
+        customerNameB: storedCustomerName,
+      )) {
+        return const [];
+      }
+      final rowsRaw = payload['rows'];
+      if (rowsRaw is! List) return const [];
+      final out = <OrderImportItemsWithoutUpcRow>[];
+      for (final row in rowsRaw) {
+        if (row is Map) {
+          out.add(
+            OrderImportItemsWithoutUpcRow.fromJson(
+              Map<String, dynamic>.from(row),
+            ),
+          );
+        }
+      }
+      return out;
+    } catch (e) {
+      debugPrint('[ItemsWithoutUpc] read persisted state failed: $e');
       return const [];
     }
-    return List<OrderImportItemsWithoutUpcRow>.from(_lastItemsWithoutUpcRows);
   }
 
   Future<File> _writeItemsWithoutUpcCsv({
@@ -5483,6 +5578,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       filename: filename,
       csvText: csvText,
       persistExportDebugAction: 'items_without_UPC',
+    );
+  }
+
+  Future<File> _writeItemsNotFoundCsv({
+    required String customerDisplayName,
+    required List<OrderImportItemsWithoutUpcRow> rows,
+  }) async {
+    const filename = 'items_not_found.csv';
+    final csvText = _formatItemsWithoutUpcRowsCsv(rows);
+    return exportOrderCsvToShowroomExportsLayout(
+      customerDisplayName: customerDisplayName,
+      filename: filename,
+      csvText: csvText,
+      persistExportDebugAction: 'items_not_found',
     );
   }
 
@@ -5980,6 +6089,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
         exportedFiles.add(itemsWithoutUpcFile);
       }
+      final itemsNotFoundRows = itemsWithoutUpcRows
+          .where(_itemsWithoutUpcRowIsNotFound)
+          .toList();
+      debugPrint(
+        '[ExportCheck] itemsWithoutUpcRows total=${itemsWithoutUpcRows.length}',
+      );
+      debugPrint('[ExportCheck] NOT_FOUND rows=${itemsNotFoundRows.length}');
+      if (itemsNotFoundRows.isNotEmpty) {
+        final itemsNotFoundFile = await _writeItemsNotFoundCsv(
+          customerDisplayName: customerName,
+          rows: itemsNotFoundRows,
+        );
+        if (kDebugMode) {
+          debugPrint(
+            '[ExportAll] items_not_found.csv rows=${itemsNotFoundRows.length}',
+          );
+        }
+        exportedFiles.add(itemsNotFoundFile);
+      }
 
       if (allItemsRows.length > 1) {
         final allItemsFile = await exportOrderCsvToShowroomExportsLayout(
@@ -6317,6 +6445,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return product;
     }
 
+    final numericItemFallbackWidths =
+        _productsByItemNumber.keys
+            .where((k) => RegExp(r'^\d+$').hasMatch(k))
+            .map((k) => k.length)
+            .toSet()
+            .toList()
+          ..sort();
+
+    Product? lookupByItemNumberOnly(String raw) {
+      final itemKey = _orderImportNormalizeItemKey(raw);
+      if (itemKey.isEmpty) return null;
+      final direct = _productsByItemNumber[itemKey];
+      if (direct != null) return direct;
+      if (!RegExp(r'^\d+$').hasMatch(itemKey)) return null;
+      for (final width in numericItemFallbackWidths) {
+        if (width <= itemKey.length) continue;
+        final padded = itemKey.padLeft(width, '0');
+        final paddedMatch = _productsByItemNumber[padded];
+        if (paddedMatch != null) return paddedMatch;
+      }
+      return null;
+    }
+
     final qtyByUpcMergeKey = <String, int>{};
     final qtyByItemMergeKeyWithoutUpc = <String, int>{};
     for (final line in _orderLines) {
@@ -6333,33 +6484,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
     }
 
-    final numericItemFallbackWidths =
-        _productsByItemNumber.keys
-            .where((k) => RegExp(r'^\d+$').hasMatch(k))
-            .map((k) => k.length)
-            .toSet()
-            .toList()
-          ..sort();
-
     final lines = <OrderImportPreparedLine>[];
+    print('[ImportPrepare] total rows=${rows.length}');
     for (var i = 0; i < rows.length; i++) {
       final r = rows[i];
       final item = r.item;
       final rowQuantity = r.quantity;
       final explicitUpc = r.upc.trim();
+      print('[ImportPrepare] processing item=$item upc=$explicitUpc');
+      print(
+        '[ImportPrepare] row item=$item upc=$explicitUpc qty=$rowQuantity',
+      );
       final hasExplicitUpc = explicitUpc.isNotEmpty;
       final matchedByUpc = hasExplicitUpc ? lookupByUpcOnly(explicitUpc) : null;
-      final product = matchOrderImportProduct(
-        item,
-        _productsByItemNumber,
-        _productsByUpc,
-        upcLabel: r.upc,
-        numericItemFallbackWidths: numericItemFallbackWidths,
-      );
-      final shouldReportMissingOrFailedUpc =
-          !hasExplicitUpc || matchedByUpc == null;
+      final matchedByItemNumber = lookupByItemNumberOnly(item);
+      final product = matchedByUpc ?? matchedByItemNumber;
+      final upcMatched = hasExplicitUpc && matchedByUpc != null;
+      final itemNumberMatched = matchedByItemNumber != null;
+      final shouldReportMissingOrFailedUpc = !upcMatched && product != null;
       if (shouldReportMissingOrFailedUpc) {
-        final resolved = product != null;
+        final resolved = itemNumberMatched;
         itemsWithoutUpcRows.add(
           OrderImportItemsWithoutUpcRow(
             itemNumber: item,
@@ -6368,14 +6512,30 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             resolutionStatus: resolved
                 ? 'RESOLVED_BY_ITEM_NUMBER'
                 : 'NOT_FOUND',
-            description: resolved ? product.description : '',
-            price: resolved ? product.price.toStringAsFixed(2) : '',
-            minimumOrderQuantity: resolved ? '${product.minOrderQty}' : '',
-            caseQuantity: resolved ? '${product.caseQty}' : '',
+            description: resolved ? (product?.description ?? '') : '',
+            price: resolved ? (product?.price.toStringAsFixed(2) ?? '') : '',
+            minimumOrderQuantity: resolved ? '${product?.minOrderQty ?? ''}' : '',
+            caseQuantity: resolved ? '${product?.caseQty ?? ''}' : '',
           ),
         );
       }
       if (product == null) {
+        print('[ItemsNotFound] captured item=$item');
+        print(
+          '[ItemsNotFound] captured item=$item upc=$explicitUpc qty=$rowQuantity',
+        );
+        itemsWithoutUpcRows.add(
+          OrderImportItemsWithoutUpcRow(
+            itemNumber: item,
+            quantity: rowQuantity,
+            originalUpc: explicitUpc,
+            resolutionStatus: 'NOT_FOUND',
+            description: '',
+            price: '',
+            minimumOrderQuantity: '',
+            caseQuantity: '',
+          ),
+        );
         skippedRows.add(
           OrderImportSkippedRow(
             item: item,
@@ -6439,6 +6599,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         await Future<void>.delayed(Duration.zero);
       }
     }
+    final notFoundCount = itemsWithoutUpcRows
+        .where(_itemsWithoutUpcRowIsNotFound)
+        .length;
+    print(
+      '[ImportPrepare] itemsWithoutUpcRows total=${itemsWithoutUpcRows.length}',
+    );
+    print('[ImportPrepare] NOT_FOUND count=$notFoundCount');
     return OrderImportPrepareOutcome(
       lines: lines,
       skippedRows: skippedRows,
@@ -6797,6 +6964,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Future<void> _pickAndImportOrderCsv() async {
+    print('🔥 IMPORT ENTRY HIT 🔥');
     if (_loadingProducts) return;
     if (_orderCsvImportInProgress) return;
     _orderCsvImportInProgress = true;
@@ -6846,6 +7014,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final contributingFileNames = <String>[];
 
       for (final file in result.files) {
+        print(
+          '[ImportOrderFile] picked file name=${file.name} path=${file.path ?? '(none)'} bytes=${file.bytes?.length ?? 0}',
+        );
         debugPrint('[ImportOrder] file name: ${file.name}');
         debugPrint('[ImportOrder] path: ${file.path ?? '(none)'}');
         debugPrint(
@@ -6865,13 +7036,38 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             'and no bytes. Try downloading it locally and import again.',
           );
         }
+        print('[ImportFile] path=${file.path ?? '(none)'}');
+        print('[ImportFile] bytes=${fileBytes.length}');
         debugPrint('[ImportOrder] raw length: ${fileBytes.length}');
 
         try {
           debugPrint('[ImportOrder] parse starting');
           final outcome = isExcel
               ? parseOrderImportExcelBytes(fileBytes, sourceLabel: file.name)
-              : parseOrderImportCsv(utf8.decode(fileBytes, allowMalformed: true));
+              : () {
+                  final bytesForDebug = fileBytes;
+                  print('[ImportFile] bytes=${bytesForDebug?.length ?? 0}');
+                  if (bytesForDebug != null) {
+                    final rawText = utf8.decode(
+                      bytesForDebug,
+                      allowMalformed: true,
+                    );
+                    print('[ImportFile] path=${file.path ?? file.name}');
+                    print('[ImportFile] bytes=${bytesForDebug.length}');
+                    print(
+                      '[ImportFile] text contains 12322255=${rawText.contains('12322255')}',
+                    );
+                    return parseOrderImportCsv(rawText);
+                  } else {
+                    print('[ImportFile] path=${file.path ?? file.name}');
+                    print('[ImportFile] bytes=0');
+                    print('[ImportFile] text contains 12322255=false');
+                    throw FormatException(
+                      'Could not read "${file.name}". The file provider returned no path '
+                      'and no bytes. Try downloading it locally and import again.',
+                    );
+                  }
+                }();
           debugPrint('[ImportOrder] parse complete: rows=${outcome.rows.length}');
           combinedRows.addAll(outcome.rows);
           allParseSkipped.addAll(outcome.skippedRows);
@@ -6985,6 +7181,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
       _lastItemsWithoutUpcRowsCustomerId = _selectedCustomer!.id;
       _lastItemsWithoutUpcRowsCustomerName = _selectedCustomer!.displayName;
+      await _persistItemsWithoutUpcRowsForCustomer(
+        _selectedCustomer!,
+        _lastItemsWithoutUpcRows,
+      );
       File? skippedCsvFile;
       if (skippedRows.isNotEmpty) {
         try {
@@ -7204,6 +7404,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Future<void> _loadCsvFromPhone() async {
+    print('🔥 IMPORT ENTRY HIT 🔥');
     try {
       _editDialogOpen = true;
 
@@ -11932,6 +12133,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Single .xlsx pick for master build staging; cancel returns null (no snackbars).
   Future<String?> _pickMasterBuildXlsxFile(String dialogTitle) async {
+    print('🔥 IMPORT ENTRY HIT 🔥');
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['xlsx'],
@@ -16280,7 +16482,13 @@ class _OrderListTab extends StatelessWidget {
           const SizedBox(height: 4),
           FilledButton.icon(
             style: _orderTabActionButtonStyle,
-            onPressed: loadingProducts ? null : () => onImportOrder(),
+            onPressed: loadingProducts
+                ? null
+                : () {
+                    print('🔥 IMPORT ENTRY HIT 🔥');
+                    print('[ImportOrderButton] import order started');
+                    onImportOrder();
+                  },
             icon: const Icon(Icons.file_upload_outlined),
             label: const Text('Import Order (OneDrive → Import folder)'),
           ),
