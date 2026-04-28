@@ -10039,7 +10039,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                               },
                             ),
                             FilterChip(
-                              label: const Text('Home Decor'),
+                              label: const Text('Decor & Giftware'),
                               selected: _catalogMerchandising == 'homeDecor',
                               onSelected: (selected) {
                                 setState(() {
