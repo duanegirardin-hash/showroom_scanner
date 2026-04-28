@@ -1947,6 +1947,18 @@ Future<File> exportOrderCsvToShowroomExportsLayout({
   required String csvText,
   String? persistExportDebugAction,
 }) async {
+  final normalizedFilename = filename.trim().toUpperCase();
+  final isLegacyItemsNotImported = RegExp(
+    r'^ITEMS_NOT_IMPORTED.*\.CSV$',
+  ).hasMatch(normalizedFilename);
+  if (isLegacyItemsNotImported) {
+    debugPrint('[BlockedExport] ITEMS_NOT_IMPORTED export blocked');
+    throw StateError(
+      'Legacy ITEMS_NOT_IMPORTED export is disabled. '
+      'NOT IMPORTED rows are included in All_Exported_Quote_Items.csv.',
+    );
+  }
+
   late final File file;
   if (Platform.isAndroid) {
     final folder = sanitizeCustomerExportFolderName(customerDisplayName);
@@ -3092,11 +3104,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Prevents overlapping order-CSV imports (second tap while apply/write still runs → duplicate ITEMS_NOT_IMPORTED writes).
   bool _orderCsvImportInProgress = false;
 
-  /// Set when order import writes ITEMS_NOT_IMPORTED_*.csv (path + owning customer id).
-  /// [Export All Quotes] appends this file to the share payload when the export customer id matches.
-  String? _lastItemsNotImportedCsvPath;
-  String? _lastItemsNotImportedCsvCustomerId;
-  String? _lastItemsNotImportedCsvCustomerName;
   List<OrderImportSkippedRow> _lastItemsNotImportedRows = const [];
   String? _lastItemsNotImportedRowsCustomerId;
   String? _lastItemsNotImportedRowsCustomerName;
@@ -5161,33 +5168,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  /// Basename only; [uniqueCsvFilenameInDirectory] / Android export still dedupe on collision.
-  String _itemsNotImportedCustomerFilenameSegment(String displayName) {
-    var s = sanitizeCustomerExportFolderName(displayName);
-    s = s.replaceAll(RegExp(r'\s+'), '_');
-    s = s.replaceAll(RegExp(r'_+'), '_');
-    s = s.replaceAll(RegExp(r'^_+|_+$'), '');
-    if (s.isEmpty) s = kNoCustomerExportFolderName;
-    return s.toUpperCase();
-  }
-
-  String _buildItemsNotImportedFilename({
-    required DateTime stampedOn,
-    required String customerDisplayName,
-  }) {
-    final y = stampedOn.year.toString().padLeft(4, '0');
-    final mo = stampedOn.month.toString().padLeft(2, '0');
-    final day = stampedOn.day.toString().padLeft(2, '0');
-    final dateUnderscore = '${y}_${mo}_${day}';
-    final dateCompact = '$y$mo$day';
-    final seq = (stampedOn.millisecondsSinceEpoch % 1000).toString().padLeft(
-      3,
-      '0',
-    );
-    final cust = _itemsNotImportedCustomerFilenameSegment(customerDisplayName);
-    return 'ITEMS_NOT_IMPORTED_${dateUnderscore}_${seq}_${cust}_$dateCompact.csv';
-  }
-
   String _csvEscape(String value) {
     if (!value.contains(',') && !value.contains('"') && !value.contains('\n')) {
       return value;
@@ -5324,75 +5304,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return byUpc;
   }
 
-  String _orderImportNotImportedReasonForCsv(OrderImportSkippedRow r) {
-    final reason = r.reason.trim();
-    if (reason == 'Item not found') return 'Not found in product catalog';
-    if (reason == 'Invalid quantity.' || reason == 'Invalid quantity') {
-      return 'Invalid quantity';
-    }
-    if (reason == 'Empty item.') return 'Missing UPC and item number';
-    return reason;
-  }
-
-  String _formatNotImportedRowsCsv(List<OrderImportSkippedRow> rows) {
-    final out = <String>['Item,Reason'];
-    for (final r in rows) {
-      final itemLabel = r.item.trim().isEmpty ? '(no item)' : r.item.trim();
-      out.add(
-        '${_csvEscape(itemLabel)},'
-        '${_csvEscape(_orderImportNotImportedReasonForCsv(r))}',
-      );
-    }
-    return out.join('\n');
-  }
-
-  Future<List<OrderImportSkippedRow>> _readNotImportedRowsFromCsvFile(
-    File csvFile,
-  ) async {
-    try {
-      final raw = await csvFile.readAsString();
-      final rows = const CsvToListConverter(
-        shouldParseNumbers: false,
-      ).convert(raw);
-      if (rows.isEmpty) return const [];
-      if (kDebugMode) {
-        final headerRow = rows.first;
-        debugPrint(
-          '[NotImportedDebug] source csv path=${csvFile.path} '
-          'headerColumns=${headerRow.length} '
-          'headerRaw=${headerRow.map((c) => c.toString()).join(' | ')}',
-        );
-      }
-      final out = <OrderImportSkippedRow>[];
-      for (var i = 1; i < rows.length; i++) {
-        final row = rows[i];
-        if (row.isEmpty) continue;
-        if (kDebugMode && i <= 10) {
-          debugPrint(
-            '[NotImportedDebug] parsed row#$i columnCount=${row.length} '
-            'rawColumns=${row.map((c) => c.toString()).join(' | ')}',
-          );
-        }
-        final item = row[0].toString().trim();
-        final reason = row.length > 1 ? row[1].toString().trim() : '';
-        if (item.isEmpty && reason.isEmpty) continue;
-        out.add(
-          OrderImportSkippedRow(
-            item: item,
-            quantity: '',
-            description: '',
-            price: '',
-            reason: reason,
-          ),
-        );
-      }
-      return out;
-    } catch (e) {
-      debugPrint('[ExportAll] failed parsing ITEMS_NOT_IMPORTED csv: $e');
-      return const [];
-    }
-  }
-
   Future<List<OrderImportSkippedRow>> _resolveLastNotImportedRowsForCustomer(
     Customer customer,
   ) async {
@@ -5405,42 +5316,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (rowsCustomerMatch && _lastItemsNotImportedRows.isNotEmpty) {
       return List<OrderImportSkippedRow>.from(_lastItemsNotImportedRows);
     }
-    final csvCustomerMatch = _sameLogicalCustomerQuoteRows(
-      customerIdA: customer.id,
-      customerNameA: customer.displayName,
-      customerIdB: _lastItemsNotImportedCsvCustomerId ?? '',
-      customerNameB: _lastItemsNotImportedCsvCustomerName ?? '',
-    );
-    if (_lastItemsNotImportedCsvPath != null && csvCustomerMatch) {
-      final file = File(_lastItemsNotImportedCsvPath!);
-      if (await file.exists()) {
-        final parsed = await _readNotImportedRowsFromCsvFile(file);
-        if (parsed.isNotEmpty) return parsed;
-      }
-    }
     return const [];
-  }
-
-  Future<File> _writeItemsNotImportedCsv({
-    required String customerDisplayName,
-    required List<OrderImportSkippedRow> skippedRows,
-  }) async {
-    final stampedOn = DateTime.now();
-    final filename = _buildItemsNotImportedFilename(
-      stampedOn: stampedOn,
-      customerDisplayName: customerDisplayName,
-    );
-    final csvText = _formatNotImportedRowsCsv(skippedRows);
-    final out = await exportOrderCsvToShowroomExportsLayout(
-      customerDisplayName: customerDisplayName,
-      filename: filename,
-      csvText: csvText,
-      persistExportDebugAction: 'ITEMS_NOT_IMPORTED',
-    );
-    if (kDebugMode) {
-      debugPrint('[ItemsNotImported] csv created: ${out.path}');
-    }
-    return out;
   }
 
   String _formatItemsWithoutUpcRowsCsv(
@@ -5451,15 +5327,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     ];
     for (final r in rows) {
       out.add(
-        '${_csvEscape(_csvPreserveLeadingZerosCell(r.itemNumber))},'
+        '${_csvEscape(r.itemNumber)},'
         '${_csvEscape(r.quantity.toString())},'
-        '${_csvEscape(_csvPreserveLeadingZerosCell(r.originalUpc))},'
+        '${_csvEscape(r.originalUpc)},'
         '${_csvEscape(r.resolutionStatus)},'
         '${_csvEscape(r.description)},'
         '${_csvEscape(r.price)},'
         '${_csvEscape(r.minimumOrderQuantity)},'
         '${_csvEscape(r.caseQuantity)}',
       );
+    }
+    return out.join('\n');
+  }
+
+  String _formatItemsNotFoundRowsCsv(
+    List<OrderImportItemsWithoutUpcRow> rows,
+  ) {
+    final out = <String>['Item Number,Quantity'];
+    for (final r in rows) {
+      out.add('${_csvEscape(r.itemNumber)},${_csvEscape(r.quantity.toString())}');
     }
     return out.join('\n');
   }
@@ -5500,7 +5386,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   String _itemsWithoutUpcStateFilenameForCustomer(Customer customer) {
-    final token = _itemsNotImportedCustomerFilenameSegment(customer.displayName);
+    var token = sanitizeCustomerExportFolderName(customer.displayName);
+    token = token.replaceAll(RegExp(r'\s+'), '_');
+    token = token.replaceAll(RegExp(r'_+'), '_');
+    token = token.replaceAll(RegExp(r'^_+|_+$'), '');
+    if (token.isEmpty) token = kNoCustomerExportFolderName;
+    token = token.toUpperCase();
     return 'import_items_without_upc_$token.json';
   }
 
@@ -5586,7 +5477,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required List<OrderImportItemsWithoutUpcRow> rows,
   }) async {
     const filename = 'items_not_found.csv';
-    final csvText = _formatItemsWithoutUpcRowsCsv(rows);
+    final csvText = _formatItemsNotFoundRowsCsv(rows);
     return exportOrderCsvToShowroomExportsLayout(
       customerDisplayName: customerDisplayName,
       filename: filename,
@@ -6133,32 +6024,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       final quoteCsvFilesExported = exportedFiles.length;
-      if (exportedFiles.isNotEmpty &&
-          _lastItemsNotImportedCsvPath != null &&
-          _sameLogicalCustomerQuoteRows(
-            customerIdA: customer.id,
-            customerNameA: customer.displayName,
-            customerIdB: _lastItemsNotImportedCsvCustomerId ?? '',
-            customerNameB: _lastItemsNotImportedCsvCustomerName ?? '',
-          )) {
-        final notImported = File(_lastItemsNotImportedCsvPath!);
-        if (await notImported.exists()) {
-          final base = p.basename(notImported.path);
-          if (base.startsWith('ITEMS_NOT_IMPORTED') && base.endsWith('.csv')) {
-            final pathNorm = p.normalize(notImported.path);
-            final already = exportedFiles.any(
-              (f) => p.normalize(f.path) == pathNorm,
-            );
-            if (!already) {
-              if (kDebugMode) {
-                debugPrint('[ItemsNotImported] current file path=$pathNorm');
-              }
-              exportedFiles.add(notImported);
-            }
-          }
-        }
-      }
-
       if (exportedFiles.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -6804,7 +6669,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required String filesImportedDescription,
     required OrderImportApplyOutcome applyOutcome,
     required int notImportedRowCount,
-    File? itemsNotImportedCsvFile,
   }) async {
     final dupUse = applyOutcome.duplicateChoiceUseImportedQtyCount;
     await showDialog<void>(
@@ -6848,21 +6712,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                 Text('MOQ Adjustments: ${applyOutcome.moqAdjustedCount}'),
                 const SizedBox(height: 12),
                 Text('Items Not Imported: $notImportedRowCount'),
-                if (itemsNotImportedCsvFile != null) ...[
-                  const SizedBox(height: 8),
-                  SelectableText(itemsNotImportedCsvFile.path),
-                ],
               ],
             ),
           ),
           actions: [
-            if (notImportedRowCount > 0 && itemsNotImportedCsvFile != null)
-              TextButton(
-                onPressed: () async {
-                  await _openCsvWithSystemHandler(itemsNotImportedCsvFile);
-                },
-                child: const Text('Open File'),
-              ),
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
               child: const Text('OK'),
@@ -7185,29 +7038,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _selectedCustomer!,
         _lastItemsWithoutUpcRows,
       );
-      File? skippedCsvFile;
       if (skippedRows.isNotEmpty) {
-        try {
-          skippedCsvFile = await _writeItemsNotImportedCsv(
-            customerDisplayName: _selectedCustomer!.displayName,
-            skippedRows: skippedRows,
-          );
-          // Single tracked file per import cycle (export/share uses this only).
-          _lastItemsNotImportedCsvPath = skippedCsvFile.path;
-          _lastItemsNotImportedCsvCustomerId = _selectedCustomer!.id;
-          _lastItemsNotImportedCsvCustomerName = _selectedCustomer!.displayName;
-          _lastItemsNotImportedRows = List<OrderImportSkippedRow>.from(
-            skippedRows,
-          );
-          _lastItemsNotImportedRowsCustomerId = _selectedCustomer!.id;
-          _lastItemsNotImportedRowsCustomerName = _selectedCustomer!.displayName;
-        } catch (e, st) {
-          debugPrint('[OrderImport] ITEMS_NOT_IMPORTED CSV failed: $e\n$st');
-        }
+        _lastItemsNotImportedRows = List<OrderImportSkippedRow>.from(skippedRows);
+        _lastItemsNotImportedRowsCustomerId = _selectedCustomer!.id;
+        _lastItemsNotImportedRowsCustomerName = _selectedCustomer!.displayName;
       } else {
-        _lastItemsNotImportedCsvPath = null;
-        _lastItemsNotImportedCsvCustomerId = null;
-        _lastItemsNotImportedCsvCustomerName = null;
         _lastItemsNotImportedRows = const [];
         _lastItemsNotImportedRowsCustomerId = null;
         _lastItemsNotImportedRowsCustomerName = null;
@@ -7241,7 +7076,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         filesImportedDescription: sourceFileLabel,
         applyOutcome: applyOutcome,
         notImportedRowCount: skippedRows.length,
-        itemsNotImportedCsvFile: skippedCsvFile,
       );
       debugPrint('[ImportOrder] import success');
     } catch (e, st) {
