@@ -6344,10 +6344,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             resolutionStatus: resolved
                 ? 'RESOLVED_BY_ITEM_NUMBER'
                 : 'NOT_FOUND',
-            description: resolved ? (product?.description ?? '') : '',
-            price: resolved ? (product?.price.toStringAsFixed(2) ?? '') : '',
-            minimumOrderQuantity: resolved ? '${product?.minOrderQty ?? ''}' : '',
-            caseQuantity: resolved ? '${product?.caseQty ?? ''}' : '',
+            description: resolved ? product.description : '',
+            price: resolved ? product.price.toStringAsFixed(2) : '',
+            minimumOrderQuantity: resolved ? '${product.minOrderQty}' : '',
+            caseQuantity: resolved ? '${product.caseQty}' : '',
           ),
         );
       }
@@ -7204,6 +7204,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
+  // ignore: unused_element
   Future<void> _loadCsvFromPhone() async {
     print('🔥 IMPORT ENTRY HIT 🔥');
     try {
@@ -15814,12 +15815,6 @@ class _OrderLineCardRow extends StatelessWidget {
     required this.onIncrease,
   });
 
-  static final TextStyle _saleUnitStyle = TextStyle(
-    fontSize: 14,
-    fontWeight: FontWeight.w600,
-    color: Colors.green.shade800,
-  );
-
   /// When true (Orders tab + Scan tab order lists), use denser text lines and bottom-right image.
   final bool compactLayout;
 
@@ -16594,14 +16589,12 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
   DateTime? _lastScannedAt;
   bool _torchEnabled = false;
   String _cameraOverlayText = 'Qty: 0';
-  String? _cameraOverlayItemNumber;
 
   String _cameraScanQtyLabel() => _cameraOverlayText;
 
   void _updateCameraOverlayQtyForScanResult(_CameraScanOverlayUpdate result) {
     if (!mounted) return;
     setState(() {
-      _cameraOverlayItemNumber = result.itemNumber;
       _cameraOverlayText = 'Qty: ${result.quantity}';
     });
   }
