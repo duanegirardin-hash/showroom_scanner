@@ -3059,7 +3059,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   static const bool _ecatalogListPriceColumnDebug = false;
 
   final FocusNode _scannerFocusNode = FocusNode();
-  final TextEditingController _scannerController = TextEditingController();
+  String _scannerBuffer = '';
 
   /// Load Quote dialog only — search field ([_LoadQuoteDialogContent]).
   final FocusNode _searchQuotesFocusNode = FocusNode();
@@ -3109,7 +3109,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// This ensures similar-looking item numbers (e.g. 87001 vs 87002) are never merged.
   final Map<String, OrderLine> _orderLineByKey = {};
 
-  Timer? _scanDebounceTimer;
   Timer? _refocusTimer;
   /// Single follow-up pulse / keyboard hide for [_requestScannerFocus] (prevents stacked retries).
   Timer? _scannerFocusRetryTimer;
@@ -3263,8 +3262,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   static const int _scanDedupeMs = 80;
   // 12ms proved too aggressive on some scanners and can split a single
   // physical scan into partial fragments ("2", "73", "730", ...).
-  // Idle debounce only when no newline/submit/editing-complete arrives (see [_onScannerChanged]).
-  static const int _scanInputDebounceMs = 28;
   static const int _scannerRefocusDelayMs = 35;
   static const int _tabReturnRefocusDelayMs = 120;
   /// Collapses burst calls (same-frame / input churn) without blocking tab refocus (~16ms vs ~35ms).
@@ -3323,6 +3320,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// When false, [_scheduleScannerRefocus] no-ops so focus timers do not run during heavy startup.
   bool _scannerStartupRefocusEnabled = false;
+  bool _printedScannerFocusDiagnosticsTestSteps = false;
 
   @override
   void initState() {
@@ -3365,6 +3363,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     });
 
     _scannerFocusNode.addListener(() {
+      debugPrint(
+        '[ScannerField][FocusListener] scannerFocusChanged hasFocus=${_scannerFocusNode.hasFocus} '
+        'canRequestFocus=${_scannerFocusNode.canRequestFocus} contextExists=${_scannerFocusNode.context != null} '
+        'primaryFocus=${FocusManager.instance.primaryFocus} scanTabActive=$_scanTabActive activeTabIndex=$_activeTabIndex',
+      );
+      debugPrint(
+        '[ScannerField][FocusListener] hasFocus=${_scannerFocusNode.hasFocus} primary=${FocusManager.instance.primaryFocus}',
+      );
       if (!_scannerFocusNode.hasFocus &&
           !_quickEntryFocusNode.hasFocus &&
           !_quoteNameFocusNode.hasFocus &&
@@ -3390,6 +3396,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // Rebuild so Scan tab can swap inline vs floating quick-entry layout.
       if (mounted) setState(() {});
     });
+
+    if (!_printedScannerFocusDiagnosticsTestSteps) {
+      _printedScannerFocusDiagnosticsTestSteps = true;
+      debugPrint('=== TEST STEPS ===');
+      debugPrint('1. Type invalid item');
+      debugPrint('2. Tap Add');
+      debugPrint('3. Wait');
+      debugPrint('4. Scan item');
+      debugPrint('Copy logs containing [ManualEntry] and [ScannerField]');
+    }
 
     _quoteNameFocusNode.addListener(() {
       if (_quoteNameFocusNode.hasFocus) {
@@ -3689,7 +3705,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeListener(_handleGlobalFocusChange);
-    _scanDebounceTimer?.cancel();
     _refocusTimer?.cancel();
     _scannerFocusRetryTimer?.cancel();
     _scannerFocusHideKeyboardTimer?.cancel();
@@ -3705,7 +3720,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _errorScanPlayer?.dispose();
 
     _scannerFocusNode.dispose();
-    _scannerController.dispose();
 
     _searchQuotesFocusNode.dispose();
     _searchCustomersFocusNode.dispose();
@@ -3872,6 +3886,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     // Scanner already focused, or focus is on a non-editable widget.
     return true;
+  }
+
+  bool _isAnyManualTextFieldFocused() {
+    if (_quickEntryFocusNode.hasFocus ||
+        _quoteNameFocusNode.hasFocus ||
+        _searchQuotesFocusNode.hasFocus ||
+        _searchCustomersFocusNode.hasFocus) {
+      return true;
+    }
+
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary == null || primary == _scannerFocusNode) return false;
+    final ctx = primary.context;
+    if (ctx == null) return false;
+    final widget = ctx.widget;
+    if (widget is EditableText ||
+        widget is TextField ||
+        widget is TextFormField) {
+      return true;
+    }
+    return ctx.findAncestorWidgetOfExactType<EditableText>() != null ||
+        ctx.findAncestorWidgetOfExactType<TextField>() != null ||
+        ctx.findAncestorWidgetOfExactType<TextFormField>() != null;
   }
 
   void _requestScannerFocus() {
@@ -8843,79 +8880,42 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  /// Scanner "terminator" paths commit immediately (no idle debounce):
-  /// newline or carriage return in the change text, [TextField.onSubmitted], or
-  /// [TextField.onEditingComplete] (some stacks fire completion there for
-  /// [TextInputType.none] without a reliable `onSubmitted`).
-  /// Otherwise [_scanInputDebounceMs] idle debounce coalesces keystrokes for
-  /// scanners that do not send a suffix.
-  void _onScannerChanged(String value) {
-    debugPrint('[ScannerInput] raw=<$value>');
-    if (_manualEntryFocusTraceActive) {
-      debugPrint(
-        '[ScannerInput] onChanged (trace active): value="$value" scannerHasFocus=${_scannerFocusNode.hasFocus} '
-        'quickEntryHasFocus=${_quickEntryFocusNode.hasFocus}',
-      );
-      final trimmed = value.trim();
-      if (trimmed.isNotEmpty || value.contains('\n') || value.contains('\r')) {
-        _manualEntryFocusTraceActive = false;
-        _manualEntryFocusTraceTimeout?.cancel();
-        debugPrint(
-          '[ManualEntry][Debug] ending focus trace: scanner input received. scannerHasFocus=${_scannerFocusNode.hasFocus}',
-        );
-      }
-    }
-
-    _scanDebounceTimer?.cancel();
-    // If the scanner sends an Enter/newline terminator, treat that as a
-    // completion signal and process the full buffer immediately to avoid
-    // acting on partial intermediate values.
-    if (value.contains('\n') || value.contains('\r')) {
-      _commitScannerBuffer(trigger: 'newline terminator', rawOverride: value);
-      return;
-    }
-    // Post-commit [clear] notifies with ""; skip debounce (would only re-commit empty).
-    if (value.isEmpty) {
-      return;
-    }
-    _scanDebounceTimer = Timer(
-      Duration(milliseconds: _scanInputDebounceMs),
-      () {
-        if (!mounted) return;
-        _commitScannerBuffer(trigger: 'debounce ${_scanInputDebounceMs}ms');
-      },
-    );
+  void _handleScannerCharacter(String char) {
+    if (char.isEmpty) return;
+    _scannerBuffer += char;
   }
 
-  void _onScannerSubmitted(String value) {
-    _scanDebounceTimer?.cancel();
-    _commitScannerBuffer(trigger: 'submit action', rawOverride: value);
-  }
-
-  void _onScannerEditingComplete() {
-    _scanDebounceTimer?.cancel();
-    _commitScannerBuffer(
-      trigger: 'editing complete',
-      rawOverride: _scannerController.text,
-    );
-  }
-
-  void _commitScannerBuffer({required String trigger, String? rawOverride}) {
-    final source = rawOverride ?? _scannerController.text;
-    final cleaned = source.replaceAll('\n', '').replaceAll('\r', '').trim();
-    if (cleaned.isEmpty) {
-      _scannerController.clear();
+  void _processScannerBuffer() {
+    final scanned = _scannerBuffer.trim();
+    _scannerBuffer = '';
+    if (scanned.isEmpty) {
       _restoreScanFieldFocus();
       return;
     }
-    // Capture-and-clear at commit time so queued processing cannot erase
-    // in-flight input from the next physical scan.
-    _scannerController.clear();
-    debugPrint('[ScannerInput] committed=<$cleaned>');
-    final int sampleId = _startScanPerfSample(cleaned);
+
+    if (_manualEntryFocusTraceActive) {
+      _manualEntryFocusTraceActive = false;
+      _manualEntryFocusTraceTimeout?.cancel();
+      debugPrint(
+        '[ManualEntry][Debug] ending focus trace: scanner input received. scannerHasFocus=${_scannerFocusNode.hasFocus}',
+      );
+    }
+
+    if (_quickEntryController.text.trim().isNotEmpty) {
+      _quickEntryController.clear();
+      if (_scanSearchQuery.isNotEmpty || _searchResults.isNotEmpty) {
+        _setStateDebug('quick_entry_clear_search_on_scan_start', () {
+          _scanSearchQuery = '';
+          _searchResults = [];
+        });
+      }
+    }
+
+    debugPrint('[ScannerInput] committed=<$scanned>');
+    final int sampleId = _startScanPerfSample(scanned);
     _currentScanSampleId = sampleId;
-    _logScanPerfStep(sampleId, 'barcode text fully received ($trigger)');
-    _enqueueScan(cleaned);
+    _logScanPerfStep(sampleId, 'barcode text fully received (hardware enter)');
+    _enqueueScan(scanned);
   }
 
   /// When user scans while focus is in quote name field, barcode gets typed there.
@@ -8983,12 +8983,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       if (product == null) {
         _showExactLookupMessageForQuery(input, scanTab: true);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          _requestScannerFocusAfterManualEntry(
-            debugLabel: 'quickEntryExactNotFound',
-          );
+        _quickEntryController.clear();
+        _setStateDebug('quick_entry_clear_search_not_found', () {
+          _scanSearchQuery = '';
+          _searchResults = [];
         });
+        _forceScannerFocusAfterInvalidQuickEntry();
         return;
       }
 
@@ -9027,7 +9027,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('No match — try again')));
-      _scannerController.clear();
       _quickEntryController.clear();
       _setStateDebug('quick_entry_clear_search_after_error', () {
         _scanSearchQuery = '';
@@ -9075,17 +9074,47 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         'quickEntryHasFocus=${_quickEntryFocusNode.hasFocus} scannerHasFocus=${_scannerFocusNode.hasFocus} '
         'scheduling scanner focus restore.',
       );
+      final canForceScannerFocus =
+          _scanTabActive &&
+          !_editDialogOpen &&
+          !_quickEntryFocusNode.hasFocus &&
+          !_ecatalogSearchFocusNode.hasFocus;
+      if (canForceScannerFocus) {
+        FocusScope.of(context).requestFocus(_scannerFocusNode);
+      }
       _scheduleScannerRefocus();
-      _scannerController.clear();
       debugPrint(
         '[ManualEntry][Submit] scanner focus recovery scheduled. '
         'scannerHasFocus=${_scannerFocusNode.hasFocus}',
       );
 
-      // Mark trace "complete" for the next scanner keystroke; `_onScannerChanged`
-      // will stop it as soon as scanner input is received.
+      // Mark trace "complete" for the next scanner scan path.
       // (If scanner never receives input, the timeout above will end trace.)
     });
+  }
+
+  void _forceScannerFocusAfterInvalidQuickEntry() {
+    debugPrint('[ManualEntry][InvalidFocusRestore] start');
+    if (!mounted) {
+      debugPrint('[ManualEntry][InvalidFocusRestore] return early: not mounted');
+      return;
+    }
+    if (!_scanTabActive) {
+      debugPrint(
+        '[ManualEntry][InvalidFocusRestore] return early: scan tab inactive',
+      );
+      return;
+    }
+    if (_editDialogOpen) {
+      debugPrint(
+        '[ManualEntry][InvalidFocusRestore] return early: edit dialog open',
+      );
+      return;
+    }
+
+    _quickEntryFocusNode.unfocus();
+    FocusScope.of(context).requestFocus(_scannerFocusNode);
+    _scheduleScannerRefocus();
   }
 
   void _onSearchChanged(String value) {
@@ -10674,6 +10703,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           textTheme: textTheme,
                           orderHasDiscount: orderHasDiscount,
                         ),
+                        const SizedBox(height: 8),
+                        _buildECatalogTopActionBar(),
                         AnimatedCrossFade(
                           firstChild: const SizedBox.shrink(),
                           secondChild: _buildECatalogOrderPanel(),
@@ -14505,11 +14536,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       feedbackColor: feedbackColor,
       customerLabel: customerLabel,
       customerSelected: _selectedCustomer != null,
-      scannerController: _scannerController,
       scannerFocusNode: _scannerFocusNode,
-      onScannerChanged: _onScannerChanged,
-      onScannerSubmitted: _onScannerSubmitted,
-      onScannerEditingComplete: _onScannerEditingComplete,
       quoteNameController: _quoteNameController,
       quoteNameFocusNode: _quoteNameFocusNode,
       onQuoteNameSubmitted: _onQuoteNameSubmitted,
@@ -14550,9 +14577,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return _ScanTabLoadCreateQuoteBar(
       onLoadQuote: _showLoadQuoteDialog,
       onCreateQuote: _confirmNewQuote,
-      onImportOrder: () => _pickAndImportOrderCsv(),
-      onExportAll: () => _exportAllQuotesToCsv(),
       onScanWithCamera: _openCameraScanner,
+    );
+  }
+
+  Widget _buildECatalogTopActionBar() {
+    return _ECatalogTopActionBar(
+      onCreateQuote: _confirmNewQuote,
+      onLoadQuote: _showLoadQuoteDialog,
+      onImportOrder: _pickAndImportOrderCsv,
+      onExportAll: _exportAllQuotesToCsv,
     );
   }
 
@@ -14563,6 +14597,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       quickEntryTextFieldKey: _quickEntryTextFieldKey,
       quickEntryController: _quickEntryController,
       quickEntryFocusNode: _quickEntryFocusNode,
+      onQuickEntryTap: () {
+        _quickEntryFocusNode.requestFocus();
+        SystemChannels.textInput.invokeMethod('TextInput.show');
+      },
       onSearchChanged: _onSearchChanged,
       onQuickEntryTapOutside: (_) {
         debugPrint(
@@ -14812,17 +14850,47 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final quickEntryFloatAboveKeyboard =
         (_quickEntryFocusNode.hasFocus && viewInsets.bottom > 0) ||
         (_quickEntryHoldFloatingLayoutForKeyboard && viewInsets.bottom > 0);
-    return _ScanTabLayout(
-      quotePanel: _buildScanQuotePanel(),
-      loadingProducts: _loadingProducts,
-      scanPanelScrollController: _scanPanelScrollController,
-      liveOrderControlPanel: _buildScanLiveOrderControlPanel(),
-      orderListSliver: _buildScanTabOrderListSliver(),
-      searchResultsList: _buildScanTabSearchResultsList(),
-      itemSearchBlock: _buildScanTabItemSearchBlock(),
-      quickEntryFloatAboveKeyboard: quickEntryFloatAboveKeyboard,
-      quickEntryStatusForPlaceholder: _quickEntryStatus,
-      loadCreateQuoteBar: _buildScanTabLoadCreateQuoteBar(),
+    return Focus(
+      autofocus: true,
+      focusNode: _scannerFocusNode,
+      canRequestFocus: !_quickEntryFocusNode.hasFocus,
+      descendantsAreFocusable: true,
+      skipTraversal: true,
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        if (_isAnyManualTextFieldFocused()) {
+          return KeyEventResult.ignored;
+        }
+
+        if (event.logicalKey == LogicalKeyboardKey.enter) {
+          _processScannerBuffer();
+          return KeyEventResult.handled;
+        }
+
+        final key = event.logicalKey.keyLabel;
+        if (key.isNotEmpty &&
+            key != 'Shift' &&
+            key != 'Control' &&
+            key != 'Alt' &&
+            key != 'Meta') {
+          _handleScannerCharacter(key);
+          return KeyEventResult.handled;
+        }
+
+        return KeyEventResult.ignored;
+      },
+      child: _ScanTabLayout(
+        quotePanel: _buildScanQuotePanel(),
+        loadingProducts: _loadingProducts,
+        scanPanelScrollController: _scanPanelScrollController,
+        liveOrderControlPanel: _buildScanLiveOrderControlPanel(),
+        orderListSliver: _buildScanTabOrderListSliver(),
+        searchResultsList: _buildScanTabSearchResultsList(),
+        itemSearchBlock: _buildScanTabItemSearchBlock(),
+        quickEntryFloatAboveKeyboard: quickEntryFloatAboveKeyboard,
+        quickEntryStatusForPlaceholder: _quickEntryStatus,
+        loadCreateQuoteBar: _buildScanTabLoadCreateQuoteBar(),
+      ),
     );
   }
 
@@ -14942,6 +15010,7 @@ class _ScanTabLayout extends StatelessWidget {
     12,
     0,
   );
+  static const EdgeInsets _modeHeaderPadding = EdgeInsets.fromLTRB(12, 12, 12, 0);
   static const EdgeInsets _livePanelPadding = EdgeInsets.symmetric(
     horizontal: 12,
   );
@@ -14985,6 +15054,15 @@ class _ScanTabLayout extends StatelessWidget {
     final Widget scanBody = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        Padding(
+          padding: _modeHeaderPadding,
+          child: Text(
+            'Fast Scan Mode',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
         Padding(
           padding: _quotePanelPadding,
           child: RepaintBoundary(child: quotePanel),
@@ -15232,11 +15310,7 @@ class _ScanQuotePanel extends StatelessWidget {
     required this.feedbackColor,
     required this.customerLabel,
     required this.customerSelected,
-    required this.scannerController,
     required this.scannerFocusNode,
-    required this.onScannerChanged,
-    required this.onScannerSubmitted,
-    required this.onScannerEditingComplete,
     required this.quoteNameController,
     required this.quoteNameFocusNode,
     required this.onQuoteNameSubmitted,
@@ -15253,11 +15327,7 @@ class _ScanQuotePanel extends StatelessWidget {
   final Color? feedbackColor;
   final String customerLabel;
   final bool customerSelected;
-  final TextEditingController scannerController;
   final FocusNode scannerFocusNode;
-  final ValueChanged<String> onScannerChanged;
-  final ValueChanged<String> onScannerSubmitted;
-  final VoidCallback onScannerEditingComplete;
   final TextEditingController quoteNameController;
   final FocusNode quoteNameFocusNode;
   final ValueChanged<String> onQuoteNameSubmitted;
@@ -15276,26 +15346,23 @@ class _ScanQuotePanel extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SizedBox(
-          height: 1,
-          width: 1,
-          child: TextField(
-            controller: scannerController,
-            focusNode: scannerFocusNode,
-            keyboardType: TextInputType.none,
-            textInputAction: TextInputAction.done,
-            showCursor: false,
-            enableInteractiveSelection: false,
-            autocorrect: false,
-            onChanged: onScannerChanged,
-            onSubmitted: onScannerSubmitted,
-            onEditingComplete: onScannerEditingComplete,
-            decoration: const InputDecoration(
-              border: InputBorder.none,
-              isCollapsed: true,
-              contentPadding: EdgeInsets.zero,
-            ),
-          ),
+        AnimatedBuilder(
+          animation: scannerFocusNode,
+          builder: (context, _) {
+            final isActive = scannerFocusNode.hasFocus;
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+              child: Text(
+                isActive
+                    ? 'Scanner Focus: ACTIVE'
+                    : 'Scanner Focus: NOT ACTIVE',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: isActive ? Colors.green.shade700 : Colors.red.shade700,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            );
+          },
         ),
         Card(
           margin: const EdgeInsets.all(0),
@@ -15860,15 +15927,11 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
   const _ScanTabLoadCreateQuoteBar({
     required this.onLoadQuote,
     required this.onCreateQuote,
-    required this.onImportOrder,
-    required this.onExportAll,
     required this.onScanWithCamera,
   });
 
   final VoidCallback onLoadQuote;
   final VoidCallback onCreateQuote;
-  final VoidCallback onImportOrder;
-  final VoidCallback onExportAll;
   final VoidCallback onScanWithCamera;
 
   @override
@@ -15898,6 +15961,54 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
             visualDensity: VisualDensity.compact,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
+          onPressed: onScanWithCamera,
+          child: const Text('Scan with Camera', style: TextStyle(fontSize: 13)),
+        ),
+      ],
+    );
+  }
+}
+
+class _ECatalogTopActionBar extends StatelessWidget {
+  const _ECatalogTopActionBar({
+    required this.onCreateQuote,
+    required this.onLoadQuote,
+    required this.onImportOrder,
+    required this.onExportAll,
+  });
+
+  final VoidCallback onCreateQuote;
+  final VoidCallback onLoadQuote;
+  final VoidCallback onImportOrder;
+  final VoidCallback onExportAll;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          onPressed: onCreateQuote,
+          child: const Text('Create Quote', style: TextStyle(fontSize: 13)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          onPressed: onLoadQuote,
+          child: const Text('Load Quote', style: TextStyle(fontSize: 13)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
           onPressed: onImportOrder,
           child: const Text('Import Order', style: TextStyle(fontSize: 13)),
         ),
@@ -15909,14 +16020,6 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
           onPressed: onExportAll,
           child: const Text('Export All', style: TextStyle(fontSize: 13)),
         ),
-        FilledButton(
-          style: FilledButton.styleFrom(
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          ),
-          onPressed: onScanWithCamera,
-          child: const Text('Scan with Camera', style: TextStyle(fontSize: 13)),
-        ),
       ],
     );
   }
@@ -15927,6 +16030,7 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
     required this.quickEntryTextFieldKey,
     required this.quickEntryController,
     required this.quickEntryFocusNode,
+    required this.onQuickEntryTap,
     required this.onSearchChanged,
     required this.onQuickEntryTapOutside,
     required this.onQuickEntrySubmitted,
@@ -15937,6 +16041,7 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
   final Key quickEntryTextFieldKey;
   final TextEditingController quickEntryController;
   final FocusNode quickEntryFocusNode;
+  final VoidCallback onQuickEntryTap;
   final ValueChanged<String> onSearchChanged;
   final TapRegionCallback onQuickEntryTapOutside;
   final ValueChanged<String> onQuickEntrySubmitted;
@@ -15967,6 +16072,7 @@ class _ScanTabItemSearchBlock extends StatelessWidget {
                     vertical: 6,
                   ),
                 ),
+                onTap: onQuickEntryTap,
                 onChanged: onSearchChanged,
                 onTapOutside: onQuickEntryTapOutside,
                 onSubmitted: onQuickEntrySubmitted,
