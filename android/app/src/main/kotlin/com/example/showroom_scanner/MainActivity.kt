@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -11,6 +12,11 @@ import java.io.File
 import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
+    private companion object {
+        const val TAG = "CsvExport"
+        const val CSV_MIME_TYPE = "text/csv"
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
@@ -76,6 +82,12 @@ class MainActivity : FlutterActivity() {
         return true
     }
 
+    private fun ensureCsvFilename(filename: String): String {
+        val trimmed = filename.trim()
+        if (trimmed.isEmpty()) return "export.csv"
+        return if (trimmed.lowercase().endsWith(".csv")) trimmed else "$trimmed.csv"
+    }
+
     private fun mediaStoreCsvDisplayNameExists(
         displayName: String,
         relativePath: String,
@@ -98,6 +110,7 @@ class MainActivity : FlutterActivity() {
         content: String,
     ): String {
         val bytes = content.toByteArray(Charsets.UTF_8)
+        val normalizedFilename = ensureCsvFilename(filename)
         val relativeInsideDocuments = "Showroom_Sync/Exported orders/$customerFolder"
         val documentsDir =
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
@@ -105,12 +118,12 @@ class MainActivity : FlutterActivity() {
             "${Environment.DIRECTORY_DOCUMENTS}/$relativeInsideDocuments/"
         val outDir = File(documentsDir, relativeInsideDocuments)
 
-        val lower = filename.lowercase()
+        val lower = normalizedFilename.lowercase()
         val ext = ".csv"
         val uniqueFilename =
             if (lower.endsWith(ext)) {
-                val stem = filename.substring(0, filename.length - ext.length)
-                var candidate = filename
+                val stem = normalizedFilename.substring(0, normalizedFilename.length - ext.length)
+                var candidate = normalizedFilename
                 var n = 2
                 while (true) {
                     val occupied =
@@ -125,7 +138,7 @@ class MainActivity : FlutterActivity() {
                 }
                 candidate
             } else {
-                filename
+                normalizedFilename
             }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -133,15 +146,29 @@ class MainActivity : FlutterActivity() {
             val values =
                 ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, uniqueFilename)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+                    put(MediaStore.MediaColumns.MIME_TYPE, CSV_MIME_TYPE)
                     put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
             val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val uri =
                 resolver.insert(collection, values)
                     ?: error("MediaStore insert failed for $uniqueFilename")
-            resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: error("Could not open output stream for $uniqueFilename")
+            try {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: error("Could not open output stream for $uniqueFilename")
+            } finally {
+                val pendingClear =
+                    ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                resolver.update(uri, pendingClear, null, null)
+            }
+            Log.d(
+                TAG,
+                "action=savePublicCsvInShowroomExports filename=$uniqueFilename " +
+                    "mimeType=$CSV_MIME_TYPE pathOrUri=$uri bytes=${bytes.size}",
+            )
             return File(documentsDir, "$relativeInsideDocuments/$uniqueFilename").absolutePath
         }
         if (!outDir.exists()) {
@@ -149,6 +176,11 @@ class MainActivity : FlutterActivity() {
         }
         val outFile = File(outDir, uniqueFilename)
         FileOutputStream(outFile).use { it.write(bytes) }
+        Log.d(
+            TAG,
+            "action=savePublicCsvInShowroomExports filename=$uniqueFilename " +
+                "mimeType=$CSV_MIME_TYPE pathOrUri=${outFile.absolutePath} bytes=${bytes.size}",
+        )
         return outFile.absolutePath
     }
 
@@ -158,29 +190,49 @@ class MainActivity : FlutterActivity() {
      */
     private fun saveCsvToPublicDocuments(filename: String, content: String): String {
         val bytes = content.toByteArray(Charsets.UTF_8)
+        val normalizedFilename = ensureCsvFilename(filename)
         val documentsDir =
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = applicationContext.contentResolver
             val values =
                 ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, normalizedFilename)
+                    put(MediaStore.MediaColumns.MIME_TYPE, CSV_MIME_TYPE)
                     put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
             val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val uri =
                 resolver.insert(collection, values)
-                    ?: error("MediaStore insert failed for $filename")
-            resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: error("Could not open output stream for $filename")
-            return File(documentsDir, filename).absolutePath
+                    ?: error("MediaStore insert failed for $normalizedFilename")
+            try {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: error("Could not open output stream for $normalizedFilename")
+            } finally {
+                val pendingClear =
+                    ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                resolver.update(uri, pendingClear, null, null)
+            }
+            Log.d(
+                TAG,
+                "action=savePublicCsv filename=$normalizedFilename mimeType=$CSV_MIME_TYPE " +
+                    "pathOrUri=$uri bytes=${bytes.size}",
+            )
+            return File(documentsDir, normalizedFilename).absolutePath
         }
         if (!documentsDir.exists()) {
             documentsDir.mkdirs()
         }
-        val outFile = File(documentsDir, filename)
+        val outFile = File(documentsDir, normalizedFilename)
         FileOutputStream(outFile).use { it.write(bytes) }
+        Log.d(
+            TAG,
+            "action=savePublicCsv filename=$normalizedFilename mimeType=$CSV_MIME_TYPE " +
+                "pathOrUri=${outFile.absolutePath} bytes=${bytes.size}",
+        )
         return outFile.absolutePath
     }
 }

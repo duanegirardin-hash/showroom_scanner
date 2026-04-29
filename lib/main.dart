@@ -87,6 +87,8 @@ class UpperCaseTextFormatter extends TextInputFormatter {
 /// Which tab owns compact order-line expand/collapse.
 enum _OrderLineCardCompactExpandHost { ordersTab, scanTab, ecatalogTab }
 
+enum _ECatalogNavigationSource { loadQuote, importOrder, scan, manualAdd, other }
+
 // --- Phase 1: theme tokens (visual only; no app logic) ---
 const Color _kDeepTeal = Color(0xFF006D77);
 const Color _kWarmCoral = Color(0xFFFF7F50);
@@ -465,6 +467,107 @@ bool _piParseDiscountEligibility(String value) {
 
 bool _piParseYesFlag(String value) => value.trim().toUpperCase() == 'YES';
 
+String _repairMojibakeText(String value) {
+  var text = value.trim();
+
+  // Attempt automatic UTF-8 recovery (handles common mojibake cases).
+  try {
+    final recovered = utf8.decode(latin1.encode(text));
+
+    // Only adopt recovered text when it appears to improve accents.
+    final looksBetter =
+        recovered.contains('é') ||
+        recovered.contains('è') ||
+        recovered.contains('ê') ||
+        recovered.contains('ô') ||
+        recovered.contains('à') ||
+        recovered.contains('ç');
+
+    if (looksBetter) {
+      text = recovered;
+    }
+  } catch (_) {
+    // Ignore and continue with original text.
+  }
+
+  final replacements = <String, String>{
+    'ÃƒÂ©': 'é',
+    'Ã©': 'é',
+    'ÃƒÂ¨': 'è',
+    'Ã¨': 'è',
+    'ÃƒÂª': 'ê',
+    'Ãª': 'ê',
+    'ÃƒÂ«': 'ë',
+    'Ã«': 'ë',
+    'ÃƒÂ¢': 'â',
+    'Ã¢': 'â',
+    'ÃƒÂ®': 'î',
+    'Ã®': 'î',
+    'ÃƒÂ´': 'ô',
+    'Ã´': 'ô',
+    'ÃƒÂ»': 'û',
+    'Ã»': 'û',
+    'ÃƒÂ§': 'ç',
+    'Ã§': 'ç',
+    'ÃƒÂ‰': 'É',
+    'Ã‰': 'É',
+    'Ã¢â‚¬â„¢': "'",
+    'â€™': "'",
+    'Ã¢â‚¬Å“': '"',
+    'Ã¢â‚¬Â': '"',
+    'â€œ': '"',
+    'â€': '"',
+    'Ã¢â‚¬â€œ': '-',
+    'â€“': '-',
+    'Ã‚Â': '',
+    'Â': '',
+  };
+
+  replacements.forEach((bad, good) {
+    text = text.replaceAll(bad, good);
+  });
+
+  // Final display/export normalization step: force common accented glyphs to ASCII.
+  final asciiReplacements = <String, String>{
+    'é': 'e',
+    'è': 'e',
+    'ê': 'e',
+    'ë': 'e',
+    'É': 'E',
+    'È': 'E',
+    'Ê': 'E',
+    'Ë': 'E',
+    'à': 'a',
+    'á': 'a',
+    'â': 'a',
+    'ä': 'a',
+    'À': 'A',
+    'Á': 'A',
+    'Â': 'A',
+    'Ä': 'A',
+    'î': 'i',
+    'ï': 'i',
+    'Î': 'I',
+    'Ï': 'I',
+    'ô': 'o',
+    'ö': 'o',
+    'Ô': 'O',
+    'Ö': 'O',
+    'û': 'u',
+    'ü': 'u',
+    'Û': 'U',
+    'Ü': 'U',
+    'ç': 'c',
+    'Ç': 'C',
+  };
+
+  asciiReplacements.forEach((bad, good) {
+    text = text.replaceAll(bad, good);
+  });
+
+  return text;
+}
+
 /// Single warehouse column: "In Stock" | "Out of Stock" | "Coming Soon".
 /// Normalizes with [trim], lowercases, collapses internal whitespace; unknown → all false.
 /// At most one of the three flags is true.
@@ -681,7 +784,7 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
       final itemNumber = _piNormalizeItemNumber(
         _piProductCell(row, idxItemNumber),
       );
-      final description = _piProductCell(row, idxDescription).trim();
+      final description = _repairMojibakeText(_piProductCell(row, idxDescription));
       final upc = _piProductCell(row, idxUpc).trim();
       final upcLookup = _piNormalizeUpcLookupKey(upc);
       final price = _piParsePrice(_piProductCell(row, idxPrice));
@@ -708,8 +811,8 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
       if (warehouseViaAvailabilityColumns) {
         final rawW1 = _piProductCell(row, idxWhse1Availability);
         final rawW2 = _piProductCell(row, idxWhse2Availability);
-        whse1AvailabilityDisplay = rawW1.trim();
-        whse2AvailabilityDisplay = rawW2.trim();
+        whse1AvailabilityDisplay = _repairMojibakeText(rawW1);
+        whse2AvailabilityDisplay = _repairMojibakeText(rawW2);
         final w1 = _piParseWarehouseAvailabilityTriState(rawW1);
         whse1InStock = w1.inStock;
         whse1OutOfStock = w1.outOfStock;
@@ -741,9 +844,9 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
             : _piParseYesFlag(_piProductCell(row, idxWhse2Soon).trim());
       }
       if (discountEligible) discountEligibleCount++;
-      final productType = _piProductCell(row, idxProductType).trim();
-      final category = _piProductCell(row, idxCategory).trim();
-      final subCategory = _piProductCell(row, idxSubCategory).trim();
+      final productType = _repairMojibakeText(_piProductCell(row, idxProductType));
+      final category = _repairMojibakeText(_piProductCell(row, idxCategory));
+      final subCategory = _repairMojibakeText(_piProductCell(row, idxSubCategory));
       final minOrderQty = _piParseInt(_piProductCell(row, idxMinOrderQty));
       final caseQty = _piParseInt(_piProductCell(row, idxCaseQty));
 
@@ -1749,10 +1852,17 @@ Future<File> saveOrderExportCsv({
   required String filename,
   required String csvText,
 }) async {
-  final fullPath = p.join(directoryPath, filename);
+  final fullPath = p.join(directoryPath, ensureCsvFilename(filename));
   final file = File(fullPath);
-  await file.writeAsString(csvText);
+  await file.writeAsString(csvText, encoding: utf8, flush: true);
   return file;
+}
+
+String ensureCsvFilename(String filename) {
+  final trimmed = filename.trim();
+  if (trimmed.toLowerCase().endsWith('.csv')) return trimmed;
+  if (trimmed.isEmpty) return 'export.csv';
+  return '$trimmed.csv';
 }
 
 /// If [filename] already exists in [directoryPath], appends `_2`, `_3`, … before `.csv`.
@@ -1760,6 +1870,7 @@ Future<String> uniqueCsvFilenameInDirectory(
   String directoryPath,
   String filename,
 ) async {
+  filename = ensureCsvFilename(filename);
   const ext = '.csv';
   if (!filename.toLowerCase().endsWith(ext)) return filename;
   final stem = filename.substring(0, filename.length - ext.length);
@@ -1778,6 +1889,25 @@ const bool _kPersistExportPathDebug = true;
 void _debugLogPersistExportPath(String action, File file) {
   if (!kDebugMode || !_kPersistExportPathDebug) return;
   debugPrint('[PersistExport] $action -> ${file.path}');
+}
+
+Future<void> _debugLogCsvExportFile({
+  required String action,
+  required String filename,
+  required String mimeType,
+  required File file,
+}) async {
+  if (!kDebugMode) return;
+  int byteLength = -1;
+  try {
+    if (await file.exists()) {
+      byteLength = await file.length();
+    }
+  } catch (_) {}
+  debugPrint(
+    '[CsvExport] action=$action filename=$filename mimeType=$mimeType '
+    'pathOrUri=${file.path} bytes=$byteLength',
+  );
 }
 
 /// Fallback export root under [getApplicationDocumentsDirectory] when user `Documents` is unavailable.
@@ -1849,16 +1979,24 @@ Future<File> saveOrderExportCsvToAndroidPublicShowroomExports({
       'saveOrderExportCsvToAndroidPublicShowroomExports is Android-only',
     );
   }
+  final csvFilename = ensureCsvFilename(filename);
   final path = await _androidPublicDocumentsChannel
       .invokeMethod<String>('savePublicCsvInShowroomExports', <String, dynamic>{
         'customerFolder': sanitizedCustomerFolderName,
-        'filename': filename,
+        'filename': csvFilename,
         'content': csvText,
       });
   if (path == null || path.isEmpty) {
     throw StateError('savePublicCsvInShowroomExports returned no path');
   }
-  return File(path);
+  final file = File(path);
+  await _debugLogCsvExportFile(
+    action: 'android_public_showroom_exports',
+    filename: csvFilename,
+    mimeType: 'text/csv',
+    file: file,
+  );
+  return file;
 }
 
 /// Ensures `[getApplicationDocumentsDirectory]/Showroom_Sync/Exported orders` exists.
@@ -1924,13 +2062,14 @@ Future<File> exportOrderCsvToShowroomExportsLayout({
       'NOT IMPORTED rows are included in All_Exported_Quote_Items.csv.',
     );
   }
+  final csvFilename = ensureCsvFilename(filename);
 
   late final File file;
   if (Platform.isAndroid) {
     final folder = sanitizeCustomerExportFolderName(customerDisplayName);
     file = await saveOrderExportCsvToAndroidPublicShowroomExports(
       sanitizedCustomerFolderName: folder,
-      filename: filename,
+      filename: csvFilename,
       csvText: csvText,
     );
   } else {
@@ -1938,8 +2077,14 @@ Future<File> exportOrderCsvToShowroomExportsLayout({
     file = await writeOrderExportCsvUnderDesignatedBase(
       exportBasePath: root.path,
       customerDisplayName: customerDisplayName,
-      filename: filename,
+      filename: csvFilename,
       csvText: csvText,
+    );
+    await _debugLogCsvExportFile(
+      action: 'designated_base_write',
+      filename: p.basename(file.path),
+      mimeType: 'text/csv',
+      file: file,
     );
   }
   if (persistExportDebugAction != null) {
@@ -3157,8 +3302,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   bool _quoteNameUserEdited = false;
 
   late final TabController _tabController;
+  static const int _tabIndexScan = 0;
+  static const int _tabIndexECatalog = 1;
+  static const int _tabIndexArchive = 2;
+  // Orders workflow remains in code but is intentionally hidden from tab navigation.
+  static const int _visibleTabCount = 4;
   bool _scanTabActive = true;
-  int _activeTabIndex = 0;
+  int _activeTabIndex = _tabIndexScan;
 
   int _scanPerfSeq = 0;
   final Map<int, Stopwatch> _scanPerfWatches = {};
@@ -3264,9 +3414,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     _quoteNameController.addListener(_onQuoteNameChanged);
 
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: _visibleTabCount, vsync: this);
     _activeTabIndex = _tabController.index;
-    _scanTabActive = _tabController.index == 0;
+    _scanTabActive = _tabController.index == _tabIndexScan;
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) return;
       if (!mounted) return;
@@ -3274,7 +3424,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final nextIndex = _tabController.index;
       _setStateDebug('tab_active_index', () {
         _activeTabIndex = nextIndex;
-        _scanTabActive = nextIndex == 0;
+        _scanTabActive = nextIndex == _tabIndexScan;
       });
       _recoverScannerFocusAfterTabChange(
         previousIndex: previousIndex,
@@ -3313,6 +3463,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final sw = _scanPerfWatches[seq];
     if (sw == null) return;
     _perfLog('#$seq +${sw.elapsedMilliseconds}ms $step');
+  }
+
+  void _navigateToECatalogTab() {
+    if (!mounted) return;
+    if (_tabController.index == _tabIndexECatalog) return;
+    _tabController.animateTo(_tabIndexECatalog);
+  }
+
+  void _maybeNavigateToECatalogTab(_ECatalogNavigationSource source) {
+    final shouldNavigate =
+        source == _ECatalogNavigationSource.loadQuote ||
+        source == _ECatalogNavigationSource.importOrder;
+    if (!shouldNavigate) return;
+    _navigateToECatalogTab();
   }
 
   void _finishScanPerfSample(int seq, {required String outcome}) {
@@ -5135,6 +5299,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!await file.exists()) {
         throw StateError('Exported file not found.');
       }
+      await _debugLogCsvExportFile(
+        action: 'share_single_csv',
+        filename: p.basename(file.path),
+        mimeType: 'text/csv',
+        file: file,
+      );
       await Share.shareXFiles([XFile(file.path, mimeType: 'text/csv')]);
     } catch (_) {
       if (!mounted) return;
@@ -5149,9 +5319,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final existing = <XFile>[];
       for (final file in files) {
         if (await file.exists()) {
-          if (kDebugMode) {
-            debugPrint('[OneDriveExport] file attached: ${file.path}');
-          }
+          await _debugLogCsvExportFile(
+            action: 'share_multiple_csv',
+            filename: p.basename(file.path),
+            mimeType: 'text/csv',
+            file: file,
+          );
           existing.add(XFile(file.path, mimeType: 'text/csv'));
         }
       }
@@ -5211,9 +5384,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Product _productForExportedQuoteLine(Map<String, dynamic> lineMap) {
     final upc = (lineMap['upc'] as String?)?.trim() ?? '';
     final itemNumber = (lineMap['itemNumber'] as String?)?.trim() ?? '';
-    final description = (lineMap['description'] as String?)?.trim() ?? '';
+    final description = _repairMojibakeText(
+      (lineMap['description'] as String?)?.trim() ?? '',
+    );
     final price = (lineMap['price'] as num?)?.toDouble() ?? 0.0;
-    final productType = (lineMap['productType'] as String?)?.trim() ?? '';
+    final productType = _repairMojibakeText(
+      (lineMap['productType'] as String?)?.trim() ?? '',
+    );
     final discountRaw = (lineMap['discountRaw'] as String?)?.trim() ?? '';
     final discountEligible = (lineMap['discountEligible'] as bool?) ?? false;
     final netRaw = (lineMap['netRaw'] as String?)?.trim() ?? '';
@@ -5221,8 +5398,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final psRaw = (lineMap['psRaw'] as String?)?.trim() ?? '';
     final isPs = (lineMap['isPs'] as bool?) ?? _parseYesFlag(psRaw);
     final isNewRelease = (lineMap['isNewRelease'] as bool?) ?? false;
-    final category = (lineMap['category'] as String?)?.trim() ?? '';
-    final subCategory = (lineMap['subCategory'] as String?)?.trim() ?? '';
+    final category = _repairMojibakeText(
+      (lineMap['category'] as String?)?.trim() ?? '',
+    );
+    final subCategory = _repairMojibakeText(
+      (lineMap['subCategory'] as String?)?.trim() ?? '',
+    );
     final whse1InStock = (lineMap['whse1InStock'] as bool?) ?? false;
     final whse2InStock = (lineMap['whse2InStock'] as bool?) ?? false;
     final whse1OutOfStock = (lineMap['whse1OutOfStock'] as bool?) ?? false;
@@ -5230,9 +5411,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final whse1ComingSoon = (lineMap['whse1ComingSoon'] as bool?) ?? false;
     final whse2ComingSoon = (lineMap['whse2ComingSoon'] as bool?) ?? false;
     final whse1AvailabilityDisplay =
-        (lineMap['whse1AvailabilityDisplay'] as String?)?.trim() ?? '';
+        _repairMojibakeText(
+          (lineMap['whse1AvailabilityDisplay'] as String?)?.trim() ?? '',
+        );
     final whse2AvailabilityDisplay =
-        (lineMap['whse2AvailabilityDisplay'] as String?)?.trim() ?? '';
+        _repairMojibakeText(
+          (lineMap['whse2AvailabilityDisplay'] as String?)?.trim() ?? '',
+        );
     final minOrderQty = _quantityFromJson(lineMap['minOrderQty']);
     final caseQty = _quantityFromJson(lineMap['caseQty']);
     final listPrice = (lineMap['listPrice'] as num?)?.toDouble() ?? 0.0;
@@ -7096,6 +7281,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
         _status = 'Imported order from $sourceFileLabel';
       });
+      _maybeNavigateToECatalogTab(_ECatalogNavigationSource.importOrder);
 
       if (!mounted) return;
       await _showOrderImportSummaryDialog(
@@ -8005,6 +8191,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _quickEntryStatus = message;
         _status = message;
       });
+      _triggerScanFeedback(ScanFeedbackType.notFound, source: 'quickEntry');
     } else {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -8499,9 +8686,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '[ManualEntry][Submit] start input is empty. '
           'quickEntryHasFocus=${_quickEntryFocusNode.hasFocus} scannerHasFocus=${_scannerFocusNode.hasFocus}',
         );
-        _requestScannerFocusAfterManualEntry(
-          debugLabel: 'quickEntryEmptySubmit',
-        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _requestScannerFocusAfterManualEntry(
+            debugLabel: 'quickEntryEmptySubmit',
+          );
+        });
         return;
       }
 
@@ -8526,14 +8716,34 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       if (product == null) {
         _showExactLookupMessageForQuery(input, scanTab: true);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _requestScannerFocusAfterManualEntry(
+            debugLabel: 'quickEntryExactNotFound',
+          );
+        });
         return;
       }
 
-      if (!await _ensureQuoteReadyForManualAdd()) return;
+      if (!await _ensureQuoteReadyForManualAdd()) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _requestScannerFocusAfterManualEntry(
+            debugLabel: 'quickEntryQuoteNotReady',
+          );
+        });
+        return;
+      }
       await _ensureRoutingForProduct(product);
       final bucket = _resolveQuoteBucketForProduct(product);
       final added = _addProduct(product, input, bucket: bucket);
-      if (!added) return;
+      if (!added) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryAddFailed');
+        });
+        return;
+      }
 
       _quickEntryController.clear();
 
@@ -8541,7 +8751,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _scanSearchQuery = '';
         _searchResults = [];
       });
-      _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySuccess');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySuccess');
+      });
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -8553,7 +8766,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _scanSearchQuery = '';
         _searchResults = [];
       });
-      _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryCatch');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryCatch');
+      });
     }
   }
 
@@ -10123,7 +10339,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Widget _buildECatalogTab() {
-    if (_activeTabIndex != 1) {
+    if (_activeTabIndex != _tabIndexECatalog) {
       return const SizedBox.shrink();
     }
     if (_loadingProducts) {
@@ -10946,7 +11162,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Widget _buildArchiveTab() {
-    if (_activeTabIndex != 3) {
+    if (_activeTabIndex != _tabIndexArchive) {
       return const SizedBox.shrink();
     }
     return _ArchiveQuotesTab(
@@ -13445,11 +13661,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return t.length > 80 ? t.substring(0, 80) : t;
       }
 
-      final csvPath =
-          '${tempDir.path}/quote_${safeName.isEmpty ? id : safeName}.csv';
+      final csvFilename = ensureCsvFilename(
+        'quote_${safeName.isEmpty ? id : safeName}',
+      );
+      final csvPath = '${tempDir.path}/$csvFilename';
 
       final csvFile = File(csvPath);
-      await csvFile.writeAsString(csv, flush: true);
+      await csvFile.writeAsString(csv, encoding: utf8, flush: true);
+      await _debugLogCsvExportFile(
+        action: 'quote_email_temp_csv',
+        filename: csvFilename,
+        mimeType: 'text/csv',
+        file: csvFile,
+      );
 
       final text = _formatQuoteAsText(data);
 
@@ -13513,6 +13737,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Future<void> _loadQuoteById(
     String id, {
     bool syncWorkspaceIfUnmounted = false,
+    _ECatalogNavigationSource navigationSource = _ECatalogNavigationSource.other,
   }) async {
     try {
       final dir = await _getQuotesDirectory();
@@ -13722,6 +13947,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       _setStateDebug('load_quote_by_id_apply', applyWorkspace);
+      _maybeNavigateToECatalogTab(navigationSource);
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -13857,7 +14083,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
       } else {
         await Future.delayed(const Duration(milliseconds: 150));
-        if (mounted) await _loadQuoteById(id);
+        if (mounted) {
+          await _loadQuoteById(
+            id,
+            navigationSource: _ECatalogNavigationSource.loadQuote,
+          );
+        }
       }
     }
 
@@ -14025,6 +14256,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return _ScanTabLoadCreateQuoteBar(
       onLoadQuote: _showLoadQuoteDialog,
       onCreateQuote: _confirmNewQuote,
+      onImportOrder: () => _pickAndImportOrderCsv(),
+      onExportAll: () => _exportAllQuotesToCsv(),
       onScanWithCamera: _openCameraScanner,
     );
   }
@@ -14064,13 +14297,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         await _ensureRoutingForProduct(product);
         final bucket = _resolveQuoteBucketForProduct(product);
         final added = _addProduct(product, 'SEARCH', bucket: bucket);
-        if (!added) return;
+        if (!added) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _requestScannerFocusAfterManualEntry(
+              debugLabel: 'quickEntrySearchTapAddFailed',
+            );
+          });
+          return;
+        }
         _quickEntryController.clear();
         _setStateDebug('scan_search_tap_clear_results', () {
           _scanSearchQuery = '';
           _searchResults = [];
         });
-        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySearchTap');
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySearchTap');
+        });
       },
     );
   }
@@ -14235,6 +14479,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
   }
 
+  // ignore: unused_element
   Widget _buildOrderListTab() {
     _orderListTabBuildCount++;
     if (_activeTabIndex != 2) {
@@ -14266,7 +14511,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         '(activeTab=$_activeTabIndex)',
       );
     }
-    if (_activeTabIndex != 0) {
+    if (_activeTabIndex != _tabIndexScan) {
       return const SizedBox.shrink();
     }
     final viewInsets = MediaQuery.viewInsetsOf(context);
@@ -14342,7 +14587,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               tabs: const [
                 Tab(text: 'Scan'),
                 Tab(text: 'E-Catalog'),
-                Tab(text: 'Orders'),
                 Tab(text: 'Archive'),
                 Tab(text: 'Setup'),
               ],
@@ -14359,7 +14603,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     children: [
                       _buildScanTab(),
                       _buildECatalogTab(),
-                      _buildOrderListTab(),
                       _buildArchiveTab(),
                       _buildSetupTab(),
                     ],
@@ -15323,11 +15566,15 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
   const _ScanTabLoadCreateQuoteBar({
     required this.onLoadQuote,
     required this.onCreateQuote,
+    required this.onImportOrder,
+    required this.onExportAll,
     required this.onScanWithCamera,
   });
 
   final VoidCallback onLoadQuote;
   final VoidCallback onCreateQuote;
+  final VoidCallback onImportOrder;
+  final VoidCallback onExportAll;
   final VoidCallback onScanWithCamera;
 
   @override
@@ -15351,6 +15598,22 @@ class _ScanTabLoadCreateQuoteBar extends StatelessWidget {
           ),
           onPressed: onCreateQuote,
           child: const Text('Create Quote', style: TextStyle(fontSize: 13)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          onPressed: onImportOrder,
+          child: const Text('Import Order', style: TextStyle(fontSize: 13)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          onPressed: onExportAll,
+          child: const Text('Export All', style: TextStyle(fontSize: 13)),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
