@@ -2059,7 +2059,7 @@ Future<File> exportOrderCsvToShowroomExportsLayout({
     debugPrint('[BlockedExport] ITEMS_NOT_IMPORTED export blocked');
     throw StateError(
       'Legacy ITEMS_NOT_IMPORTED export is disabled. '
-      'NOT IMPORTED rows are included in All_Exported_Quote_Items.csv.',
+      'NOT IMPORTED rows are included in ALL_EXPORTED_ITEMS_*.csv.',
     );
   }
   final csvFilename = ensureCsvFilename(filename);
@@ -5164,16 +5164,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     String value, {
     String ifEmpty = 'Quote',
   }) {
-    final trimmed = value.trim();
+    final trimmed = _repairMojibakeText(value).trim();
     if (trimmed.isEmpty) return ifEmpty;
-    var s = trimmed.replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_');
-    s = s.replaceAll(RegExp(r'\s+'), '_').trim();
+    var s = trimmed.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
+    s = s
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '')
+        .trim()
+        .toUpperCase();
     if (s.isEmpty) return ifEmpty;
     if (s.length > 120) s = s.substring(0, 120);
     return s;
   }
 
-  /// Export CSV basename: `{QuoteName}_{CustomerName}_{yyyyMMdd_HHmmss_mmm}.csv` (clipped to 180 chars).
+  /// Export CSV basename: `{TYPE}_{yyyy_MM_dd}_{seq}_{customer}_{yyyyMMdd_HHmmss_mmm}.csv`.
   static const int _kMaxExportCsvFilenameLength = 180;
 
   String _formatExportTimestamp(DateTime d) {
@@ -5194,20 +5198,239 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return '${filename.substring(0, maxStem)}$ext';
   }
 
+  ({String quoteType, DateTime? quoteDate, String? uniqueNumber})
+  _extractQuoteNamingParts(String quoteName) {
+    final normalized = _sanitizeOrderExportFileSegment(quoteName, ifEmpty: '');
+    if (normalized.isEmpty) {
+      return (quoteType: 'QUOTE', quoteDate: null, uniqueNumber: null);
+    }
+
+    final full = RegExp(
+      r'^(.+)_(\d{4})_(\d{2})_(\d{2})_(\d{3})$',
+    ).firstMatch(normalized);
+    if (full != null) {
+      final y = int.tryParse(full.group(2)!);
+      final mo = int.tryParse(full.group(3)!);
+      final d = int.tryParse(full.group(4)!);
+      DateTime? date;
+      if (y != null && mo != null && d != null) {
+        date = DateTime(y, mo, d);
+      }
+      return (
+        quoteType: full.group(1) ?? 'QUOTE',
+        quoteDate: date,
+        uniqueNumber: full.group(5),
+      );
+    }
+
+    final withSequence = RegExp(r'^(.+)_(\d{3})$').firstMatch(normalized);
+    if (withSequence != null) {
+      return (
+        quoteType: withSequence.group(1) ?? 'QUOTE',
+        quoteDate: null,
+        uniqueNumber: withSequence.group(2),
+      );
+    }
+
+    return (quoteType: normalized, quoteDate: null, uniqueNumber: null);
+  }
+
+  String _buildExportSystemCsvFilename({
+    required String exportType,
+    required String customerName,
+    String? customerId,
+    DateTime? exportedOn,
+  }) {
+    final now = exportedOn ?? DateTime.now();
+    final rawExportType = exportType.trim();
+    final normalizedExportTypeKey = rawExportType.toUpperCase();
+    final canonicalSystemType =
+        normalizedExportTypeKey == 'ALL_EXPORTED_QUOTE_ITEMS'
+            ? 'ALL_EXPORTED_ITEMS'
+            : normalizedExportTypeKey == 'ITEMS_NOT_FOUND'
+            ? 'ITEMS_NOT_FOUND'
+            : normalizedExportTypeKey == 'ITEMS_WITHOUT_UPC'
+            ? 'ITEMS_WITHOUT_UPC'
+            : rawExportType;
+    final pseudoQuoteName =
+        '${_sanitizeOrderExportFileSegment(canonicalSystemType, ifEmpty: 'QUOTE')}_'
+        '${now.year.toString().padLeft(4, '0')}_'
+        '${now.month.toString().padLeft(2, '0')}_'
+        '${now.day.toString().padLeft(2, '0')}_001';
+    return _buildExportOrderCsvFilename(
+      quoteName: pseudoQuoteName,
+      customerName: customerName,
+      customerId: customerId,
+      customerFolderName: customerName,
+      quoteDate: now,
+      exportedOn: now,
+    );
+  }
+
+  String _buildQuoteExportCsvFilename({
+    required String quoteType,
+    required DateTime quoteDate,
+    required String uniqueQuoteNumber,
+    required String customerName,
+    DateTime? exportedAt,
+  }) {
+    final exportTime = exportedAt ?? DateTime.now();
+    final datePart =
+        '${quoteDate.year.toString().padLeft(4, '0')}_'
+        '${quoteDate.month.toString().padLeft(2, '0')}_'
+        '${quoteDate.day.toString().padLeft(2, '0')}';
+    final timestamp = _formatExportTimestamp(exportTime);
+
+    final safeType = _sanitizeOrderExportFileSegment(quoteType, ifEmpty: 'QUOTE');
+    final safeCustomer = _sanitizeOrderExportFileSegment(
+      customerName,
+      ifEmpty: 'UNKNOWN_CUSTOMER',
+    );
+    final parsedSequence = int.tryParse(uniqueQuoteNumber.trim());
+    final safeUnique =
+        parsedSequence == null
+            ? '001'
+            : parsedSequence.toString().padLeft(3, '0');
+
+    // Keep customer + timestamp in the filename even when clipping is needed.
+    final requiredTail = '_${datePart}_${safeUnique}_${safeCustomer}_$timestamp';
+    final maxTypeLen =
+        _kMaxExportCsvFilenameLength - '.csv'.length - requiredTail.length - 1;
+    final adjustedType =
+        maxTypeLen >= 5
+            ? (safeType.length > maxTypeLen
+                ? safeType.substring(0, maxTypeLen)
+                : safeType)
+            : 'QUOTE';
+
+    return _clipExportCsvFilename(
+      ensureCsvFilename('$adjustedType$requiredTail'),
+    );
+  }
+
+  DateTime _quoteDateFromMapOrFallback(
+    Map<String, dynamic> quoteData,
+    DateTime fallback,
+  ) {
+    final createdAt = DateTime.tryParse((quoteData['createdAt'] as String?) ?? '');
+    if (createdAt != null) return createdAt;
+    final updatedAt = DateTime.tryParse((quoteData['updatedAt'] as String?) ?? '');
+    if (updatedAt != null) return updatedAt;
+    return fallback;
+  }
+
   String _buildExportOrderCsvFilename({
     required String quoteName,
-    required String customerName,
+    String? customerName,
+    String? customerId,
+    Map<String, dynamic>? quoteData,
+    String? customerFolderName,
+    String? quoteBucketLabel,
+    String? quoteBucketKey,
+    DateTime? quoteDate,
     required DateTime exportedOn,
   }) {
-    final quoteSeg = _sanitizeOrderExportFileSegment(
-      quoteName.trim().isEmpty ? 'Quote' : quoteName.trim(),
+    final parsed = _extractQuoteNamingParts(quoteName);
+    final rawTypeCandidate =
+        parsed.quoteType.trim().isNotEmpty
+            ? parsed.quoteType
+            : ((quoteBucketLabel ?? quoteBucketKey ?? '').trim().isNotEmpty
+                ? '${(quoteBucketLabel ?? quoteBucketKey ?? '').trim()} QUOTE'
+                : 'QUOTE');
+    final normalizedType = _sanitizeOrderExportFileSegment(
+      rawTypeCandidate,
+      ifEmpty: 'QUOTE',
     );
-    final customerSeg = _sanitizeOrderExportFileSegment(
-      customerName,
-      ifEmpty: 'Unknown_Customer',
+    final normalizedSequence = (parsed.uniqueNumber ?? '').trim();
+    final resolvedCustomerName = _resolveCustomerNameForQuoteExport(
+      customerName: customerName,
+      customerId: customerId,
+      quoteData: quoteData,
+      customerFolderName: customerFolderName,
     );
-    final stamp = _formatExportTimestamp(exportedOn);
-    return _clipExportCsvFilename('${quoteSeg}_${customerSeg}_$stamp.csv');
+    final safeCustomer = _sanitizeOrderExportFileSegment(
+      resolvedCustomerName,
+      ifEmpty: 'UNKNOWN_CUSTOMER',
+    );
+    var filename = _buildQuoteExportCsvFilename(
+      quoteType: normalizedType,
+      quoteDate: parsed.quoteDate ?? quoteDate ?? exportedOn,
+      uniqueQuoteNumber: normalizedSequence.isEmpty ? '001' : normalizedSequence,
+      customerName: resolvedCustomerName,
+      exportedAt: exportedOn,
+    );
+    if (!filename.toUpperCase().contains('_${safeCustomer}_')) {
+      filename = _forceCustomerSegmentIntoQuoteFilename(
+        filename: filename,
+        safeCustomerName: safeCustomer,
+      );
+    }
+    return filename;
+  }
+
+  String _resolveCustomerNameForQuoteExport({
+    String? customerName,
+    String? customerId,
+    Map<String, dynamic>? quoteData,
+    String? customerFolderName,
+  }) {
+    final explicit = (customerName ?? '').trim();
+    if (explicit.isNotEmpty) return explicit;
+
+    final qdCustomer = quoteData?['customer'];
+    if (qdCustomer is Map) {
+      try {
+        final c = Customer.fromJson(Map<String, dynamic>.from(qdCustomer));
+        final company = c.companyName.trim();
+        if (company.isNotEmpty) return company;
+        final display = c.displayName.trim();
+        if (display.isNotEmpty) return display;
+      } catch (_) {}
+    }
+
+    final id = (customerId ?? '').trim();
+    if (id.isNotEmpty) {
+      final byMap = _customersByKey[id];
+      if (byMap != null) {
+        final company = byMap.companyName.trim();
+        if (company.isNotEmpty) return company;
+        final display = byMap.displayName.trim();
+        if (display.isNotEmpty) return display;
+      }
+      for (final c in _customers) {
+        if (c.id.trim() != id) continue;
+        final company = c.companyName.trim();
+        if (company.isNotEmpty) return company;
+        final display = c.displayName.trim();
+        if (display.isNotEmpty) return display;
+      }
+    }
+
+    final folder = (customerFolderName ?? '').trim();
+    if (folder.isNotEmpty) return folder;
+    return 'UNKNOWN_CUSTOMER';
+  }
+
+  String _forceCustomerSegmentIntoQuoteFilename({
+    required String filename,
+    required String safeCustomerName,
+  }) {
+    final csv = ensureCsvFilename(filename);
+    final stem = p.basenameWithoutExtension(csv);
+    final timestampMatch = RegExp(r'_(\d{8}_\d{6}_\d{3})$').firstMatch(stem);
+    String rebuilt;
+    if (timestampMatch != null) {
+      final tsStart = timestampMatch.start;
+      final ts = timestampMatch.group(1)!;
+      var prefix = stem.substring(0, tsStart).replaceFirst(RegExp(r'_+$'), '');
+      if (!prefix.toUpperCase().contains('_${safeCustomerName.toUpperCase()}_')) {
+        prefix = '${prefix}_$safeCustomerName';
+      }
+      rebuilt = '${prefix}_$ts.csv';
+    } else {
+      rebuilt = '${stem}_$safeCustomerName.csv';
+    }
+    return _clipExportCsvFilename(rebuilt);
   }
 
   String _userFacingExportErrorMessage(Object error) {
@@ -5671,9 +5894,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<File> _writeItemsWithoutUpcCsv({
     required String customerDisplayName,
+    String? customerId,
+    DateTime? exportedOn,
     required List<OrderImportItemsWithoutUpcRow> rows,
   }) async {
-    const filename = 'items_without_UPC.csv';
+    final filename = _buildExportSystemCsvFilename(
+      exportType: 'ITEMS_WITHOUT_UPC',
+      customerName: customerDisplayName,
+      customerId: customerId,
+      exportedOn: exportedOn,
+    );
     final csvText = _formatItemsWithoutUpcRowsCsv(rows);
     return exportOrderCsvToShowroomExportsLayout(
       customerDisplayName: customerDisplayName,
@@ -5685,9 +5915,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<File> _writeItemsNotFoundCsv({
     required String customerDisplayName,
+    String? customerId,
+    DateTime? exportedOn,
     required List<OrderImportItemsWithoutUpcRow> rows,
   }) async {
-    const filename = 'items_not_found.csv';
+    final filename = _buildExportSystemCsvFilename(
+      exportType: 'ITEMS_NOT_FOUND',
+      customerName: customerDisplayName,
+      customerId: customerId,
+      exportedOn: exportedOn,
+    );
     final csvText = _formatItemsNotFoundRowsCsv(rows);
     return exportOrderCsvToShowroomExportsLayout(
       customerDisplayName: customerDisplayName,
@@ -5918,7 +6155,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final quotesDir = await _getQuotesDirectory();
       final exportedFiles = <File>[];
-      const allItemsFilename = 'All_Exported_Quote_Items.csv';
+      final exportAllBatchTime = DateTime.now();
+      final allItemsFilename = _buildExportSystemCsvFilename(
+        exportType: 'ALL_EXPORTED_ITEMS',
+        customerName: customerName,
+        customerId: customer.id,
+        exportedOn: exportAllBatchTime,
+      );
       final allItemsRows = <String>[
         'Import Status,Quote Number,Customer,PO Number,Quantity,Item Number,Description,UPC,List Price,Price,DISCOUNT,NET,PS,New Release,Whse 1 Availability,Whse 2 Availability,Product Type,Category,Sub-Category,Minimum Order Quantity,Case Quantity',
       ];
@@ -6078,6 +6321,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           final filename = _buildExportOrderCsvFilename(
             quoteName: info.name,
             customerName: customerName,
+            customerId: info.customerId,
+            quoteData: quoteData,
+            customerFolderName: customerName,
+            quoteBucketLabel:
+                (quoteData['quoteBucketLabel'] as String?)?.trim().isNotEmpty ==
+                        true
+                    ? (quoteData['quoteBucketLabel'] as String?)?.trim()
+                    : info.quoteBucketLabel,
+            quoteBucketKey:
+                (quoteData['quoteBucketKey'] as String?)?.trim().isNotEmpty ==
+                        true
+                    ? (quoteData['quoteBucketKey'] as String?)?.trim()
+                    : info.quoteBucketKey,
+            quoteDate: _quoteDateFromMapOrFallback(quoteData, exportedOn),
             exportedOn: exportedOn,
           );
           final file = await exportOrderCsvToShowroomExportsLayout(
@@ -6182,11 +6439,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (itemsWithoutUpcRows.isNotEmpty) {
         final itemsWithoutUpcFile = await _writeItemsWithoutUpcCsv(
           customerDisplayName: customerName,
+          customerId: customer.id,
+          exportedOn: exportAllBatchTime,
           rows: itemsWithoutUpcRows,
         );
         if (kDebugMode) {
           debugPrint(
-            '[ExportAll] items_without_UPC.csv rows=${itemsWithoutUpcRows.length}',
+            '[ExportAll] ITEMS_WITHOUT_UPC export rows=${itemsWithoutUpcRows.length}',
           );
         }
         exportedFiles.add(itemsWithoutUpcFile);
@@ -6201,11 +6460,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (itemsNotFoundRows.isNotEmpty) {
         final itemsNotFoundFile = await _writeItemsNotFoundCsv(
           customerDisplayName: customerName,
+          customerId: customer.id,
+          exportedOn: exportAllBatchTime,
           rows: itemsNotFoundRows,
         );
         if (kDebugMode) {
           debugPrint(
-            '[ExportAll] items_not_found.csv rows=${itemsNotFoundRows.length}',
+            '[ExportAll] ITEMS_NOT_FOUND export rows=${itemsNotFoundRows.length}',
           );
         }
         exportedFiles.add(itemsNotFoundFile);
@@ -6219,7 +6480,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           persistExportDebugAction: 'export_all_quotes_all_items',
         );
         debugPrint(
-          '[ExportAll] All_Exported_Quote_Items.csv rows: '
+          '[ExportAll] ALL_EXPORTED_ITEMS export rows: '
           'IMPORTED=$allItemsImportedRowCount '
           'NOT_IMPORTED=$allItemsNotImportedRowCount '
           'TOTAL=${allItemsImportedRowCount + allItemsNotImportedRowCount}',
@@ -6373,6 +6634,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final filename = _buildExportOrderCsvFilename(
         quoteName: quoteName,
         customerName: customer.displayName.trim(),
+        customerId: customer.id.trim(),
+        quoteData: quoteData,
+        customerFolderName: customer.displayName.trim(),
+        quoteBucketLabel: (quoteData['quoteBucketLabel'] as String?)?.trim(),
+        quoteBucketKey: (quoteData['quoteBucketKey'] as String?)?.trim(),
+        quoteDate: _quoteDateFromMapOrFallback(quoteData, exportedOn),
         exportedOn: exportedOn,
       );
       final file = await exportOrderCsvToShowroomExportsLayout(
@@ -9590,6 +9857,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final filename = _buildExportOrderCsvFilename(
         quoteName: quoteName,
         customerName: customerName,
+        customerId: info.customerId,
+        quoteData: quoteData,
+        customerFolderName: info.customerName,
+        quoteBucketLabel:
+            (quoteData['quoteBucketLabel'] as String?)?.trim().isNotEmpty == true
+                ? (quoteData['quoteBucketLabel'] as String?)?.trim()
+                : info.quoteBucketLabel,
+        quoteBucketKey:
+            (quoteData['quoteBucketKey'] as String?)?.trim().isNotEmpty == true
+                ? (quoteData['quoteBucketKey'] as String?)?.trim()
+                : info.quoteBucketKey,
+        quoteDate: _quoteDateFromMapOrFallback(quoteData, exportedOn),
         exportedOn: exportedOn,
       );
       final outFile = await exportOrderCsvToShowroomExportsLayout(
@@ -13648,9 +13927,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final csv = _formatQuoteAsCsv(data, sortByItemNumberAsc: true);
 
       final tempDir = await getTemporaryDirectory();
-      final safeName = name
-          .replaceAll(RegExp(r'[^\w\s-]'), '_')
-          .replaceAll(RegExp(r'\s+'), '_');
 
       String safeFileToken(String raw) {
         final t = raw
@@ -13661,8 +13937,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         return t.length > 80 ? t.substring(0, 80) : t;
       }
 
-      final csvFilename = ensureCsvFilename(
-        'quote_${safeName.isEmpty ? id : safeName}',
+      final exportedOn = DateTime.now();
+      final customerMap = data['customer'];
+      var customerName = '';
+      if (customerMap is Map<String, dynamic>) {
+        try {
+          customerName = Customer.fromJson(
+            Map<String, dynamic>.from(customerMap),
+          ).displayName.trim();
+        } catch (_) {}
+      }
+      final csvFilename = _buildExportOrderCsvFilename(
+        quoteName: (data['name'] as String?)?.trim() ?? name,
+        customerName: customerName,
+        customerId: (data['customerId'] as String?)?.trim(),
+        quoteData: data,
+        customerFolderName: customerName,
+        quoteBucketLabel: (data['quoteBucketLabel'] as String?)?.trim(),
+        quoteBucketKey: (data['quoteBucketKey'] as String?)?.trim(),
+        quoteDate: _quoteDateFromMapOrFallback(data, exportedOn),
+        exportedOn: exportedOn,
       );
       final csvPath = '${tempDir.path}/$csvFilename';
 
