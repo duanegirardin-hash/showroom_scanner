@@ -2982,6 +2982,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   TextEditingController _searchController = TextEditingController();
   List<Product> _searchResults = [];
+  String _scanSearchQuery = '';
   Timer? _searchDebounce;
 
   /// E-Catalog tab (V1): filters over [_productsByItemNumber] only; no extra CSV load.
@@ -3108,6 +3109,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// E-Catalog tab only: which catalog row is expanded ([Product.itemNumber.trim]); at most one.
   String? _ecatalogExpandedItemKey;
+  bool _ecatalogOrderPanelExpanded = false;
 
   /// [GlobalKey]s for Scan tab order rows — used with [Scrollable.ensureVisible] after a scan (UI only).
   final Map<String, GlobalKey> _scanTabOrderRowKeys = <String, GlobalKey>{};
@@ -3261,7 +3263,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     });
 
     _quoteNameController.addListener(_onQuoteNameChanged);
-    _catalogSearchController.addListener(_onCatalogSearchChanged);
 
     _tabController = TabController(length: 5, vsync: this);
     _activeTabIndex = _tabController.index;
@@ -3341,14 +3342,73 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     });
   }
 
-  void _onCatalogSearchChanged() {
-    final next = _catalogSearchController.text;
-    if (next == _catalogSearchQuery) return;
-    _scheduleECatalogSearchKeyboardIdleDismiss();
+  void _onCatalogSearchChanged(String value) {
+    final normalized = value.trim();
+
+    if (_catalogSearchQuery == normalized) return;
+
     setState(() {
-      _catalogSearchQuery = next;
-      _ecatalogExpandedItemKey = null;
+      _catalogSearchQuery = normalized;
     });
+  }
+
+  String _normalizedSearchQuery(String raw) {
+    return raw.trim().toLowerCase();
+  }
+
+  String _compactSearchToken(String raw) {
+    return _normalizedSearchQuery(raw).replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  }
+
+  String _compactQuickEntryLookupToken(String raw) {
+    return _normalizedSearchQuery(raw).replaceAll(RegExp(r'[\s-]+'), '');
+  }
+
+  Product? _findExactProductForQuickEntry(String rawInput) {
+    final token = _compactQuickEntryLookupToken(rawInput);
+    if (token.isEmpty) return null;
+    Product? exact;
+    for (final product in _allProducts) {
+      final itemToken = _compactQuickEntryLookupToken(product.itemNumber);
+      final upcToken = _compactQuickEntryLookupToken(product.upc);
+      if (itemToken != token && upcToken != token) continue;
+      if (exact != null &&
+          !identical(exact, product) &&
+          _orderLineKeyForProduct(exact) != _orderLineKeyForProduct(product)) {
+        return null;
+      }
+      exact = product;
+    }
+    return exact;
+  }
+
+  bool _productMatchesSearch(Product product, String rawQuery) {
+    final query = _normalizedSearchQuery(rawQuery);
+    if (query.isEmpty) return true;
+
+    bool textContains(String value) {
+      return value.trim().toLowerCase().contains(query);
+    }
+
+    if (textContains(product.itemNumber) ||
+        textContains(product.description) ||
+        textContains(product.upc) ||
+        textContains(product.productType) ||
+        textContains(product.category) ||
+        textContains(product.subCategory)) {
+      return true;
+    }
+
+    final compactQuery = _compactSearchToken(rawQuery);
+    if (compactQuery.isEmpty) return false;
+
+    final compactItem = _compactSearchToken(product.itemNumber);
+    if (compactItem.contains(compactQuery)) return true;
+
+    final compactUpc = _compactSearchToken(product.upc);
+    if (compactUpc.contains(compactQuery)) return true;
+
+    return false;
   }
 
   bool _onECatalogScrollDismissKeyboard(ScrollNotification notification) {
@@ -3494,7 +3554,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     _searchController.dispose();
 
-    _catalogSearchController.removeListener(_onCatalogSearchChanged);
     _catalogSearchController.dispose();
     _ecatalogSearchKeyboardIdleTimer?.cancel();
     _ecatalogSearchFocusNode.dispose();
@@ -7917,6 +7976,43 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return product;
   }
 
+  Future<bool> _ensureQuoteReadyForManualAdd() async {
+    if (_selectedCustomer != null) return true;
+    if (_customers.isEmpty) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Load customers CSV first.')),
+      );
+      return false;
+    }
+    await _confirmNewQuote();
+    return mounted && _selectedCustomer != null;
+  }
+
+  void _showExactLookupMessageForQuery(
+    String query, {
+    required bool scanTab,
+  }) {
+    final trimmed = query.trim();
+    final hasPartialMatches =
+        trimmed.isNotEmpty &&
+        _allProducts.any((p) => _productMatchesSearch(p, trimmed));
+    final message = hasPartialMatches
+        ? 'Select an item from the results'
+        : 'No exact item or UPC found';
+    if (scanTab) {
+      _setStateDebug('quick_entry_exact_lookup_message', () {
+        _quickEntryStatus = message;
+        _status = message;
+      });
+    } else {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
   bool _productIsDiscountEligible(Product product) =>
       _productPricingState(product) == ProductPricingState.discountEligible;
 
@@ -8426,28 +8522,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       });
 
       _searchDebounce?.cancel();
-      if (_searchResults.isNotEmpty) {
-        _setStateDebug('quick_entry_pre_lookup_clear_search', () {
-          _searchResults = [];
-        });
-      }
-
-      final product = _findProduct(input);
+      final product = _findExactProductForQuickEntry(input);
 
       if (product == null) {
-        _setStateDebug('quick_entry_not_found_status', () {
-          _quickEntryStatus = 'Item not found';
-          _status = 'Quick entry not found';
-        });
-        _quickEntryController.clear();
-        _setStateDebug('quick_entry_not_found_clear_search', () {
-          _searchResults = [];
-        });
-        _triggerScanFeedback(ScanFeedbackType.notFound);
-        _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryNotFound');
+        _showExactLookupMessageForQuery(input, scanTab: true);
         return;
       }
 
+      if (!await _ensureQuoteReadyForManualAdd()) return;
       await _ensureRoutingForProduct(product);
       final bucket = _resolveQuoteBucketForProduct(product);
       final added = _addProduct(product, input, bucket: bucket);
@@ -8455,11 +8537,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       _quickEntryController.clear();
 
-      if (_searchResults.isNotEmpty) {
-        _setStateDebug('quick_entry_clear_search_after_add', () {
-          _searchResults = [];
-        });
-      }
+      _setStateDebug('quick_entry_clear_search_after_add', () {
+        _scanSearchQuery = '';
+        _searchResults = [];
+      });
       _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySuccess');
     } catch (e) {
       if (!mounted) return;
@@ -8469,6 +8550,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _scannerController.clear();
       _quickEntryController.clear();
       _setStateDebug('quick_entry_clear_search_after_error', () {
+        _scanSearchQuery = '';
         _searchResults = [];
       });
       _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryCatch');
@@ -8527,10 +8609,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _searchDebounce?.cancel();
 
     _searchDebounce = Timer(const Duration(milliseconds: 200), () {
-      final query = value.trim().toLowerCase();
+      final query = value.trim();
 
       if (query.isEmpty) {
         _setStateDebug('search_debounce_clear_results', () {
+          _scanSearchQuery = '';
           _searchResults = [];
         });
         return;
@@ -8538,13 +8621,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final results = _allProducts
           .where((p) {
-            return p.itemNumber.toLowerCase().contains(query) ||
-                p.description.toLowerCase().contains(query);
+            return _productMatchesSearch(p, query);
           })
           .take(10)
           .toList();
 
       _setStateDebug('search_debounce_apply_results', () {
+        _scanSearchQuery = query;
         _searchResults = results;
       });
     });
@@ -9617,7 +9700,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   bool _matchesCatalogBaseFilters(
     Product p, {
-    required String queryLower,
+    required String rawQuery,
     required bool inOrderOnly,
     required bool inStockOnly,
   }) {
@@ -9626,25 +9709,144 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return false;
     }
     if (inStockOnly && !_isProductInStockForEcatalog(p)) return false;
-    if (queryLower.isNotEmpty &&
-        !p.itemNumber.toLowerCase().contains(queryLower) &&
-        !p.description.toLowerCase().contains(queryLower)) {
+    if (!_productMatchesSearch(p, rawQuery)) {
       return false;
     }
     return true;
   }
 
+  String _ecatalogQuoteSummaryLabel() {
+    final customerName = _selectedCustomer?.displayName.trim() ?? '';
+    final quoteName = _quoteNameController.text.trim();
+    if (customerName.isNotEmpty && quoteName.isNotEmpty) {
+      return '$customerName - $quoteName';
+    }
+    if (customerName.isNotEmpty) return customerName;
+    if (quoteName.isNotEmpty) return quoteName;
+    return 'No customer / quote selected';
+  }
+
+  Widget _buildECatalogOrderSummaryBar({
+    required TextTheme textTheme,
+    required bool orderHasDiscount,
+  }) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _ecatalogQuoteSummaryLabel(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: _orderLines.isEmpty
+                      ? null
+                      : () {
+                          setState(() {
+                            _ecatalogOrderPanelExpanded =
+                                !_ecatalogOrderPanelExpanded;
+                          });
+                        },
+                  icon: Icon(
+                    _ecatalogOrderPanelExpanded
+                        ? Icons.expand_less
+                        : Icons.expand_more,
+                  ),
+                  label: Text(
+                    _ecatalogOrderPanelExpanded ? 'Hide Order' : 'View Order',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 16,
+              runSpacing: 6,
+              children: [
+                Text(
+                  'Items: ${_orderLines.length}',
+                  style: textTheme.bodyMedium,
+                ),
+                Text('Units: $_totalUnits', style: textTheme.bodyMedium),
+                Text(
+                  '${orderHasDiscount ? 'Final Total' : 'Order Total'}: ${_formatCurrency(_orderTotal)}',
+                  style: textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildECatalogOrderPanel() {
+    if (_orderLines.isEmpty) {
+      return Card(
+        margin: const EdgeInsets.only(top: 6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Text(
+            'No items added yet',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: _kSecondaryText),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      constraints: const BoxConstraints(maxHeight: 360),
+      child: Material(
+        color: Colors.transparent,
+        child: ListView.builder(
+          itemCount: _orderLines.length,
+          itemBuilder: (context, index) {
+            final line = _orderLines[index];
+            final lineKey = _orderLineKeyForProduct(line.product);
+            final displayProduct = _productsByItemNumber[lineKey];
+            return KeyedSubtree(
+              key: ValueKey('ecatalog_order_panel_$lineKey'),
+              child: _buildOrderCard(
+                line,
+                compactLayout: true,
+                compactExpandHost: _OrderLineCardCompactExpandHost.ecatalogTab,
+                displayProduct: displayProduct ?? line.product,
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   List<String> _catalogCategories() {
     final n = _productsByItemNumber.length;
     final merch = _catalogMerchandising;
-    final q = _catalogSearchQuery.trim().toLowerCase();
+    final q = _catalogSearchQuery.trim();
+    final normalizedQ = _normalizedSearchQuery(q);
     final inOrderOnly = _catalogInOrderOnly;
     final inStockOnly = _catalogInStockOnly;
     final orderSeqSig = Object.hashAll(
       _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
     );
     final key =
-        '$n|${merch ?? ''}|$q|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
+        '$n|${merch ?? ''}|$normalizedQ|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
     if (_catalogDistinctCategories != null &&
         _catalogDistinctCategoriesCacheKey == key) {
       return _catalogDistinctCategories!;
@@ -9653,7 +9855,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     for (final p in _productsByItemNumber.values) {
       if (!_matchesCatalogBaseFilters(
         p,
-        queryLower: q,
+        rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
       )) {
@@ -9680,14 +9882,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final n = _productsByItemNumber.length;
     final cat = _resolvedCatalogCategoryForEcatalogFilters();
     final merch = _catalogMerchandising;
-    final q = _catalogSearchQuery.trim().toLowerCase();
+    final q = _catalogSearchQuery.trim();
+    final normalizedQ = _normalizedSearchQuery(q);
     final inOrderOnly = _catalogInOrderOnly;
     final inStockOnly = _catalogInStockOnly;
     final orderSeqSig = Object.hashAll(
       _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
     );
     final key =
-        '$n|${cat ?? ''}|${merch ?? ''}|$q|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
+        '$n|${cat ?? ''}|${merch ?? ''}|$normalizedQ|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
     if (_catalogSubCategoryOptionsCacheKey == key &&
         _catalogSubCategoryOptionsCache != null) {
       return _catalogSubCategoryOptionsCache!;
@@ -9696,7 +9899,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     for (final p in _productsByItemNumber.values) {
       if (!_matchesCatalogBaseFilters(
         p,
-        queryLower: q,
+        rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
       )) {
@@ -9713,7 +9916,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   List<Product> _filteredCatalogProducts() {
-    final q = _catalogSearchQuery.trim().toLowerCase();
+    final q = _catalogSearchQuery.trim();
+    final normalizedQ = _normalizedSearchQuery(q);
     final cat = _resolvedCatalogCategoryForEcatalogFilters();
     final subCategories = _catalogSubCategoriesForSelectedCategory();
     final subRaw = _selectedCatalogSubCategory;
@@ -9726,7 +9930,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     // Keep ECatalog in stable catalog order. Cache invalidation only needs the
     // order membership count for "In Order only" filtering.
     final key =
-        '${_productsByItemNumber.length}|$q|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}';
+        '${_productsByItemNumber.length}|$normalizedQ|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}';
     if (_catalogFilteredCacheKey == key &&
         _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
@@ -9740,7 +9944,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       if (!_matchesCatalogBaseFilters(
         p,
-        queryLower: q,
+        rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
       )) {
@@ -9790,6 +9994,32 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return;
     }
     _enqueueScan(payload, source: 'ecatalog');
+  }
+
+  Future<void> _addECatalogSearchEntry() async {
+    final input = _catalogSearchController.text.trim();
+    if (input.isEmpty) return;
+    final product = _findExactProductForQuickEntry(input);
+    if (product == null) {
+      _showExactLookupMessageForQuery(input, scanTab: false);
+      return;
+    }
+    if (!await _ensureQuoteReadyForManualAdd()) return;
+    await _ensureRoutingForProduct(product);
+    final bucket = _resolveQuoteBucketForProduct(product);
+    final added = _addProduct(
+      product,
+      input,
+      bucket: bucket,
+      feedbackSource: 'ecatalog',
+    );
+    if (!added) return;
+    _catalogSearchController.clear();
+    if (!mounted) return;
+    _setStateDebug('ecatalog_quick_entry_clear_search', () {
+      _catalogSearchQuery = '';
+      _ecatalogExpandedItemKey = null;
+    });
   }
 
   /// ECatalog catalog row only. Branch order: (1) PS → Reg.+Sale; (2) NET → NET;
@@ -9930,6 +10160,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
     final int quoteItemCount = _orderLines.length;
+    final bool orderHasDiscount = _orderHasAnyDiscount();
     return Padding(
       padding: const EdgeInsets.all(8),
       child: Column(
@@ -9944,14 +10175,58 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        TextField(
-                          controller: _catalogSearchController,
-                          focusNode: _ecatalogSearchFocusNode,
-                          decoration: const InputDecoration(
-                            labelText: 'Search',
-                            hintText: 'Item # or description',
-                          ),
-                          textInputAction: TextInputAction.search,
+                        _buildECatalogOrderSummaryBar(
+                          textTheme: textTheme,
+                          orderHasDiscount: orderHasDiscount,
+                        ),
+                        AnimatedCrossFade(
+                          firstChild: const SizedBox.shrink(),
+                          secondChild: _buildECatalogOrderPanel(),
+                          crossFadeState: _ecatalogOrderPanelExpanded
+                              ? CrossFadeState.showSecond
+                              : CrossFadeState.showFirst,
+                          duration: const Duration(milliseconds: 180),
+                        ),
+                        const SizedBox(height: 8),
+                        const Divider(height: 1),
+                        const SizedBox(height: 10),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _catalogSearchController,
+                                focusNode: _ecatalogSearchFocusNode,
+                                decoration: const InputDecoration(
+                                  labelText: 'Search',
+                                  hintText:
+                                      'Item #, description, UPC, type, category',
+                                ),
+                                textInputAction: TextInputAction.search,
+                                onSubmitted: (_) => unawaited(
+                                  _addECatalogSearchEntry(),
+                                ),
+                                onChanged: _onCatalogSearchChanged,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: FilledButton.tonal(
+                                onPressed: () => unawaited(
+                                  _addECatalogSearchEntry(),
+                                ),
+                                style: FilledButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 10,
+                                  ),
+                                ),
+                                child: const Text('Add'),
+                              ),
+                            ),
+                          ],
                         ),
                         const SizedBox(height: 8),
                         Wrap(
@@ -10160,7 +10435,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                       hasScrollBody: false,
                       child: Center(
                         child: Text(
-                          _catalogInOrderOnly
+                          _catalogSearchQuery.trim().isNotEmpty
+                              ? "No products found for '${_catalogSearchQuery.trim()}'"
+                              : _catalogInOrderOnly
                               ? 'No items from this order match the current filter.'
                               : 'No products match',
                           style: textTheme.bodyLarge?.copyWith(
@@ -13790,6 +14067,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         if (!added) return;
         _quickEntryController.clear();
         _setStateDebug('scan_search_tap_clear_results', () {
+          _scanSearchQuery = '';
           _searchResults = [];
         });
         _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySearchTap');
@@ -13798,7 +14076,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Widget _buildScanTabSearchResultsList() {
-    if (_searchResults.isEmpty) return const SizedBox.shrink();
+    if (_searchResults.isEmpty) {
+      final query = _scanSearchQuery.trim();
+      if (query.isEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.only(top: 8, bottom: 8),
+        child: Text(
+          "No products found for '$query'",
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(color: _kSecondaryText),
+        ),
+      );
+    }
     return _ScanTabSearchResultsList(
       products: _searchResults,
       itemBuilder: _buildScanTabSearchResultTile,
