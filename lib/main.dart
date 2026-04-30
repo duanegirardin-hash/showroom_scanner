@@ -87,7 +87,7 @@ class UpperCaseTextFormatter extends TextInputFormatter {
 /// Which tab owns compact order-line expand/collapse.
 enum _OrderLineCardCompactExpandHost { ordersTab, scanTab, ecatalogTab }
 
-enum _ECatalogNavigationSource { loadQuote, importOrder, scan, manualAdd, other }
+enum _ECatalogNavigationSource { importOrder, other }
 
 // --- Phase 1: theme tokens (visual only; no app logic) ---
 const Color _kDeepTeal = Color(0xFF006D77);
@@ -3146,12 +3146,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   String? _catalogMerchandising;
   bool _catalogInOrderOnly = false;
   bool _catalogInStockOnly = false;
+  bool _catalogPreviouslyOrderedOnly = false;
   String _catalogFilteredCacheKey = '';
   List<Product>? _catalogFilteredProductsCache;
   List<String>? _catalogDistinctCategories;
   String _catalogDistinctCategoriesCacheKey = '';
   String? _catalogSubCategoryOptionsCacheKey;
   List<String>? _catalogSubCategoryOptionsCache;
+  String _previouslyOrderedCustomerCacheKey = '';
+  String? _previouslyOrderedHistoryLoadInFlightKey;
+  Set<String> _previouslyOrderedKeysForSelectedCustomer = <String>{};
+  final Map<String, Set<String>> _previouslyOrderedKeysByCustomer = {};
 
   /// Created in [_doInitAudio] so cold start does not allocate native players in [initState].
   AudioPlayer? _goodScanPlayer;
@@ -3488,9 +3493,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   void _maybeNavigateToECatalogTab(_ECatalogNavigationSource source) {
-    final shouldNavigate =
-        source == _ECatalogNavigationSource.loadQuote ||
-        source == _ECatalogNavigationSource.importOrder;
+    final shouldNavigate = source == _ECatalogNavigationSource.importOrder;
     if (!shouldNavigate) return;
     _navigateToECatalogTab();
   }
@@ -3510,16 +3513,6 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _perfLog(
       '#$seq total=${sw.elapsedMilliseconds}ms outcome=$outcome raw="$raw" buildDeltas(scanTab=$scanTabBuildDelta orderListTab=$orderListTabBuildDelta orderList=$orderListBuildDelta)',
     );
-  }
-
-  void _scheduleECatalogSearchKeyboardIdleDismiss() {
-    _ecatalogSearchKeyboardIdleTimer?.cancel();
-    _ecatalogSearchKeyboardIdleTimer = Timer(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      if (_ecatalogSearchFocusNode.hasFocus) {
-        _ecatalogSearchFocusNode.unfocus();
-      }
-    });
   }
 
   void _onCatalogSearchChanged(String value) {
@@ -5195,6 +5188,124 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     final upc = _normalizeUpcLookupKey(product.upc);
     return 'UPC:$upc';
+  }
+
+  String _customerHistoryCacheKey(Customer? customer) {
+    if (customer == null) return '';
+    final id = customer.id.trim();
+    if (id.isNotEmpty) return 'ID:${id.toLowerCase()}';
+    final name = customer.displayName.trim().toLowerCase();
+    return 'NAME:$name';
+  }
+
+  String? _orderLineKeyFromPersistedQuoteLine(Map<String, dynamic> map) {
+    final item = normalizeItemNumber((map['itemNumber'] as String?)?.trim() ?? '');
+    if (item.isNotEmpty) return 'ITEM:$item';
+    final upc = _normalizeUpcLookupKey((map['upc'] as String?)?.trim() ?? '');
+    if (upc.isEmpty) return null;
+    return 'UPC:$upc';
+  }
+
+  Future<void> _refreshPreviouslyOrderedHistoryForSelectedCustomer({
+    bool force = false,
+  }) async {
+    final customer = _selectedCustomer;
+    final cacheKey = _customerHistoryCacheKey(customer);
+    if (cacheKey.isEmpty) {
+      if (_previouslyOrderedCustomerCacheKey.isNotEmpty ||
+          _previouslyOrderedKeysForSelectedCustomer.isNotEmpty) {
+        if (!mounted) {
+          _previouslyOrderedCustomerCacheKey = '';
+          _previouslyOrderedKeysForSelectedCustomer = <String>{};
+          return;
+        }
+        setState(() {
+          _previouslyOrderedCustomerCacheKey = '';
+          _previouslyOrderedKeysForSelectedCustomer = <String>{};
+        });
+      }
+      return;
+    }
+    if (!force && _previouslyOrderedCustomerCacheKey == cacheKey) return;
+    if (_previouslyOrderedHistoryLoadInFlightKey == cacheKey) return;
+
+    final cached = _previouslyOrderedKeysByCustomer[cacheKey];
+    if (cached != null) {
+      if (!mounted) {
+        _previouslyOrderedCustomerCacheKey = cacheKey;
+        _previouslyOrderedKeysForSelectedCustomer = cached;
+        return;
+      }
+      setState(() {
+        _previouslyOrderedCustomerCacheKey = cacheKey;
+        _previouslyOrderedKeysForSelectedCustomer = cached;
+      });
+      return;
+    }
+
+    _previouslyOrderedHistoryLoadInFlightKey = cacheKey;
+    final computedKeys = <String>{};
+    try {
+      final archive = await _loadArchiveQuoteIndex();
+      final matching = archive
+          .where((info) => _savedQuoteInfoMatchesCustomer(info, customer!))
+          .toList(growable: false);
+      if (matching.isNotEmpty) {
+        final dir = await _getQuotesDirectory();
+        for (final info in matching) {
+          final file = File('${dir.path}/quote_${info.id}.json');
+          if (!await file.exists()) continue;
+          try {
+            final decoded = jsonDecode(await file.readAsString());
+            if (decoded is! Map) continue;
+            final data = Map<String, dynamic>.from(decoded);
+            final lines =
+                data['lines'] as List<dynamic>? ??
+                data['items'] as List<dynamic>? ??
+                const [];
+            for (final lineJson in lines) {
+              if (lineJson is! Map) continue;
+              final key = _orderLineKeyFromPersistedQuoteLine(
+                Map<String, dynamic>.from(lineJson),
+              );
+              if (key != null && key.isNotEmpty) {
+                computedKeys.add(key);
+              }
+            }
+          } catch (_) {
+            // Keep history resilient when one archive quote file is malformed.
+          }
+        }
+      }
+      _previouslyOrderedKeysByCustomer[cacheKey] = computedKeys;
+      if (!mounted) {
+        _previouslyOrderedCustomerCacheKey = cacheKey;
+        _previouslyOrderedKeysForSelectedCustomer = computedKeys;
+        return;
+      }
+      if (_customerHistoryCacheKey(_selectedCustomer) != cacheKey) return;
+      setState(() {
+        _previouslyOrderedCustomerCacheKey = cacheKey;
+        _previouslyOrderedKeysForSelectedCustomer = computedKeys;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      if (_customerHistoryCacheKey(_selectedCustomer) != cacheKey) return;
+      setState(() {
+        _previouslyOrderedCustomerCacheKey = cacheKey;
+        _previouslyOrderedKeysForSelectedCustomer = <String>{};
+      });
+    } finally {
+      if (_previouslyOrderedHistoryLoadInFlightKey == cacheKey) {
+        _previouslyOrderedHistoryLoadInFlightKey = null;
+      }
+    }
+  }
+
+  bool _isPreviouslyOrdered(Product p) {
+    return _previouslyOrderedKeysForSelectedCustomer.contains(
+      _orderLineKeyForProduct(p),
+    );
   }
 
   String _sanitizeOrderExportFileSegment(
@@ -8282,6 +8393,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _selectedCustomer = resolvedSelection;
         _customersLoadDebugLine = debugLine;
       });
+      unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
     } else {
       _customers = list;
       _customersByKey
@@ -8435,6 +8547,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ? 'Customer cleared'
           : 'Customer: ${picked.displayName}';
     });
+    unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
     if (!mounted) return;
     debugPrint(
       '[DependentsDiag] _showSelectCustomerDialog: before _requestScannerFocus()',
@@ -9426,6 +9539,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _activeQuoteBucketKey = bucket.bucketKey;
       _activeQuoteBucketLabel = bucket.displayLabel;
     });
+    unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
 
     _requestScannerFocus();
 
@@ -10227,12 +10341,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required String rawQuery,
     required bool inOrderOnly,
     required bool inStockOnly,
+    required bool previouslyOrderedOnly,
   }) {
     if (!_productMatchesEcatalogMerchandising(p)) return false;
     if (inOrderOnly && !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
       return false;
     }
     if (inStockOnly && !_isProductInStockForEcatalog(p)) return false;
+    if (previouslyOrderedOnly && !_isPreviouslyOrdered(p)) return false;
     if (!_productMatchesSearch(p, rawQuery)) {
       return false;
     }
@@ -10366,11 +10482,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final normalizedQ = _normalizedSearchQuery(q);
     final inOrderOnly = _catalogInOrderOnly;
     final inStockOnly = _catalogInStockOnly;
+    final previouslyOrderedOnly = _catalogPreviouslyOrderedOnly;
+    final customerHistoryKey = _previouslyOrderedCustomerCacheKey;
     final orderSeqSig = Object.hashAll(
       _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
     );
     final key =
-        '$n|${merch ?? ''}|$normalizedQ|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
+        '$n|${merch ?? ''}|$normalizedQ|$inOrderOnly|$inStockOnly|$previouslyOrderedOnly|$customerHistoryKey|${_orderLineByKey.length}|$orderSeqSig';
     if (_catalogDistinctCategories != null &&
         _catalogDistinctCategoriesCacheKey == key) {
       return _catalogDistinctCategories!;
@@ -10382,6 +10500,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
+        previouslyOrderedOnly: previouslyOrderedOnly,
       )) {
         continue;
       }
@@ -10410,11 +10529,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final normalizedQ = _normalizedSearchQuery(q);
     final inOrderOnly = _catalogInOrderOnly;
     final inStockOnly = _catalogInStockOnly;
+    final previouslyOrderedOnly = _catalogPreviouslyOrderedOnly;
+    final customerHistoryKey = _previouslyOrderedCustomerCacheKey;
     final orderSeqSig = Object.hashAll(
       _orderLines.map((l) => _orderLineKeyForProduct(l.product)),
     );
     final key =
-        '$n|${cat ?? ''}|${merch ?? ''}|$normalizedQ|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}|$orderSeqSig';
+        '$n|${cat ?? ''}|${merch ?? ''}|$normalizedQ|$inOrderOnly|$inStockOnly|$previouslyOrderedOnly|$customerHistoryKey|${_orderLineByKey.length}|$orderSeqSig';
     if (_catalogSubCategoryOptionsCacheKey == key &&
         _catalogSubCategoryOptionsCache != null) {
       return _catalogSubCategoryOptionsCache!;
@@ -10426,6 +10547,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
+        previouslyOrderedOnly: previouslyOrderedOnly,
       )) {
         continue;
       }
@@ -10450,11 +10572,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         : null;
     final inOrderOnly = _catalogInOrderOnly;
     final inStockOnly = _catalogInStockOnly;
+    final previouslyOrderedOnly = _catalogPreviouslyOrderedOnly;
     final merch = _catalogMerchandising;
+    final customerHistoryKey = _previouslyOrderedCustomerCacheKey;
     // Keep ECatalog in stable catalog order. Cache invalidation only needs the
     // order membership count for "In Order only" filtering.
     final key =
-        '${_productsByItemNumber.length}|$normalizedQ|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|${_orderLineByKey.length}';
+        '${_productsByItemNumber.length}|$normalizedQ|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|$previouslyOrderedOnly|$customerHistoryKey|${_orderLineByKey.length}';
     if (_catalogFilteredCacheKey == key &&
         _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
@@ -10471,6 +10595,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
+        previouslyOrderedOnly: previouslyOrderedOnly,
       )) {
         continue;
       }
@@ -10483,10 +10608,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   bool _isProductInStockForEcatalog(Product product) {
-    if (product.whse1InStock || product.whse2InStock) return true;
-    final w1 = _availabilityLabelForWhse1(product).trim().toLowerCase();
-    final w2 = _availabilityLabelForWhse2(product).trim().toLowerCase();
-    return w1 == 'in stock' || w2 == 'in stock';
+    return product.whse1InStock || product.whse2InStock;
   }
 
   int _qtyInCurrentQuoteForProduct(Product product) {
@@ -10652,6 +10774,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     if (_loadingProducts) {
       return const Center(child: CircularProgressIndicator());
+    }
+    final selectedCustomerHistoryKey = _customerHistoryCacheKey(_selectedCustomer);
+    if (_selectedCustomer != null &&
+        selectedCustomerHistoryKey.isNotEmpty &&
+        _previouslyOrderedCustomerCacheKey != selectedCustomerHistoryKey &&
+        _previouslyOrderedHistoryLoadInFlightKey != selectedCustomerHistoryKey) {
+      unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
     }
     final filtered = _filteredCatalogProducts();
     final int totalCatalogProducts = _productsByItemNumber.length;
@@ -10861,11 +10990,21 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                 setState(() => _catalogInStockOnly = selected);
                               },
                             ),
+                            FilterChip(
+                              label: const Text('Previously Ordered Only'),
+                              selected: _catalogPreviouslyOrderedOnly,
+                              onSelected: (selected) {
+                                setState(
+                                  () => _catalogPreviouslyOrderedOnly = selected,
+                                );
+                              },
+                            ),
                             TextButton.icon(
                               onPressed:
                                   (_catalogMerchandising != null ||
                                       _catalogInOrderOnly ||
                                       _catalogInStockOnly ||
+                                      _catalogPreviouslyOrderedOnly ||
                                       _selectedCatalogCategory != null ||
                                       _selectedCatalogSubCategory != null)
                                   ? () {
@@ -10873,6 +11012,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                         _catalogMerchandising = null;
                                         _catalogInOrderOnly = false;
                                         _catalogInStockOnly = false;
+                                        _catalogPreviouslyOrderedOnly = false;
                                         _selectedCatalogCategory = null;
                                         _selectedCatalogSubCategory = null;
                                       });
@@ -10986,10 +11126,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                         final lineTotal = line != null
                             ? _getDiscountedLineTotal(line)
                             : 0.0;
-                        final productFlagChips = _productFlagChips(
-                          context,
-                          product,
-                        );
+                        final previouslyOrdered = _isPreviouslyOrdered(product);
+                        final productFlagChips = <Widget>[
+                          ..._productFlagChips(context, product),
+                          if (previouslyOrdered)
+                            _ecatalogPreviouslyOrderedBadge(context),
+                        ];
                         final catLabel = product.category.trim().isEmpty
                             ? '—'
                             : product.category.trim();
@@ -14272,6 +14414,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       _setStateDebug('load_quote_by_id_apply', applyWorkspace);
+      unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
       _maybeNavigateToECatalogTab(navigationSource);
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -14409,10 +14552,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       } else {
         await Future.delayed(const Duration(milliseconds: 150));
         if (mounted) {
-          await _loadQuoteById(
-            id,
-            navigationSource: _ECatalogNavigationSource.loadQuote,
-          );
+          await _loadQuoteById(id);
         }
       }
     }
@@ -14587,6 +14727,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       onLoadQuote: _showLoadQuoteDialog,
       onImportOrder: _pickAndImportOrderCsv,
       onExportAll: _exportAllQuotesToCsv,
+      onExportCurrentQuote: _exportCurrentQuoteOnlyToCsv,
+      loadingProducts: _loadingProducts,
     );
   }
 
@@ -14862,7 +15004,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           return KeyEventResult.ignored;
         }
 
-        if (event.logicalKey == LogicalKeyboardKey.enter) {
+        if (event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter) {
           _processScannerBuffer();
           return KeyEventResult.handled;
         }
@@ -15975,12 +16118,16 @@ class _ECatalogTopActionBar extends StatelessWidget {
     required this.onLoadQuote,
     required this.onImportOrder,
     required this.onExportAll,
+    required this.onExportCurrentQuote,
+    required this.loadingProducts,
   });
 
   final VoidCallback onCreateQuote;
   final VoidCallback onLoadQuote;
   final VoidCallback onImportOrder;
   final VoidCallback onExportAll;
+  final Future<void> Function() onExportCurrentQuote;
+  final bool loadingProducts;
 
   @override
   Widget build(BuildContext context) {
@@ -16018,7 +16165,20 @@ class _ECatalogTopActionBar extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
           onPressed: onExportAll,
-          child: const Text('Export All', style: TextStyle(fontSize: 13)),
+          child: const Text('Export All Quotes', style: TextStyle(fontSize: 13)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          onPressed: loadingProducts
+              ? null
+              : () => unawaited(onExportCurrentQuote()),
+          child: const Text(
+            'Export Current Quote Only',
+            style: TextStyle(fontSize: 13),
+          ),
         ),
       ],
     );
@@ -16364,6 +16524,25 @@ Widget _ecatalogInOrderQtyBadge(BuildContext context, int quantity) {
         fontSize: 11,
         fontWeight: FontWeight.w600,
         color: Colors.green.shade800,
+      ),
+    ),
+  );
+}
+
+Widget _ecatalogPreviouslyOrderedBadge(BuildContext context) {
+  final textTheme = Theme.of(context).textTheme;
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: Colors.deepPurple.withValues(alpha: 0.14),
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Text(
+      'Previously Ordered',
+      style: textTheme.bodySmall?.copyWith(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        color: Colors.deepPurple.shade700,
       ),
     ),
   );
