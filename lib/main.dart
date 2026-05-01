@@ -2456,6 +2456,26 @@ class Customer {
   }
 }
 
+class CustomerWalkOrderRow {
+  const CustomerWalkOrderRow({
+    required this.customerId,
+    required this.itemNumber,
+    required this.walkPosition,
+    required this.subPosition,
+    required this.neverAdd,
+    required this.neverAddReason,
+    required this.walkEnabled,
+  });
+
+  final String customerId;
+  final String itemNumber;
+  final int? walkPosition;
+  final int? subPosition;
+  final bool neverAdd;
+  final String neverAddReason;
+  final bool walkEnabled;
+}
+
 String _orderImportDuplicateResolutionLabel(OrderImportDuplicateResolution r) {
   switch (r) {
     case OrderImportDuplicateResolution.totalQty:
@@ -3288,6 +3308,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   List<Customer> _customers = [];
   final Map<String, Customer> _customersByKey = {};
   Customer? _selectedCustomer;
+  bool _isCustomerWalkOrderEnabled = false;
+  final Map<String, Map<String, CustomerWalkOrderRow>>
+  _customerWalkOrderByCustomerAndItem = {};
 
   /// Updated when customer CSV loads; no longer shown in Scan panel.
   // ignore: unused_field
@@ -3340,6 +3363,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!mounted) return;
       await _loadCustomersFromAssets();
       if (!mounted) return;
+      unawaited(_debugLoadCustomerWalkOrderCsv());
       unawaited(_loadProductsOnStartup());
       try {
         final beforeId = _currentQuoteId;
@@ -7851,6 +7875,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _customers = [];
           _customersByKey.clear();
           _selectedCustomer = null;
+          _syncCustomerWalkOrderEnabledForCustomer(null);
+          debugPrint('[WalkOrder] sync source: customers load failure');
           _customersLoadDebugLine =
               'Customers Loaded: FAILED (see debug log for $e)';
         });
@@ -7858,9 +7884,159 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _customers = [];
         _customersByKey.clear();
         _selectedCustomer = null;
+        _syncCustomerWalkOrderEnabledForCustomer(null);
+        debugPrint('[WalkOrder] sync source: customers load failure');
       }
       scheduleMicrotask(() => _reapplyLocalAddedCustomers());
       _discardWorkingOrderIfNoCustomerSelected();
+    }
+  }
+
+  Future<void> _debugLoadCustomerWalkOrderCsv() async {
+    try {
+      final rawCsv =
+          await rootBundle.loadString('assets/data/customer_walk_order.csv');
+      final lines = const LineSplitter().convert(rawCsv);
+      List<List<dynamic>> rows;
+      try {
+        rows = const CsvToListConverter(
+          shouldParseNumbers: false,
+        ).convert(rawCsv);
+      } catch (e) {
+        _customerWalkOrderByCustomerAndItem.clear();
+        debugPrint('[WalkOrder] CSV parse failed: $e');
+        debugPrint('[WalkOrder] total CSV lines: ${lines.length}');
+        return;
+      }
+
+      if (rows.isEmpty) {
+        _customerWalkOrderByCustomerAndItem.clear();
+        debugPrint('[WalkOrder] total CSV lines: ${lines.length}');
+        debugPrint('[WalkOrder] total parsed rows: 0');
+        debugPrint('[WalkOrder] number of customers found: 0');
+        debugPrint('[WalkOrder] customer 302021 rows: 0');
+        debugPrint('[WalkOrder] NeverAdd YES rows: 0');
+        debugPrint('[WalkOrder] rows with WalkPosition: 0');
+        debugPrint('[WalkOrder] rows with SubPosition: 0');
+        return;
+      }
+
+      final header = rows.first.map((e) => e.toString().trim()).toList();
+      int headerIndex(String name) {
+        final wanted = name.trim().toLowerCase();
+        for (var i = 0; i < header.length; i++) {
+          if (header[i].toLowerCase() == wanted) return i;
+        }
+        return -1;
+      }
+
+      final idxCustomerId = headerIndex('CustomerID');
+      final idxItemNumber = headerIndex('Item Number');
+      final idxWalkPosition = headerIndex('WalkPosition');
+      final idxSubPosition = headerIndex('SubPosition');
+      final idxNeverAdd = headerIndex('NeverAdd');
+      final idxNeverAddReason = headerIndex('NeverAddReason');
+      final idxWalkEnabled = headerIndex('WalkEnabled');
+
+      if (idxCustomerId < 0 || idxItemNumber < 0) {
+        _customerWalkOrderByCustomerAndItem.clear();
+        debugPrint(
+          '[WalkOrder] Missing required columns. '
+          'CustomerID=$idxCustomerId Item Number=$idxItemNumber',
+        );
+        debugPrint('[WalkOrder] total CSV lines: ${lines.length}');
+        debugPrint('[WalkOrder] total parsed rows: 0');
+        debugPrint('[WalkOrder] number of customers found: 0');
+        debugPrint('[WalkOrder] customer 302021 rows: 0');
+        debugPrint('[WalkOrder] NeverAdd YES rows: 0');
+        debugPrint('[WalkOrder] rows with WalkPosition: 0');
+        debugPrint('[WalkOrder] rows with SubPosition: 0');
+        return;
+      }
+
+      String cell(List<dynamic> row, int idx) {
+        if (idx < 0 || idx >= row.length) return '';
+        return row[idx].toString().trim();
+      }
+
+      int? parseNullableInt(String raw) {
+        final t = raw.trim();
+        if (t.isEmpty) return null;
+        return int.tryParse(t);
+      }
+
+      bool parseYesNo(String raw, {required bool blankDefault}) {
+        final t = raw.trim();
+        if (t.isEmpty) return blankDefault;
+        final upper = t.toUpperCase();
+        if (upper == 'YES' || upper == 'Y' || upper == 'TRUE' || upper == '1') {
+          return true;
+        }
+        if (upper == 'NO' || upper == 'N' || upper == 'FALSE' || upper == '0') {
+          return false;
+        }
+        return blankDefault;
+      }
+
+      final parsed = <String, Map<String, CustomerWalkOrderRow>>{};
+      var parsedRows = 0;
+      var neverAddYesRows = 0;
+      var rowsWithWalkPosition = 0;
+      var rowsWithSubPosition = 0;
+
+      for (var i = 1; i < rows.length; i++) {
+        final row = rows[i];
+        final customerId = cell(row, idxCustomerId);
+        final itemNumber = cell(row, idxItemNumber);
+        if (customerId.isEmpty || itemNumber.isEmpty) continue;
+
+        final walkPosition = parseNullableInt(cell(row, idxWalkPosition));
+        final subPosition = parseNullableInt(cell(row, idxSubPosition));
+        final neverAdd = parseYesNo(
+          cell(row, idxNeverAdd),
+          blankDefault: false,
+        );
+        final walkEnabled = parseYesNo(
+          cell(row, idxWalkEnabled),
+          blankDefault: true,
+        );
+        final rowData = CustomerWalkOrderRow(
+          customerId: customerId,
+          itemNumber: itemNumber,
+          walkPosition: walkPosition,
+          subPosition: subPosition,
+          neverAdd: neverAdd,
+          neverAddReason: cell(row, idxNeverAddReason),
+          walkEnabled: walkEnabled,
+        );
+
+        final byItem = parsed.putIfAbsent(customerId, () => {});
+        byItem[itemNumber] = rowData;
+        parsedRows++;
+        if (neverAdd) neverAddYesRows++;
+        if (walkPosition != null) rowsWithWalkPosition++;
+        if (subPosition != null) rowsWithSubPosition++;
+      }
+
+      _customerWalkOrderByCustomerAndItem
+        ..clear()
+        ..addAll(parsed);
+
+      final customer302021Rows =
+          _customerWalkOrderByCustomerAndItem['302021']?.length ?? 0;
+      debugPrint('[WalkOrder] total CSV lines: ${lines.length}');
+      debugPrint('[WalkOrder] total parsed rows: $parsedRows');
+      debugPrint(
+        '[WalkOrder] number of customers found: '
+        '${_customerWalkOrderByCustomerAndItem.length}',
+      );
+      debugPrint('[WalkOrder] customer 302021 rows: $customer302021Rows');
+      debugPrint('[WalkOrder] NeverAdd YES rows: $neverAddYesRows');
+      debugPrint('[WalkOrder] rows with WalkPosition: $rowsWithWalkPosition');
+      debugPrint('[WalkOrder] rows with SubPosition: $rowsWithSubPosition');
+    } catch (e, st) {
+      debugPrint('[WalkOrder] ERROR $e');
+      debugPrint('[WalkOrder] ERROR stack: $st');
     }
   }
 
@@ -8203,8 +8379,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
     }
     if (match != null) {
-      setState(() => _selectedCustomer = match);
+      setState(() {
+        _selectedCustomer = match;
+        _syncCustomerWalkOrderEnabledForCustomer(match);
+        debugPrint('[WalkOrder] sync source: startup restore');
+      });
     }
+  }
+
+  void _syncCustomerWalkOrderEnabledForCustomer(Customer? customer) {
+    final customerId = customer?.id.trim() ?? '';
+    _isCustomerWalkOrderEnabled =
+        customerId.isNotEmpty &&
+        _customerWalkOrderByCustomerAndItem.containsKey(customerId);
+    debugPrint(
+      '[WalkOrder] Enabled for customer: $_isCustomerWalkOrderEnabled',
+    );
+    debugPrint(
+      '[WalkOrder] Current customer: ${customerId.isEmpty ? 'none' : customerId}',
+    );
   }
 
   Future<void> _showAddCustomerDialog() async {
@@ -8351,12 +8544,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _customers = [];
           _customersByKey.clear();
           _selectedCustomer = null;
+          _syncCustomerWalkOrderEnabledForCustomer(null);
+          debugPrint('[WalkOrder] sync source: startup restore');
           _customersLoadDebugLine = debugLine;
         });
       } else {
         _customers = [];
         _customersByKey.clear();
         _selectedCustomer = null;
+        _syncCustomerWalkOrderEnabledForCustomer(null);
+        debugPrint('[WalkOrder] sync source: startup restore');
         _customersLoadDebugLine = debugLine;
       }
       scheduleMicrotask(() => _reapplyLocalAddedCustomers());
@@ -8391,6 +8588,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ..clear()
           ..addAll(byKey);
         _selectedCustomer = resolvedSelection;
+        _syncCustomerWalkOrderEnabledForCustomer(resolvedSelection);
+        debugPrint('[WalkOrder] sync source: startup restore');
         _customersLoadDebugLine = debugLine;
       });
       unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
@@ -8400,6 +8599,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ..clear()
         ..addAll(byKey);
       _selectedCustomer = resolvedSelection;
+      _syncCustomerWalkOrderEnabledForCustomer(resolvedSelection);
+      debugPrint('[WalkOrder] sync source: startup restore');
       _customersLoadDebugLine = debugLine;
     }
     scheduleMicrotask(() => _reapplyLocalAddedCustomers());
@@ -8541,8 +8742,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Future<void> _showSelectCustomerDialog() async {
     final picked = await _runCustomerPickerDialog();
     if (!mounted) return;
+    debugPrint('[WalkOrder] sync source: customer picker');
     setState(() {
       _selectedCustomer = picked;
+      _syncCustomerWalkOrderEnabledForCustomer(picked);
       _status = picked == null
           ? 'Customer cleared'
           : 'Customer: ${picked.displayName}';
@@ -9535,6 +9738,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _quoteNameUserEdited = false;
       _selectedLine = null;
       _selectedCustomer = customer;
+      _syncCustomerWalkOrderEnabledForCustomer(customer);
+      debugPrint('[WalkOrder] sync source: create quote');
       _currentQuoteId = null;
       _activeQuoteBucketKey = bucket.bucketKey;
       _activeQuoteBucketLabel = bucket.displayLabel;
@@ -10575,13 +10780,85 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final previouslyOrderedOnly = _catalogPreviouslyOrderedOnly;
     final merch = _catalogMerchandising;
     final customerHistoryKey = _previouslyOrderedCustomerCacheKey;
+    final selectedCustomerId = _selectedCustomer?.id.trim() ?? '';
+    final walkSortEnabledForList =
+        _isCustomerWalkOrderEnabled && selectedCustomerId.isNotEmpty;
     // Keep ECatalog in stable catalog order. Cache invalidation only needs the
     // order membership count for "In Order only" filtering.
     final key =
-        '${_productsByItemNumber.length}|$normalizedQ|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|$previouslyOrderedOnly|$customerHistoryKey|${_orderLineByKey.length}';
+        '${_productsByItemNumber.length}|$normalizedQ|${cat ?? ''}|${subCategory ?? ''}|${merch ?? ''}|$inOrderOnly|$inStockOnly|$previouslyOrderedOnly|$customerHistoryKey|${_orderLineByKey.length}|$walkSortEnabledForList|$selectedCustomerId';
     if (_catalogFilteredCacheKey == key &&
         _catalogFilteredProductsCache != null) {
       return _catalogFilteredProductsCache!;
+    }
+    // Temporary: compare archive history vs walk-order CSV for Previously Ordered Only (302021, Spices).
+    const dbgPrevOrderedCustomer = '302021';
+    const dbgPrevOrderedCategory = 'Spices & Foods';
+    if (previouslyOrderedOnly &&
+        selectedCustomerId == dbgPrevOrderedCustomer &&
+        cat == dbgPrevOrderedCategory) {
+      final walk302021 = _customerWalkOrderByCustomerAndItem[dbgPrevOrderedCustomer];
+      final walkNorm302021 = <String, CustomerWalkOrderRow>{};
+      if (walk302021 != null) {
+        for (final e in walk302021.entries) {
+          walkNorm302021[normalizeItemNumber(e.key)] = e.value;
+        }
+      }
+      var dbgSpicesBeforePo = 0;
+      var dbgKeptByHistory = 0;
+      var dbgInWalkCsv = 0;
+      var dbgMissingHistoryButWalk = 0;
+      for (final p in _productsByItemNumber.values) {
+        if (!_productMatchesEcatalogMerchandising(p)) continue;
+        if (cat != null && p.category.trim() != cat) continue;
+        if (subCategory != null && p.subCategory.trim() != subCategory) {
+          continue;
+        }
+        if (inOrderOnly &&
+            !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
+          continue;
+        }
+        if (inStockOnly && !_isProductInStockForEcatalog(p)) continue;
+        if (!_productMatchesSearch(p, q)) continue;
+        dbgSpicesBeforePo++;
+        final itemRaw = p.itemNumber.trim();
+        final historyPo = _isPreviouslyOrdered(p);
+        final walkMapHasKey =
+            walk302021 != null && walk302021.containsKey(itemRaw);
+        final row = walk302021 == null
+            ? null
+            : (walk302021[itemRaw] ??
+                walkNorm302021[normalizeItemNumber(itemRaw)]);
+        debugPrint(
+          '[PrevOrderedDebug] item=$itemRaw historyPo=$historyPo '
+          'walk302021.containsKey(itemNumber)=$walkMapHasKey '
+          'walkPos=${row?.walkPosition} subPos=${row?.subPosition}',
+        );
+        if (historyPo) dbgKeptByHistory++;
+        if (row != null) dbgInWalkCsv++;
+        if (row != null && !historyPo) dbgMissingHistoryButWalk++;
+      }
+      debugPrint(
+        '[PrevOrderedDebug] SUMMARY customer=$dbgPrevOrderedCustomer '
+        'category=$dbgPrevOrderedCategory subCategory=${subCategory ?? '(all)'} '
+        'spicesBeforePreviouslyOrderedFilter=$dbgSpicesBeforePo '
+        'keptByExistingHistory=$dbgKeptByHistory '
+        'foundInWalkOrderCsv=$dbgInWalkCsv '
+        'missingHistoryButInWalkCsv=$dbgMissingHistoryButWalk',
+      );
+    }
+    Map<String, CustomerWalkOrderRow>? walkOrderByItemForPreviouslyOrdered;
+    Map<String, CustomerWalkOrderRow>? walkOrderNormalizedForPreviouslyOrdered;
+    if (previouslyOrderedOnly && walkSortEnabledForList) {
+      final m = _customerWalkOrderByCustomerAndItem[selectedCustomerId];
+      if (m != null && m.isNotEmpty) {
+        walkOrderByItemForPreviouslyOrdered = m;
+        walkOrderNormalizedForPreviouslyOrdered = {};
+        for (final e in m.entries) {
+          walkOrderNormalizedForPreviouslyOrdered[
+              normalizeItemNumber(e.key)] = e.value;
+        }
+      }
     }
     final out = <Product>[];
     for (final p in _productsByItemNumber.values) {
@@ -10595,11 +10872,90 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         rawQuery: q,
         inOrderOnly: inOrderOnly,
         inStockOnly: inStockOnly,
-        previouslyOrderedOnly: previouslyOrderedOnly,
+        previouslyOrderedOnly: false,
       )) {
         continue;
       }
+      if (previouslyOrderedOnly) {
+        final historyPo = _isPreviouslyOrdered(p);
+        final rawItem = p.itemNumber.trim();
+        final inWalkCsv = walkOrderByItemForPreviouslyOrdered != null &&
+            (walkOrderByItemForPreviouslyOrdered.containsKey(rawItem) ||
+                walkOrderNormalizedForPreviouslyOrdered!.containsKey(
+                  normalizeItemNumber(rawItem),
+                ));
+        if (walkSortEnabledForList &&
+            walkOrderByItemForPreviouslyOrdered != null) {
+          if (!historyPo && !inWalkCsv) continue;
+          if (inWalkCsv && !historyPo) {
+            debugPrint(
+              '[PrevOrderedDebug] kept by walk CSV item=$rawItem',
+            );
+          }
+        } else if (!historyPo) {
+          continue;
+        }
+      }
       out.add(p);
+    }
+    if (walkSortEnabledForList) {
+      debugPrint('[WalkOrder] final sort path hit');
+      debugPrint('[WalkOrder] customer=$selectedCustomerId');
+      debugPrint('[WalkOrder] list count=${out.length}');
+
+      final byItem =
+          _customerWalkOrderByCustomerAndItem[selectedCustomerId] ?? const {};
+      int positionedCount = 0;
+      final normalizedByItem = <String, CustomerWalkOrderRow>{};
+      for (final entry in byItem.entries) {
+        normalizedByItem[normalizeItemNumber(entry.key)] = entry.value;
+      }
+
+      final indexed = out.indexed.map((entry) {
+        final product = entry.$2;
+        final rawKey = product.itemNumber.trim();
+        final row =
+            byItem[rawKey] ?? normalizedByItem[normalizeItemNumber(rawKey)];
+        if (row?.walkPosition != null) positionedCount++;
+        return (index: entry.$1, product: product, row: row);
+      }).toList(growable: false);
+
+      debugPrint('[WalkOrder] positioned count=$positionedCount');
+      indexed.sort((a, b) {
+        final aw = a.row?.walkPosition;
+        final bw = b.row?.walkPosition;
+        if (aw == null && bw != null) return 1;
+        if (aw != null && bw == null) return -1;
+        if (aw != null && bw != null) {
+          final walkCmp = aw.compareTo(bw);
+          if (walkCmp != 0) return walkCmp;
+        }
+
+        final as = a.row?.subPosition;
+        final bs = b.row?.subPosition;
+        if (as == null && bs != null) return 1;
+        if (as != null && bs == null) return -1;
+        if (as != null && bs != null) {
+          final subCmp = as.compareTo(bs);
+          if (subCmp != 0) return subCmp;
+        }
+        return a.index.compareTo(b.index);
+      });
+
+      out
+        ..clear()
+        ..addAll(indexed.map((e) => e.product));
+
+      final first10 = indexed
+          .take(10)
+          .map((e) {
+            final item = e.product.itemNumber.trim();
+            final walk = e.row?.walkPosition?.toString() ?? 'null';
+            final sub = e.row?.subPosition?.toString() ?? 'null';
+            return '$item/$walk/$sub';
+          })
+          .join(', ');
+      debugPrint('[WalkOrder] first 10 after sort=$first10');
     }
     // Intentionally no quote-priority sort: preserve normal catalog browse order.
     _catalogFilteredCacheKey = key;
@@ -11280,16 +11636,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                     ),
                                                     if (productFlagChips
                                                         .isNotEmpty)
-                                                      Padding(
-                                                        padding:
-                                                            const EdgeInsets.only(
-                                                              left: 6,
+                                                      Flexible(
+                                                        child: Padding(
+                                                          padding:
+                                                              const EdgeInsets.only(
+                                                                left: 6,
+                                                              ),
+                                                          child: Align(
+                                                            alignment: Alignment
+                                                                .centerRight,
+                                                            child: Wrap(
+                                                              spacing: 6,
+                                                              runSpacing: 6,
+                                                              alignment:
+                                                                  WrapAlignment
+                                                                      .end,
+                                                              children:
+                                                                  productFlagChips,
                                                             ),
-                                                        child: Wrap(
-                                                          spacing: 6,
-                                                          runSpacing: 6,
-                                                          children:
-                                                              productFlagChips,
+                                                          ),
                                                         ),
                                                       ),
                                                     Icon(
@@ -11380,16 +11745,27 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                           ),
                                                           if (productFlagChips
                                                               .isNotEmpty)
-                                                            Padding(
-                                                              padding:
-                                                                  const EdgeInsets.only(
-                                                                    left: 6,
+                                                            Flexible(
+                                                              child: Padding(
+                                                                padding:
+                                                                    const EdgeInsets.only(
+                                                                      left: 6,
+                                                                    ),
+                                                                child: Align(
+                                                                  alignment:
+                                                                      Alignment
+                                                                          .centerRight,
+                                                                  child: Wrap(
+                                                                    spacing: 6,
+                                                                    runSpacing:
+                                                                        6,
+                                                                    alignment:
+                                                                        WrapAlignment
+                                                                            .end,
+                                                                    children:
+                                                                        productFlagChips,
                                                                   ),
-                                                              child: Wrap(
-                                                                spacing: 6,
-                                                                runSpacing: 6,
-                                                                children:
-                                                                    productFlagChips,
+                                                                ),
                                                               ),
                                                             ),
                                                           Icon(
@@ -14379,6 +14755,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _orderLineByKey.addAll(newOrderLineByKey);
         _orderListVersion += 1;
         _selectedCustomer = loadedCustomer;
+        _syncCustomerWalkOrderEnabledForCustomer(loadedCustomer);
+        debugPrint(
+          '[WalkOrder] sync source: ${_orderCsvImportInProgress ? 'import order' : 'load quote'}',
+        );
         _activeQuoteBucketKey = activeBucketKey;
         _activeQuoteBucketLabel = activeBucketLabel;
 
@@ -14544,6 +14924,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             _quoteNameUserEdited = false;
             _selectedLine = null;
             _selectedCustomer = null;
+            _syncCustomerWalkOrderEnabledForCustomer(null);
+            debugPrint('[WalkOrder] sync source: load quote');
             _status = 'Quote removed';
             _quickEntryStatus = '-';
             _resetQuoteDisplayAndScanState();

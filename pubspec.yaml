@@ -26,6 +26,7 @@ flutter:
   assets:
     - assets/data/products.csv
     - assets/data/customers.csv
+    - assets/data/customer_walk_order.csv
     - assets/data/product_type_buckets.json
     - assets/sounds/good_scan.mp3
     - assets/sounds/good_scan2.mp3
