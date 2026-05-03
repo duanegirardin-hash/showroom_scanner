@@ -2460,6 +2460,9 @@ class CustomerWalkOrderRow {
   const CustomerWalkOrderRow({
     required this.customerId,
     required this.itemNumber,
+    this.description = '',
+    this.category = '',
+    this.subCategory = '',
     required this.walkPosition,
     required this.subPosition,
     required this.neverAdd,
@@ -2469,11 +2472,710 @@ class CustomerWalkOrderRow {
 
   final String customerId;
   final String itemNumber;
+  final String description;
+  final String category;
+  final String subCategory;
   final int? walkPosition;
   final int? subPosition;
   final bool neverAdd;
   final String neverAddReason;
   final bool walkEnabled;
+}
+
+/// Read-only UI for inspecting bundled customer walk order CSV data.
+class _WalkOrderViewerPage extends StatefulWidget {
+  const _WalkOrderViewerPage({required this.walkOrderByCustomer});
+
+  final Map<String, Map<String, CustomerWalkOrderRow>> walkOrderByCustomer;
+
+  @override
+  State<_WalkOrderViewerPage> createState() => _WalkOrderViewerPageState();
+}
+
+enum _WalkOrderQuickFilter {
+  all,
+  hasWalkPosition,
+  missingWalkPosition,
+  hasSubPosition,
+  missingSubPosition,
+  neverAddOnly,
+  walkEnabledOnly,
+}
+
+enum _WalkOrderSortMode {
+  currentWalkOrder,
+  itemNumber,
+  categorySubCategory,
+  missingPositionsFirst,
+}
+
+class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
+  late String? _customerId;
+  String? _categoryFilter;
+  String? _subCategoryFilter;
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+  _WalkOrderQuickFilter _quickFilter = _WalkOrderQuickFilter.all;
+  _WalkOrderSortMode _sortMode = _WalkOrderSortMode.currentWalkOrder;
+
+  List<String> get _sortedCustomerIds {
+    final ids = widget.walkOrderByCustomer.keys.toList()..sort();
+    return ids;
+  }
+
+  Map<String, CustomerWalkOrderRow> get _rowsForCustomer =>
+      widget.walkOrderByCustomer[_customerId ?? ''] ?? const {};
+
+  List<CustomerWalkOrderRow> get _baseRows {
+    final m = _rowsForCustomer;
+    return m.values.toList(growable: false);
+  }
+
+  Set<String> _distinctCategories(Iterable<CustomerWalkOrderRow> rows) {
+    final out = <String>{};
+    for (final r in rows) {
+      final c = r.category.trim();
+      if (c.isNotEmpty) out.add(c);
+    }
+    return out;
+  }
+
+  Set<String> _distinctSubCategories(
+    Iterable<CustomerWalkOrderRow> rows,
+    String? categoryEquals,
+  ) {
+    final out = <String>{};
+    for (final r in rows) {
+      if (categoryEquals != null && r.category.trim() != categoryEquals) {
+        continue;
+      }
+      final s = r.subCategory.trim();
+      if (s.isNotEmpty) out.add(s);
+    }
+    return out;
+  }
+
+  /// WalkPosition ascending (nulls last), then SubPosition ascending (nulls last), then item number.
+  int _compareWalkRowsCurrentOrder(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+    final ap = a.walkPosition;
+    final bp = b.walkPosition;
+    if (ap != null && bp != null && ap != bp) return ap.compareTo(bp);
+    if (ap != null && bp == null) return -1;
+    if (ap == null && bp != null) return 1;
+    final as = a.subPosition;
+    final bs = b.subPosition;
+    if (as != null && bs != null && as != bs) return as.compareTo(bs);
+    if (as != null && bs == null) return -1;
+    if (as == null && bs != null) return 1;
+    return a.itemNumber.compareTo(b.itemNumber);
+  }
+
+  int _compareItemNumber(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+    return a.itemNumber.compareTo(b.itemNumber);
+  }
+
+  int _compareCategorySubCategory(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+    final ca = a.category.trim();
+    final cb = b.category.trim();
+    final c = ca.compareTo(cb);
+    if (c != 0) return c;
+    final sa = a.subCategory.trim();
+    final sb = b.subCategory.trim();
+    final s = sa.compareTo(sb);
+    if (s != 0) return s;
+    return a.itemNumber.compareTo(b.itemNumber);
+  }
+
+  int _missingPositionScore(CustomerWalkOrderRow r) {
+    var n = 0;
+    if (r.walkPosition == null) n++;
+    if (r.subPosition == null) n++;
+    return n;
+  }
+
+  int _compareMissingPositionsFirst(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+    final ma = _missingPositionScore(a);
+    final mb = _missingPositionScore(b);
+    if (ma != mb) return mb.compareTo(ma);
+    return _compareWalkRowsCurrentOrder(a, b);
+  }
+
+  int _compareForSortMode(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+    switch (_sortMode) {
+      case _WalkOrderSortMode.currentWalkOrder:
+        return _compareWalkRowsCurrentOrder(a, b);
+      case _WalkOrderSortMode.itemNumber:
+        return _compareItemNumber(a, b);
+      case _WalkOrderSortMode.categorySubCategory:
+        return _compareCategorySubCategory(a, b);
+      case _WalkOrderSortMode.missingPositionsFirst:
+        return _compareMissingPositionsFirst(a, b);
+    }
+  }
+
+  List<CustomerWalkOrderRow> get _categoryScopedRows {
+    var list = _baseRows;
+    if (_categoryFilter != null) {
+      list = list
+          .where((r) => r.category.trim() == _categoryFilter)
+          .toList(growable: false);
+    }
+    if (_subCategoryFilter != null) {
+      list = list
+          .where((r) => r.subCategory.trim() == _subCategoryFilter)
+          .toList(growable: false);
+    }
+    return list;
+  }
+
+  bool _matchesQuickFilter(CustomerWalkOrderRow r) {
+    switch (_quickFilter) {
+      case _WalkOrderQuickFilter.all:
+        return true;
+      case _WalkOrderQuickFilter.hasWalkPosition:
+        return r.walkPosition != null;
+      case _WalkOrderQuickFilter.missingWalkPosition:
+        return r.walkPosition == null;
+      case _WalkOrderQuickFilter.hasSubPosition:
+        return r.subPosition != null;
+      case _WalkOrderQuickFilter.missingSubPosition:
+        return r.subPosition == null;
+      case _WalkOrderQuickFilter.neverAddOnly:
+        return r.neverAdd;
+      case _WalkOrderQuickFilter.walkEnabledOnly:
+        return r.walkEnabled;
+    }
+  }
+
+  bool _matchesSearch(CustomerWalkOrderRow r) {
+    final q = _searchQuery.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    if (r.itemNumber.toLowerCase().contains(q)) return true;
+    if (r.description.toLowerCase().contains(q)) return true;
+    if (r.category.toLowerCase().contains(q)) return true;
+    if (r.subCategory.toLowerCase().contains(q)) return true;
+    return false;
+  }
+
+  List<CustomerWalkOrderRow> get _displayRows {
+    final list = _categoryScopedRows
+        .where(_matchesQuickFilter)
+        .where(_matchesSearch)
+        .toList(growable: false);
+    final sorted = List<CustomerWalkOrderRow>.from(list)
+      ..sort(_compareForSortMode);
+    return sorted;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final ids = _sortedCustomerIds;
+    if (ids.isEmpty) {
+      _customerId = null;
+    } else if (ids.contains('302021')) {
+      _customerId = '302021';
+    } else {
+      _customerId = ids.first;
+    }
+    _categoryFilter = null;
+    _subCategoryFilter = null;
+    _searchController.addListener(_onSearchChanged);
+  }
+
+  void _onSearchChanged() {
+    final next = _searchController.text;
+    if (next == _searchQuery) return;
+    setState(() => _searchQuery = next);
+  }
+
+  @override
+  void dispose() {
+    _searchController.removeListener(_onSearchChanged);
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _setCustomer(String? id) {
+    setState(() {
+      _customerId = id;
+      _categoryFilter = null;
+      _subCategoryFilter = null;
+      _quickFilter = _WalkOrderQuickFilter.all;
+      _searchController.clear();
+      _searchQuery = '';
+    });
+  }
+
+  void _setCategoryFilter(String? c) {
+    setState(() {
+      _categoryFilter = c;
+      _subCategoryFilter = null;
+    });
+  }
+
+  void _setSubCategoryFilter(String? s) {
+    setState(() => _subCategoryFilter = s);
+  }
+
+  void _setQuickFilter(_WalkOrderQuickFilter f) {
+    setState(() => _quickFilter = f);
+  }
+
+  void _setSortMode(_WalkOrderSortMode m) {
+    setState(() => _sortMode = m);
+  }
+
+  static String _sortModeLabel(_WalkOrderSortMode m) {
+    switch (m) {
+      case _WalkOrderSortMode.currentWalkOrder:
+        return 'Current walk order';
+      case _WalkOrderSortMode.itemNumber:
+        return 'Item Number';
+      case _WalkOrderSortMode.categorySubCategory:
+        return 'Category / Sub-Category';
+      case _WalkOrderSortMode.missingPositionsFirst:
+        return 'Missing positions first';
+    }
+  }
+
+  Widget _quickFilterChip(
+    BuildContext context, {
+    required String label,
+    required _WalkOrderQuickFilter value,
+  }) {
+    final selected = _quickFilter == value;
+    return FilterChip(
+      label: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      selected: selected,
+      onSelected: (on) => _setQuickFilter(on ? value : _WalkOrderQuickFilter.all),
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ids = _sortedCustomerIds;
+    final categories = _distinctCategories(_baseRows).toList()..sort();
+    final subCats = _distinctSubCategories(
+      _baseRows,
+      _categoryFilter,
+    ).toList()
+      ..sort();
+    final scoped = _categoryScopedRows;
+    final rows = _displayRows;
+    final totalScoped = scoped.length;
+    final showing = rows.length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Walk Order Editor'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(26),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 6),
+              child: Text(
+                'View only — data is not saved from this screen.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+          ),
+        ),
+      ),
+      body: ids.isEmpty
+          ? const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text('No walk order data loaded.'),
+              ),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  flex: 1,
+                  child: SingleChildScrollView(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: TextField(
+                                controller: _searchController,
+                                decoration: const InputDecoration(
+                                  hintText:
+                                      'Search item #, description, category, sub-category',
+                                  hintMaxLines: 2,
+                                  prefixIcon: Icon(Icons.search),
+                                  isDense: true,
+                                ),
+                                textInputAction: TextInputAction.search,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            'Customer',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 4),
+                          DropdownButton<String>(
+                            isExpanded: true,
+                            value: _customerId != null && ids.contains(_customerId)
+                                ? _customerId
+                                : ids.first,
+                            selectedItemBuilder: (context) => [
+                              for (final id in ids)
+                                Text(
+                                  id,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                            items: [
+                              for (final id in ids)
+                                DropdownMenuItem(
+                                  value: id,
+                                  child: Text(
+                                    id,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: (v) {
+                              if (v != null) _setCustomer(v);
+                            },
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'Category',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 4),
+                          DropdownButton<String?>(
+                            isExpanded: true,
+                            value: _categoryFilter != null &&
+                                    categories.contains(_categoryFilter)
+                                ? _categoryFilter
+                                : null,
+                            selectedItemBuilder: (context) => [
+                              Text(
+                                'All categories',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              for (final c in categories)
+                                Text(
+                                  c,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                            items: [
+                              const DropdownMenuItem<String?>(
+                                value: null,
+                                child: Text(
+                                  'All categories',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              for (final c in categories)
+                                DropdownMenuItem(
+                                  value: c,
+                                  child: Text(
+                                    c,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: _setCategoryFilter,
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'Sub-Category',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 4),
+                          DropdownButton<String?>(
+                            isExpanded: true,
+                            value: _subCategoryFilter != null &&
+                                    subCats.contains(_subCategoryFilter)
+                                ? _subCategoryFilter
+                                : null,
+                            selectedItemBuilder: (context) => [
+                              Text(
+                                'All sub-categories',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              for (final s in subCats)
+                                Text(
+                                  s,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                            items: [
+                              const DropdownMenuItem<String?>(
+                                value: null,
+                                child: Text(
+                                  'All sub-categories',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              for (final s in subCats)
+                                DropdownMenuItem(
+                                  value: s,
+                                  child: Text(
+                                    s,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: _setSubCategoryFilter,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Quick filters',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 4),
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                _quickFilterChip(context, label: 'All', value: _WalkOrderQuickFilter.all),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'Has WalkPosition',
+                                  value: _WalkOrderQuickFilter.hasWalkPosition,
+                                ),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'Missing WalkPosition',
+                                  value: _WalkOrderQuickFilter.missingWalkPosition,
+                                ),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'Has SubPosition',
+                                  value: _WalkOrderQuickFilter.hasSubPosition,
+                                ),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'Missing SubPosition',
+                                  value: _WalkOrderQuickFilter.missingSubPosition,
+                                ),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'NeverAdd only',
+                                  value: _WalkOrderQuickFilter.neverAddOnly,
+                                ),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'WalkEnabled only',
+                                  value: _WalkOrderQuickFilter.walkEnabledOnly,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Sort',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 4),
+                          DropdownButton<_WalkOrderSortMode>(
+                            isExpanded: true,
+                            value: _sortMode,
+                            selectedItemBuilder: (context) => [
+                              for (final m in _WalkOrderSortMode.values)
+                                Text(
+                                  _sortModeLabel(m),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                            items: [
+                              for (final m in _WalkOrderSortMode.values)
+                                DropdownMenuItem(
+                                  value: m,
+                                  child: Text(
+                                    _sortModeLabel(m),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: (v) {
+                              if (v != null) _setSortMode(v);
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  child: Text(
+                    'Showing $showing of $totalScoped items',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  flex: 2,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: rows.length,
+                    itemBuilder: (context, i) {
+                      final r = rows[i];
+                      final walkMissing = r.walkPosition == null;
+                      final subMissing = r.subPosition == null;
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      r.itemNumber,
+                                      style: Theme.of(context).textTheme.titleMedium,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (walkMissing || subMissing || r.neverAdd) ...[
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 4,
+                                  children: [
+                                    if (walkMissing)
+                                      _walkStatusBadge(
+                                        context,
+                                        label: 'WalkPosition missing',
+                                        color: Theme.of(context).colorScheme.errorContainer,
+                                        onColor: Theme.of(context).colorScheme.onErrorContainer,
+                                      ),
+                                    if (subMissing)
+                                      _walkStatusBadge(
+                                        context,
+                                        label: 'SubPosition missing',
+                                        color: Theme.of(context).colorScheme.secondaryContainer,
+                                        onColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                                      ),
+                                    if (r.neverAdd)
+                                      _walkStatusBadge(
+                                        context,
+                                        label: 'NeverAdd YES',
+                                        color: Theme.of(context).colorScheme.tertiaryContainer,
+                                        onColor: Theme.of(context).colorScheme.onTertiaryContainer,
+                                      ),
+                                  ],
+                                ),
+                              ],
+                              const SizedBox(height: 6),
+                              _walkFieldLine('CustomerID', r.customerId),
+                              _walkFieldLine('Description', r.description),
+                              _walkFieldLine('Category', r.category),
+                              _walkFieldLine('Sub-Category', r.subCategory),
+                              _walkFieldLine(
+                                'WalkPosition',
+                                r.walkPosition?.toString() ?? '—',
+                              ),
+                              _walkFieldLine(
+                                'SubPosition',
+                                r.subPosition?.toString() ?? '—',
+                              ),
+                              _walkFieldLine('NeverAdd', r.neverAdd ? 'Yes' : 'No'),
+                              _walkFieldLine(
+                                'NeverAddReason',
+                                r.neverAddReason.isEmpty ? '—' : r.neverAddReason,
+                              ),
+                              _walkFieldLine(
+                                'WalkEnabled',
+                                r.walkEnabled ? 'Yes' : 'No',
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  static Widget _walkStatusBadge(
+    BuildContext context, {
+    required String label,
+    required Color color,
+    required Color onColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: onColor,
+              fontWeight: FontWeight.w600,
+            ),
+      ),
+    );
+  }
+
+  static Widget _walkFieldLine(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label: ',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontSize: 13),
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 String _orderImportDuplicateResolutionLabel(OrderImportDuplicateResolution r) {
@@ -7932,6 +8634,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final idxCustomerId = headerIndex('CustomerID');
       final idxItemNumber = headerIndex('Item Number');
+      final idxDescription = headerIndex('Description');
+      final idxCategory = headerIndex('Category');
+      final idxSubCategory = headerIndex('Sub-Category');
       final idxWalkPosition = headerIndex('WalkPosition');
       final idxSubPosition = headerIndex('SubPosition');
       final idxNeverAdd = headerIndex('NeverAdd');
@@ -8003,6 +8708,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final rowData = CustomerWalkOrderRow(
           customerId: customerId,
           itemNumber: itemNumber,
+          description: cell(row, idxDescription),
+          category: cell(row, idxCategory),
+          subCategory: cell(row, idxSubCategory),
           walkPosition: walkPosition,
           subPosition: subPosition,
           neverAdd: neverAdd,
@@ -8038,6 +8746,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       debugPrint('[WalkOrder] ERROR $e');
       debugPrint('[WalkOrder] ERROR stack: $st');
     }
+  }
+
+  /// Read-only walk order CSV inspection (not wired into scanning or exports).
+  void _openWalkOrderViewer() {
+    final snapshot =
+        UnmodifiableMapView<String, Map<String, CustomerWalkOrderRow>>(
+      _customerWalkOrderByCustomerAndItem.map(
+        (k, v) => MapEntry(
+          k,
+          UnmodifiableMapView<String, CustomerWalkOrderRow>(v),
+        ),
+      ),
+    );
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            _WalkOrderViewerPage(walkOrderByCustomer: snapshot),
+      ),
+    );
   }
 
   // ignore: unused_element
@@ -15426,6 +16153,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       },
       onLoadCustomers: _loadCustomersFromSheet,
       onAddCustomer: _showAddCustomerDialog,
+      onWalkOrderEditor: _openWalkOrderViewer,
       loadingProductsFromWeb: _loadingProductsFromWeb,
       loadingCustomersFromWeb: _isLoadingCustomers,
       onBuildFullCatalogTestQuote: kDebugMode
@@ -16920,7 +17648,10 @@ Widget _ecatalogPreviouslyOrderedBadge(BuildContext context) {
       borderRadius: BorderRadius.circular(10),
     ),
     child: Text(
-      'Previously Ordered',
+      'Purchase History',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      softWrap: false,
       style: textTheme.bodySmall?.copyWith(
         fontSize: 11,
         fontWeight: FontWeight.w600,
@@ -17936,6 +18667,7 @@ class _SetupTab extends StatelessWidget {
     required this.onLoadProducts,
     required this.onLoadCustomers,
     required this.onAddCustomer,
+    required this.onWalkOrderEditor,
     required this.loadingProductsFromWeb,
     required this.loadingCustomersFromWeb,
     this.onBuildFullCatalogTestQuote,
@@ -17950,6 +18682,7 @@ class _SetupTab extends StatelessWidget {
   final VoidCallback onLoadProducts;
   final VoidCallback onLoadCustomers;
   final Future<void> Function() onAddCustomer;
+  final VoidCallback onWalkOrderEditor;
   final bool loadingProductsFromWeb;
   final bool loadingCustomersFromWeb;
   final Future<void> Function()? onBuildFullCatalogTestQuote;
@@ -18016,6 +18749,11 @@ class _SetupTab extends StatelessWidget {
               onAddCustomer();
             },
             child: const Text('Add Customer'),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton(
+            onPressed: onWalkOrderEditor,
+            child: const Text('Walk Order Editor'),
           ),
           if (onBuildFullCatalogTestQuote != null) ...[
             const SizedBox(height: 16),
