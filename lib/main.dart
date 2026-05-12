@@ -2482,7 +2482,133 @@ class CustomerWalkOrderRow {
   final bool walkEnabled;
 }
 
-/// Read-only UI for inspecting bundled customer walk order CSV data.
+CustomerWalkOrderRow _customerWalkOrderRowWithSubPosition(
+  CustomerWalkOrderRow r,
+  int? subPosition,
+) {
+  return CustomerWalkOrderRow(
+    customerId: r.customerId,
+    itemNumber: r.itemNumber,
+    description: r.description,
+    category: r.category,
+    subCategory: r.subCategory,
+    walkPosition: r.walkPosition,
+    subPosition: subPosition,
+    neverAdd: r.neverAdd,
+    neverAddReason: r.neverAddReason,
+    walkEnabled: r.walkEnabled,
+  );
+}
+
+Map<String, Map<String, CustomerWalkOrderRow>> _copyWalkOrderByCustomerForEditor(
+  Map<String, Map<String, CustomerWalkOrderRow>> src,
+) {
+  return {
+    for (final e in src.entries)
+      e.key: Map<String, CustomerWalkOrderRow>.from(e.value),
+  };
+}
+
+const String _kWalkOrderEditorExportFilename = 'customer_walk_order_updated.csv';
+
+/// Android public exports use a single path segment; editor export is not per-customer.
+const String _kWalkOrderEditorExportAndroidFolder = 'Walk_Order_Export';
+
+/// Same ordering as the editor's "Current walk order" mode (deterministic export).
+int _compareWalkOrderRowsForEditorCsvExport(
+  CustomerWalkOrderRow a,
+  CustomerWalkOrderRow b,
+) {
+  final ap = a.walkPosition;
+  final bp = b.walkPosition;
+  if (ap != null && bp != null && ap != bp) return ap.compareTo(bp);
+  if (ap != null && bp == null) return -1;
+  if (ap == null && bp != null) return 1;
+  final as = a.subPosition;
+  final bs = b.subPosition;
+  if (as != null && bs != null && as != bs) return as.compareTo(bs);
+  if (as != null && bs == null) return -1;
+  if (as == null && bs != null) return 1;
+  return a.itemNumber.compareTo(b.itemNumber);
+}
+
+String _walkOrderNeverAddCsvCell(bool neverAdd) => neverAdd ? 'YES' : '';
+
+String _walkOrderWalkEnabledCsvCell(bool walkEnabled) => walkEnabled ? 'YES' : 'NO';
+
+/// CSV for walk-order editor only: subset columns matching app import header names.
+String _editorWalkOrderMapToExportCsvText(
+  Map<String, Map<String, CustomerWalkOrderRow>> byCustomer,
+) {
+  const header = <String>[
+    'CustomerID',
+    'Item Number',
+    'Description',
+    'Category',
+    'Sub-Category',
+    'WalkPosition',
+    'SubPosition',
+    'NeverAdd',
+    'NeverAddReason',
+    'WalkEnabled',
+  ];
+  final csvRows = <List<String>>[header];
+  final sortedCids = byCustomer.keys.toList()..sort();
+  for (final cid in sortedCids) {
+    final byItem = byCustomer[cid];
+    if (byItem == null || byItem.isEmpty) continue;
+    final list = List<CustomerWalkOrderRow>.from(byItem.values)
+      ..sort(_compareWalkOrderRowsForEditorCsvExport);
+    for (final r in list) {
+      csvRows.add(<String>[
+        r.customerId,
+        r.itemNumber,
+        r.description,
+        r.category,
+        r.subCategory,
+        r.walkPosition?.toString() ?? '',
+        r.subPosition?.toString() ?? '',
+        _walkOrderNeverAddCsvCell(r.neverAdd),
+        r.neverAddReason,
+        _walkOrderWalkEnabledCsvCell(r.walkEnabled),
+      ]);
+    }
+  }
+  return const ListToCsvConverter().convert(csvRows);
+}
+
+int _totalWalkOrderRowCount(Map<String, Map<String, CustomerWalkOrderRow>> byCustomer) {
+  var n = 0;
+  for (final m in byCustomer.values) {
+    n += m.length;
+  }
+  return n;
+}
+
+/// Writes [customer_walk_order_updated.csv] next to other showroom CSV exports (not under assets).
+Future<File> _saveWalkOrderEditorExportFile(String csvText) async {
+  final filename = ensureCsvFilename(_kWalkOrderEditorExportFilename);
+  if (Platform.isAndroid) {
+    return saveOrderExportCsvToAndroidPublicShowroomExports(
+      sanitizedCustomerFolderName: _kWalkOrderEditorExportAndroidFolder,
+      filename: filename,
+      csvText: csvText,
+    );
+  }
+  final root = await ensureShowroomSyncExportedOrdersRootDirectory();
+  final fullPath = p.join(root.path, filename);
+  final file = File(fullPath);
+  await file.writeAsString(csvText, encoding: utf8, flush: true);
+  await _debugLogCsvExportFile(
+    action: 'walk_order_editor_export',
+    filename: filename,
+    mimeType: 'text/csv',
+    file: file,
+  );
+  return file;
+}
+
+/// Setup-only walk order editor: in-memory edits on a copy of bundled CSV data.
 class _WalkOrderViewerPage extends StatefulWidget {
   const _WalkOrderViewerPage({required this.walkOrderByCustomer});
 
@@ -2511,6 +2637,8 @@ enum _WalkOrderSortMode {
 
 class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   late String? _customerId;
+  late Map<String, Map<String, CustomerWalkOrderRow>> _editorWalkOrderByCustomer;
+  bool _editorHasUnsavedChanges = false;
   String? _categoryFilter;
   String? _subCategoryFilter;
   final TextEditingController _searchController = TextEditingController();
@@ -2519,12 +2647,12 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   _WalkOrderSortMode _sortMode = _WalkOrderSortMode.currentWalkOrder;
 
   List<String> get _sortedCustomerIds {
-    final ids = widget.walkOrderByCustomer.keys.toList()..sort();
+    final ids = _editorWalkOrderByCustomer.keys.toList()..sort();
     return ids;
   }
 
   Map<String, CustomerWalkOrderRow> get _rowsForCustomer =>
-      widget.walkOrderByCustomer[_customerId ?? ''] ?? const {};
+      _editorWalkOrderByCustomer[_customerId ?? ''] ?? const {};
 
   List<CustomerWalkOrderRow> get _baseRows {
     final m = _rowsForCustomer;
@@ -2670,6 +2798,8 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   @override
   void initState() {
     super.initState();
+    _editorWalkOrderByCustomer =
+        _copyWalkOrderByCustomerForEditor(widget.walkOrderByCustomer);
     final ids = _sortedCustomerIds;
     if (ids.isEmpty) {
       _customerId = null;
@@ -2726,6 +2856,77 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
     setState(() => _sortMode = m);
   }
 
+  Future<void> _exportWalkOrderCsv() async {
+    try {
+      final text = _editorWalkOrderMapToExportCsvText(_editorWalkOrderByCustomer);
+      final count = _totalWalkOrderRowCount(_editorWalkOrderByCustomer);
+      await _saveWalkOrderEditorExportFile(text);
+      debugPrint('[WalkOrderExport] rows exported: $count');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Walk Order CSV exported successfully')),
+      );
+    } catch (e, st) {
+      debugPrint('[WalkOrderExport] failed: $e');
+      debugPrint('$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Walk order export failed: $e')),
+      );
+    }
+  }
+
+  bool get _reorderActionsEnabled =>
+      _sortMode == _WalkOrderSortMode.currentWalkOrder;
+
+  /// Assigns SubPosition 10, 20, 30, … to [itemNumbers] in order for the current customer.
+  void _applySubPositionsForVisibleOrder(List<String> itemNumbers) {
+    final cid = _customerId;
+    if (cid == null || cid.isEmpty) return;
+    final byItem = _editorWalkOrderByCustomer[cid];
+    if (byItem == null) return;
+    for (var i = 0; i < itemNumbers.length; i++) {
+      final item = itemNumbers[i];
+      final row = byItem[item];
+      if (row == null) continue;
+      byItem[item] = _customerWalkOrderRowWithSubPosition(
+        row,
+        (i + 1) * 10,
+      );
+    }
+  }
+
+  void _renumberVisibleItems() {
+    if (!_reorderActionsEnabled) return;
+    final visible = _displayRows;
+    if (visible.isEmpty) return;
+    setState(() {
+      _applySubPositionsForVisibleOrder(
+        visible.map((r) => r.itemNumber).toList(growable: false),
+      );
+      _editorHasUnsavedChanges = true;
+    });
+  }
+
+  void _moveVisibleRow(int fromDisplayIndex, int newDisplayIndex) {
+    if (!_reorderActionsEnabled) return;
+    final visible = List<CustomerWalkOrderRow>.from(_displayRows);
+    if (fromDisplayIndex < 0 ||
+        fromDisplayIndex >= visible.length ||
+        newDisplayIndex < 0 ||
+        newDisplayIndex >= visible.length) {
+      return;
+    }
+    final moved = visible.removeAt(fromDisplayIndex);
+    visible.insert(newDisplayIndex, moved);
+    setState(() {
+      _applySubPositionsForVisibleOrder(
+        visible.map((r) => r.itemNumber).toList(growable: false),
+      );
+      _editorHasUnsavedChanges = true;
+    });
+  }
+
   static String _sortModeLabel(_WalkOrderSortMode m) {
     switch (m) {
       case _WalkOrderSortMode.currentWalkOrder:
@@ -2776,14 +2977,32 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
       appBar: AppBar(
         title: const Text('Walk Order Editor'),
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(26),
+          preferredSize: const Size.fromHeight(44),
           child: Align(
             alignment: Alignment.centerLeft,
             child: Padding(
-              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 6),
-              child: Text(
-                'View only — data is not saved from this screen.',
-                style: Theme.of(context).textTheme.bodySmall,
+              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Changes apply only in this editor; use Export to save a CSV outside the app.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                  if (_editorHasUnsavedChanges) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Unsaved editor changes',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: Theme.of(context).colorScheme.tertiary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ],
+                ],
               ),
             ),
           ),
@@ -2799,6 +3018,48 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (_editorHasUnsavedChanges)
+                  Material(
+                    color: Theme.of(context).colorScheme.tertiaryContainer,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.edit_note,
+                            size: 20,
+                            color: Theme.of(context).colorScheme.onTertiaryContainer,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Unsaved editor changes',
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onTertiaryContainer,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.tonalIcon(
+                      onPressed: _exportWalkOrderCsv,
+                      icon: const Icon(Icons.table_rows_outlined),
+                      label: const Text('Export Walk Order CSV'),
+                    ),
+                  ),
+                ),
                 Expanded(
                   flex: 1,
                   child: SingleChildScrollView(
@@ -3025,18 +3286,40 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                               if (v != null) _setSortMode(v);
                             },
                           ),
+                          if (!_reorderActionsEnabled) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              'Switch to "Current walk order" to use Move Up / Move Down '
+                              'and Renumber Visible Items.',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
                         ],
                       ),
                     ),
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  child: Text(
-                    'Showing $showing of $totalScoped items',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleSmall,
+                  padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Showing $showing of $totalScoped items',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 6),
+                      OutlinedButton.icon(
+                        onPressed:
+                            _reorderActionsEnabled && showing > 0
+                                ? _renumberVisibleItems
+                                : null,
+                        icon: const Icon(Icons.format_list_numbered, size: 20),
+                        label: const Text('Renumber Visible Items'),
+                      ),
+                    ],
                   ),
                 ),
                 const Divider(height: 1),
@@ -3065,6 +3348,23 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                       style: Theme.of(context).textTheme.titleMedium,
                                       overflow: TextOverflow.ellipsis,
                                     ),
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Move up',
+                                    onPressed: _reorderActionsEnabled && i > 0
+                                        ? () => _moveVisibleRow(i, i - 1)
+                                        : null,
+                                    icon: const Icon(Icons.arrow_upward),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Move down',
+                                    onPressed:
+                                        _reorderActionsEnabled && i < rows.length - 1
+                                            ? () => _moveVisibleRow(i, i + 1)
+                                            : null,
+                                    icon: const Icon(Icons.arrow_downward),
+                                    visualDensity: VisualDensity.compact,
                                   ),
                                 ],
                               ),
@@ -3378,7 +3678,7 @@ class _LoadQuoteDialogContent extends StatefulWidget {
   final String Function(DateTime) formatDate;
   final BuildContext dialogContext;
   final Future<void> Function(String id) onRemoveQuote;
-  final void Function(String id, String name) onShareQuote;
+  final Future<void> Function(String id, String name) onShareQuote;
   final FocusNode searchQuotesFocusNode;
 
   @override
@@ -3574,11 +3874,12 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                               Icons.email_outlined,
                                             ),
                                             tooltip: 'Email / Share quote',
-                                            onPressed: () =>
-                                                widget.onShareQuote(
-                                                  info.id,
-                                                  info.name,
-                                                ),
+                                            onPressed: () async {
+                                              await widget.onShareQuote(
+                                                info.id,
+                                                info.name,
+                                              );
+                                            },
                                           ),
                                           IconButton(
                                             icon: const Icon(
@@ -11866,6 +12167,21 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
     }
     final filtered = _filteredCatalogProducts();
+    final String ecatalogWalkCustomerId = _selectedCustomer?.id.trim() ?? '';
+    final Map<String, CustomerWalkOrderRow>? ecatalogWalkByItem =
+        ecatalogWalkCustomerId.isEmpty
+            ? null
+            : _customerWalkOrderByCustomerAndItem[ecatalogWalkCustomerId];
+    final Map<String, CustomerWalkOrderRow>? ecatalogWalkByNormalizedItem =
+        ecatalogWalkByItem == null || ecatalogWalkByItem.isEmpty
+            ? null
+            : () {
+                final out = <String, CustomerWalkOrderRow>{};
+                for (final e in ecatalogWalkByItem.entries) {
+                  out[normalizeItemNumber(e.key)] = e.value;
+                }
+                return out;
+              }();
     final int totalCatalogProducts = _productsByItemNumber.length;
     final categories = _catalogCategories();
     final validatedCatalogCategory =
@@ -12210,10 +12526,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                             ? _getDiscountedLineTotal(line)
                             : 0.0;
                         final previouslyOrdered = _isPreviouslyOrdered(product);
+                        CustomerWalkOrderRow? walkRowForProduct;
+                        final wWalk = ecatalogWalkByItem;
+                        final wWalkNorm = ecatalogWalkByNormalizedItem;
+                        if (wWalk != null && wWalkNorm != null) {
+                          final rawItem = product.itemNumber.trim();
+                          walkRowForProduct =
+                              wWalk[rawItem] ??
+                              wWalkNorm[normalizeItemNumber(rawItem)];
+                        }
                         final productFlagChips = <Widget>[
                           ..._productFlagChips(context, product),
                           if (previouslyOrdered)
                             _ecatalogPreviouslyOrderedBadge(context),
+                          if (walkRowForProduct != null &&
+                              walkRowForProduct.neverAdd)
+                            _ecatalogNeverAddBadge(
+                              context,
+                              walkRowForProduct.neverAddReason,
+                            ),
                         ];
                         final catLabel = product.category.trim().isEmpty
                             ? '—'
@@ -15188,119 +15519,295 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return buffer.toString();
   }
 
+  /// Customer identity for "email all quotes for this customer" while Load Quote is open:
+  /// prefers the selected customer, else the persisted workspace quote JSON, else the index row.
+  Future<Customer?> _customerForLoadedQuoteEmailContext() async {
+    final sel = _selectedCustomer;
+    if (sel != null) return sel;
+    final qid = _currentQuoteId;
+    if (qid == null) return null;
+    try {
+      final dir = await _getQuotesDirectory();
+      final file = File('${dir.path}/quote_$qid.json');
+      if (await file.exists()) {
+        final data = Map<String, dynamic>.from(
+          jsonDecode(await file.readAsString()) as Map,
+        );
+        final cm = data['customer'];
+        if (cm is Map<String, dynamic>) {
+          try {
+            return Customer.fromJson(Map<String, dynamic>.from(cm));
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    try {
+      final infos = await _loadQuoteIndex();
+      for (final info in infos) {
+        if (info.id == qid) return _customerStubForSavedQuoteInfo(info);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Load-quote Email menu: single quote (existing behavior), all for workspace customer, or all saved.
+  Future<void> _onLoadQuoteEmailTapped(String tappedQuoteId, String tappedQuoteName) async {
+    if (!mounted) return;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Email'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'current'),
+              child: const Text('Email Current Quote Only'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'customer'),
+              child: const Text('Email All Quotes for This Customer'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'all'),
+              child: const Text('Email All Saved Quotes'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == null) return;
+    if (action == 'current') {
+      await _shareQuoteById(tappedQuoteId, tappedQuoteName);
+      return;
+    }
+    if (action == 'customer') {
+      final cust = await _customerForLoadedQuoteEmailContext();
+      if (!mounted) return;
+      if (cust == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No customer found for the loaded quote. Select a customer or load a quote with customer data.',
+            ),
+          ),
+        );
+        return;
+      }
+      final index = await _loadQuoteIndex();
+      final subset = index
+          .where((info) => _savedQuoteInfoMatchesCustomer(info, cust))
+          .toList();
+      if (!mounted) return;
+      if (subset.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No saved quotes found for this customer.'),
+          ),
+        );
+        return;
+      }
+      await _shareMultipleSavedQuotesForEmail(
+        subset,
+        subject: 'Quotes (${subset.length}) — ${cust.displayName}',
+      );
+      return;
+    }
+    if (action == 'all') {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Email all saved quotes'),
+          content: const Text(
+            'This will include quotes for all customers. Are you sure?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || ok != true) return;
+      final index = await _loadQuoteIndex();
+      if (!mounted) return;
+      if (index.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No saved quotes to email.')),
+        );
+        return;
+      }
+      await _shareMultipleSavedQuotesForEmail(
+        index,
+        subject: 'All saved quotes (${index.length})',
+      );
+    }
+  }
+
+  /// CSV + XLSX + text body for one saved quote (same files as legacy email/share).
+  Future<({List<XFile> attachments, String text, String displayName})?>
+  _buildQuoteShareBundleForEmail(String id, String fallbackName) async {
+    if (!await _quoteIdHasActiveEligibleRowInActiveIndexStorage(id)) {
+      return null;
+    }
+    final dir = await _getQuotesDirectory();
+    final file = File('${dir.path}/quote_$id.json');
+    if (!await file.exists()) return null;
+
+    final content = await file.readAsString();
+    final data = Map<String, dynamic>.from(jsonDecode(content) as Map);
+    final csv = _formatQuoteAsCsv(data, sortByItemNumberAsc: true);
+
+    final tempDir = await getTemporaryDirectory();
+
+    String safeFileToken(String raw) {
+      final t = raw
+          .replaceAll(RegExp(r'[^\w\s-]'), '_')
+          .replaceAll(RegExp(r'\s+'), '_')
+          .replaceAll(RegExp(r'_+'), '_')
+          .trim();
+      return t.length > 80 ? t.substring(0, 80) : t;
+    }
+
+    final exportedOn = DateTime.now();
+    final customerMap = data['customer'];
+    var customerName = '';
+    if (customerMap is Map<String, dynamic>) {
+      try {
+        customerName = Customer.fromJson(
+          Map<String, dynamic>.from(customerMap),
+        ).displayName.trim();
+      } catch (_) {}
+    }
+    final csvFilename = _buildExportOrderCsvFilename(
+      quoteName: (data['name'] as String?)?.trim() ?? fallbackName,
+      customerName: customerName,
+      customerId: (data['customerId'] as String?)?.trim(),
+      quoteData: data,
+      customerFolderName: customerName,
+      quoteBucketLabel: (data['quoteBucketLabel'] as String?)?.trim(),
+      quoteBucketKey: (data['quoteBucketKey'] as String?)?.trim(),
+      quoteDate: _quoteDateFromMapOrFallback(data, exportedOn),
+      exportedOn: exportedOn,
+    );
+    final csvBase = p.basename(csvFilename);
+    final csvPath = '${tempDir.path}/${id}_$csvBase';
+
+    final csvFile = File(csvPath);
+    await csvFile.writeAsString(csv, encoding: utf8, flush: true);
+    await _debugLogCsvExportFile(
+      action: 'quote_email_temp_csv',
+      filename: csvBase,
+      mimeType: 'text/csv',
+      file: csvFile,
+    );
+
+    final text = _formatQuoteAsText(data);
+
+    final attachments = <XFile>[XFile(csvPath, mimeType: 'text/csv')];
+    try {
+      final bucketLabel = (data['quoteBucketLabel'] as String?)?.trim() ?? '';
+      final bucketKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
+      final productTypeRaw = bucketLabel.isNotEmpty ? bucketLabel : bucketKey;
+      final productToken = safeFileToken(
+        productTypeRaw.isNotEmpty ? productTypeRaw : 'Unknown',
+      );
+
+      var customerToken = '';
+      final cm = data['customer'];
+      if (cm is Map<String, dynamic>) {
+        final cust = Customer.fromJson(Map<String, dynamic>.from(cm));
+        final company = cust.companyName.trim();
+        final identifyingCustomer = company.isNotEmpty
+            ? company
+            : cust.id.trim();
+        customerToken = safeFileToken(identifyingCustomer);
+      }
+      if (customerToken.isEmpty) {
+        customerToken = 'Unknown';
+      }
+
+      final quoteNameOptional = safeFileToken(
+        (data['name'] as String?)?.trim() ?? fallbackName,
+      );
+      final updated = DateTime.tryParse((data['updatedAt'] as String?) ?? '');
+      final dateToken = updated != null
+          ? '${updated.year}-${updated.month.toString().padLeft(2, '0')}-${updated.day.toString().padLeft(2, '0')}'
+          : '';
+
+      final xlsxBase = [
+        'Quote',
+        productToken,
+        customerToken,
+        if (quoteNameOptional.isNotEmpty) quoteNameOptional,
+        if (dateToken.isNotEmpty) dateToken,
+      ].join('_');
+      final xlsxPath = '${tempDir.path}/${id}_$xlsxBase.xlsx';
+      final xlsxBytes = _buildQuoteEmailExcelBytes(
+        data,
+        sortByItemNumberAsc: true,
+      );
+      await File(xlsxPath).writeAsBytes(xlsxBytes, flush: true);
+      attachments.add(
+        XFile(
+          xlsxPath,
+          mimeType:
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ),
+      );
+    } catch (_) {}
+
+    final displayName = (data['name'] as String?)?.trim() ?? fallbackName;
+    return (attachments: attachments, text: text, displayName: displayName);
+  }
+
+  Future<void> _shareMultipleSavedQuotesForEmail(
+    List<SavedQuoteInfo> quotes, {
+    required String subject,
+  }) async {
+    try {
+      final attachments = <XFile>[];
+      final textParts = <String>[];
+      for (final q in quotes) {
+        final bundle = await _buildQuoteShareBundleForEmail(q.id, q.name);
+        if (bundle == null) continue;
+        textParts.add(
+          '=== ${bundle.displayName} (${q.id}) ===\n${bundle.text}',
+        );
+        attachments.addAll(bundle.attachments);
+      }
+      if (attachments.isEmpty) return;
+      await Share.shareXFiles(
+        attachments,
+        text: textParts.join('\n\n---\n\n'),
+        subject: subject,
+      );
+    } catch (_) {}
+  }
+
   /// Share quote by id: attaches line-detail CSV + .xlsx (same columns) and text summary.
   Future<void> _shareQuoteById(String id, String name) async {
     try {
-      if (!await _quoteIdHasActiveEligibleRowInActiveIndexStorage(id)) {
-        return;
-      }
-      final dir = await _getQuotesDirectory();
-      final file = File('${dir.path}/quote_$id.json');
-      if (!await file.exists()) return;
-
-      final content = await file.readAsString();
-      final data = Map<String, dynamic>.from(jsonDecode(content) as Map);
-      final csv = _formatQuoteAsCsv(data, sortByItemNumberAsc: true);
-
-      final tempDir = await getTemporaryDirectory();
-
-      String safeFileToken(String raw) {
-        final t = raw
-            .replaceAll(RegExp(r'[^\w\s-]'), '_')
-            .replaceAll(RegExp(r'\s+'), '_')
-            .replaceAll(RegExp(r'_+'), '_')
-            .trim();
-        return t.length > 80 ? t.substring(0, 80) : t;
-      }
-
-      final exportedOn = DateTime.now();
-      final customerMap = data['customer'];
-      var customerName = '';
-      if (customerMap is Map<String, dynamic>) {
-        try {
-          customerName = Customer.fromJson(
-            Map<String, dynamic>.from(customerMap),
-          ).displayName.trim();
-        } catch (_) {}
-      }
-      final csvFilename = _buildExportOrderCsvFilename(
-        quoteName: (data['name'] as String?)?.trim() ?? name,
-        customerName: customerName,
-        customerId: (data['customerId'] as String?)?.trim(),
-        quoteData: data,
-        customerFolderName: customerName,
-        quoteBucketLabel: (data['quoteBucketLabel'] as String?)?.trim(),
-        quoteBucketKey: (data['quoteBucketKey'] as String?)?.trim(),
-        quoteDate: _quoteDateFromMapOrFallback(data, exportedOn),
-        exportedOn: exportedOn,
+      final bundle = await _buildQuoteShareBundleForEmail(id, name);
+      if (bundle == null) return;
+      await Share.shareXFiles(
+        bundle.attachments,
+        text: bundle.text,
+        subject: 'Quote: $name',
       );
-      final csvPath = '${tempDir.path}/$csvFilename';
-
-      final csvFile = File(csvPath);
-      await csvFile.writeAsString(csv, encoding: utf8, flush: true);
-      await _debugLogCsvExportFile(
-        action: 'quote_email_temp_csv',
-        filename: csvFilename,
-        mimeType: 'text/csv',
-        file: csvFile,
-      );
-
-      final text = _formatQuoteAsText(data);
-
-      final attachments = <XFile>[XFile(csvPath, mimeType: 'text/csv')];
-      try {
-        final bucketLabel = (data['quoteBucketLabel'] as String?)?.trim() ?? '';
-        final bucketKey = (data['quoteBucketKey'] as String?)?.trim() ?? '';
-        final productTypeRaw = bucketLabel.isNotEmpty ? bucketLabel : bucketKey;
-        final productToken = safeFileToken(
-          productTypeRaw.isNotEmpty ? productTypeRaw : 'Unknown',
-        );
-
-        var customerToken = '';
-        final cm = data['customer'];
-        if (cm is Map<String, dynamic>) {
-          final cust = Customer.fromJson(Map<String, dynamic>.from(cm));
-          final company = cust.companyName.trim();
-          final identifyingCustomer = company.isNotEmpty
-              ? company
-              : cust.id.trim();
-          customerToken = safeFileToken(identifyingCustomer);
-        }
-        if (customerToken.isEmpty) {
-          customerToken = 'Unknown';
-        }
-
-        final quoteNameOptional = safeFileToken(
-          (data['name'] as String?)?.trim() ?? name,
-        );
-        final updated = DateTime.tryParse((data['updatedAt'] as String?) ?? '');
-        final dateToken = updated != null
-            ? '${updated.year}-${updated.month.toString().padLeft(2, '0')}-${updated.day.toString().padLeft(2, '0')}'
-            : '';
-
-        final xlsxBase = [
-          'Quote',
-          productToken,
-          customerToken,
-          if (quoteNameOptional.isNotEmpty) quoteNameOptional,
-          if (dateToken.isNotEmpty) dateToken,
-        ].join('_');
-        final xlsxPath = '${tempDir.path}/$xlsxBase.xlsx';
-        final xlsxBytes = _buildQuoteEmailExcelBytes(
-          data,
-          sortByItemNumberAsc: true,
-        );
-        await File(xlsxPath).writeAsBytes(xlsxBytes, flush: true);
-        attachments.add(
-          XFile(
-            xlsxPath,
-            mimeType:
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          ),
-        );
-      } catch (_) {}
-
-      await Share.shareXFiles(attachments, text: text, subject: 'Quote: $name');
     } catch (_) {}
   }
 
@@ -15605,7 +16112,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               formatDate: _formatSavedQuoteDate,
               dialogContext: ctx,
               onRemoveQuote: _removeQuoteFromIndex,
-              onShareQuote: _shareQuoteById,
+              onShareQuote: _onLoadQuoteEmailTapped,
               searchQuotesFocusNode: _searchQuotesFocusNode,
             ),
             actionsAlignment: MainAxisAlignment.start,
@@ -17659,6 +18166,34 @@ Widget _ecatalogPreviouslyOrderedBadge(BuildContext context) {
       ),
     ),
   );
+}
+
+Widget _ecatalogNeverAddBadge(
+  BuildContext context,
+  String neverAddReason,
+) {
+  final textTheme = Theme.of(context).textTheme;
+  final badge = Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: Colors.pink.shade100,
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Text(
+      'Never Add',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      softWrap: false,
+      style: textTheme.bodySmall?.copyWith(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        color: Colors.red.shade900,
+      ),
+    ),
+  );
+  final tip = neverAddReason.trim();
+  if (tip.isEmpty) return badge;
+  return Tooltip(message: tip, child: badge);
 }
 
 /// Same JPEG URL as [_OrderLineCardRow]; small decode bounds for list scrolling.
