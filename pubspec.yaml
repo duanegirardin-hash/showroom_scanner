@@ -21,6 +21,10 @@ dependencies:
   unorm_dart: ^0.3.2
   diacritic: ^0.1.6
 
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
 flutter:
   uses-material-design: true
   assets:

@@ -92,6 +92,14 @@
       "bucketKey": "summer_toys",
       "displayLabel": "SUMMER TOYS"
     },
+    "SPRING/SUMMER - GENERAL": {
+      "bucketKey": "summer_general",
+      "displayLabel": "SUMMER GENERAL"
+    },
+    "SPRING/SUMMER - TOYS": {
+      "bucketKey": "summer_toys",
+      "displayLabel": "SUMMER TOYS"
+    },
     "VALENTINE'S DAY": {
       "bucketKey": "valentines_day",
       "displayLabel": "VALENTINE'S DAY"

@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'master_products_sheet_builder.dart';
+import 'quote_bucket_routing.dart';
 
 /// Paths chosen in the master build staging dialog (Build Updated Master Products Sheet).
 class _MasterBuildFileSet {
@@ -100,29 +101,8 @@ const Color _kSecondaryText = Color(0xFF5F6368);
 const Color _kDividerWarm = Color(0xFFC9C5C0);
 const Color _kDividerWarmSoft = Color(0xFFE5E2DE);
 
-/// ECatalog Seasonal: accepted [Product.productType] labels.
-/// Used only to scope the Seasonal merchandising chip.
-const Map<String, String> _kEcatalogSeasonalLabelToProductType = {
-  'Calendar & Planner': 'CALENDAR',
-  'Canada Day': 'CANADA DAY',
-  'Celebrate Pride': 'PRIDE',
-  'Chinese New Year': 'CHINESE NEW YEAR',
-  'Christmas': 'CHRISTMAS',
-  'Diwali': 'DIWALI',
-  'Easter': 'EASTER',
-  'Fall/Winter Essentials': 'FALL/WINTER ESSENTIALS',
-  'Father\'s Day': 'FATHER\'S DAY',
-  'Graduation': 'GRADUATION',
-  'Halloween': 'HALLOWEEN',
-  'Hanukkah': 'HANUKKAH',
-  'Harvest': 'HARVEST',
-  'Mother\'s Day': 'MOTHER\'S DAY',
-  'New Years': 'NEW YEARS',
-  'Spring/Summer General': 'SUMMER GENERAL',
-  'Spring/Summer Toys': 'SUMMER TOYS',
-  'St Patrick\'s Day': 'ST PATRICK\'S DAY',
-  'Valentine\'s Day': 'VALENTINE\'S DAY',
-};
+/// ECatalog Seasonal chip membership is [kEcatalogSeasonalProductTypes]
+/// (includes live `SPRING/SUMMER - *` and legacy `SUMMER *` Product Types).
 
 class ShowroomScannerApp extends StatelessWidget {
   const ShowroomScannerApp({super.key});
@@ -332,6 +312,7 @@ class Product {
   final bool whse2OutOfStock;
   final bool whse1ComingSoon;
   final bool whse2ComingSoon;
+
   /// Raw CSV text from Whse 1 Availability / Whse 2 Availability (2-column format only).
   final String whse1AvailabilityDisplay;
   final String whse2AvailabilityDisplay;
@@ -572,7 +553,7 @@ String _repairMojibakeText(String value) {
 /// Normalizes with [trim], lowercases, collapses internal whitespace; unknown → all false.
 /// At most one of the three flags is true.
 ({bool inStock, bool outOfStock, bool comingSoon})
-    _piParseWarehouseAvailabilityTriState(String raw) {
+_piParseWarehouseAvailabilityTriState(String raw) {
   final collapsed = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
   final n = collapsed.toLowerCase();
   if (n == 'in stock') {
@@ -590,7 +571,9 @@ String _repairMojibakeText(String value) {
 /// Keeps parity counters referenced so analyzer stays clean without changing outcomes.
 void _productsCsvSinkUnused(Object? _) {}
 
-_ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob job) {
+_ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(
+  _ProductsCsvIsolateJob job,
+) {
   final rawCsv = job.rawCsv;
   final sourceLabel = job.sourceLabel;
 
@@ -659,12 +642,8 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
   int? idxWhse1Soon;
   int? idxWhse2Soon;
   if (!warehouseViaAvailabilityColumns) {
-    idxWhse1In = _piOptionalProductColumnIndex(byNorm, const [
-      'whse1instock',
-    ]);
-    idxWhse2In = _piOptionalProductColumnIndex(byNorm, const [
-      'whse2instock',
-    ]);
+    idxWhse1In = _piOptionalProductColumnIndex(byNorm, const ['whse1instock']);
+    idxWhse2In = _piOptionalProductColumnIndex(byNorm, const ['whse2instock']);
     idxWhse1Out = _piOptionalProductColumnIndex(byNorm, const [
       'whse1outofstock',
     ]);
@@ -714,22 +693,13 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
   final idxMinOrderQty = _piRequireProductColumnIndex(
     byNorm,
     'Minimum Order Quantity',
-    const [
-      'minorderqty',
-      'minimumorderquantity',
-      'moq',
-      'minqty',
-    ],
+    const ['minorderqty', 'minimumorderquantity', 'moq', 'minqty'],
     header,
   );
   final idxCaseQty = _piRequireProductColumnIndex(
     byNorm,
     'Case Quantity',
-    const [
-      'caseqty',
-      'casequantity',
-      'case',
-    ],
+    const ['caseqty', 'casequantity', 'case'],
     header,
   );
 
@@ -784,7 +754,9 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
       final itemNumber = _piNormalizeItemNumber(
         _piProductCell(row, idxItemNumber),
       );
-      final description = _repairMojibakeText(_piProductCell(row, idxDescription));
+      final description = _repairMojibakeText(
+        _piProductCell(row, idxDescription),
+      );
       final upc = _piProductCell(row, idxUpc).trim();
       final upcLookup = _piNormalizeUpcLookupKey(upc);
       final price = _piParsePrice(_piProductCell(row, idxPrice));
@@ -844,9 +816,13 @@ _ProductsCsvIsolateResult _parseProductsCatalogCsvIsolate(_ProductsCsvIsolateJob
             : _piParseYesFlag(_piProductCell(row, idxWhse2Soon).trim());
       }
       if (discountEligible) discountEligibleCount++;
-      final productType = _repairMojibakeText(_piProductCell(row, idxProductType));
+      final productType = _repairMojibakeText(
+        _piProductCell(row, idxProductType),
+      );
       final category = _repairMojibakeText(_piProductCell(row, idxCategory));
-      final subCategory = _repairMojibakeText(_piProductCell(row, idxSubCategory));
+      final subCategory = _repairMojibakeText(
+        _piProductCell(row, idxSubCategory),
+      );
       final minOrderQty = _piParseInt(_piProductCell(row, idxMinOrderQty));
       final caseQty = _piParseInt(_piProductCell(row, idxCaseQty));
 
@@ -1114,9 +1090,8 @@ _CustomersCsvIsolateResult _parseCustomersCatalogCsvIsolate(String rawCsv) {
         continue;
       }
 
-      String get(int index) => index >= 0 && index < row.length
-          ? row[index].toString().trim()
-          : '';
+      String get(int index) =>
+          index >= 0 && index < row.length ? row[index].toString().trim() : '';
 
       final idPart = idxId >= 0 ? get(idxId) : '';
       final company = get(idxCompanyName);
@@ -1595,7 +1570,8 @@ OrderImportCsvParseOutcome parseOrderImportExcelBytes(
     throw FormatException('Excel file has no worksheets.');
   }
   final defaultSheet = workbook.getDefaultSheet();
-  final sheetName = (defaultSheet != null && workbook.tables[defaultSheet] != null)
+  final sheetName =
+      (defaultSheet != null && workbook.tables[defaultSheet] != null)
       ? defaultSheet
       : workbook.tables.keys.first;
   final sheet = workbook.tables[sheetName];
@@ -1780,8 +1756,7 @@ Product? matchOrderImportProduct(
   Map<String, Product> productsByUpc, {
   String upcLabel = '',
   List<int>? numericItemFallbackWidths,
-}
-) {
+}) {
   Product? lookupByUpcRaw(String raw) {
     final upc = _orderImportNormalizeUpcLookupKey(raw);
     if (upc.isEmpty) return null;
@@ -1821,13 +1796,12 @@ Product? matchOrderImportProduct(
     final candidateWidths =
         numericItemFallbackWidths ??
         (productsByItemNumber.keys
-              .where(
-                (k) =>
-                    k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
-              )
-              .map((k) => k.length)
-              .toSet()
-              .toList()
+            .where(
+              (k) => k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
+            )
+            .map((k) => k.length)
+            .toSet()
+            .toList()
           ..sort());
     for (final width in candidateWidths) {
       if (width <= itemKey.length) continue;
@@ -2500,7 +2474,8 @@ CustomerWalkOrderRow _customerWalkOrderRowWithSubPosition(
   );
 }
 
-Map<String, Map<String, CustomerWalkOrderRow>> _copyWalkOrderByCustomerForEditor(
+Map<String, Map<String, CustomerWalkOrderRow>>
+_copyWalkOrderByCustomerForEditor(
   Map<String, Map<String, CustomerWalkOrderRow>> src,
 ) {
   return {
@@ -2509,7 +2484,8 @@ Map<String, Map<String, CustomerWalkOrderRow>> _copyWalkOrderByCustomerForEditor
   };
 }
 
-const String _kWalkOrderEditorExportFilename = 'customer_walk_order_updated.csv';
+const String _kWalkOrderEditorExportFilename =
+    'customer_walk_order_updated.csv';
 
 /// Android public exports use a single path segment; editor export is not per-customer.
 const String _kWalkOrderEditorExportAndroidFolder = 'Walk_Order_Export';
@@ -2534,7 +2510,8 @@ int _compareWalkOrderRowsForEditorCsvExport(
 
 String _walkOrderNeverAddCsvCell(bool neverAdd) => neverAdd ? 'YES' : '';
 
-String _walkOrderWalkEnabledCsvCell(bool walkEnabled) => walkEnabled ? 'YES' : 'NO';
+String _walkOrderWalkEnabledCsvCell(bool walkEnabled) =>
+    walkEnabled ? 'YES' : 'NO';
 
 /// CSV for walk-order editor only: subset columns matching app import header names.
 String _editorWalkOrderMapToExportCsvText(
@@ -2577,7 +2554,9 @@ String _editorWalkOrderMapToExportCsvText(
   return const ListToCsvConverter().convert(csvRows);
 }
 
-int _totalWalkOrderRowCount(Map<String, Map<String, CustomerWalkOrderRow>> byCustomer) {
+int _totalWalkOrderRowCount(
+  Map<String, Map<String, CustomerWalkOrderRow>> byCustomer,
+) {
   var n = 0;
   for (final m in byCustomer.values) {
     n += m.length;
@@ -2637,7 +2616,8 @@ enum _WalkOrderSortMode {
 
 class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   late String? _customerId;
-  late Map<String, Map<String, CustomerWalkOrderRow>> _editorWalkOrderByCustomer;
+  late Map<String, Map<String, CustomerWalkOrderRow>>
+  _editorWalkOrderByCustomer;
   bool _editorHasUnsavedChanges = false;
   String? _categoryFilter;
   String? _subCategoryFilter;
@@ -2684,7 +2664,10 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   }
 
   /// WalkPosition ascending (nulls last), then SubPosition ascending (nulls last), then item number.
-  int _compareWalkRowsCurrentOrder(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+  int _compareWalkRowsCurrentOrder(
+    CustomerWalkOrderRow a,
+    CustomerWalkOrderRow b,
+  ) {
     final ap = a.walkPosition;
     final bp = b.walkPosition;
     if (ap != null && bp != null && ap != bp) return ap.compareTo(bp);
@@ -2702,7 +2685,10 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
     return a.itemNumber.compareTo(b.itemNumber);
   }
 
-  int _compareCategorySubCategory(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+  int _compareCategorySubCategory(
+    CustomerWalkOrderRow a,
+    CustomerWalkOrderRow b,
+  ) {
     final ca = a.category.trim();
     final cb = b.category.trim();
     final c = ca.compareTo(cb);
@@ -2721,7 +2707,10 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
     return n;
   }
 
-  int _compareMissingPositionsFirst(CustomerWalkOrderRow a, CustomerWalkOrderRow b) {
+  int _compareMissingPositionsFirst(
+    CustomerWalkOrderRow a,
+    CustomerWalkOrderRow b,
+  ) {
     final ma = _missingPositionScore(a);
     final mb = _missingPositionScore(b);
     if (ma != mb) return mb.compareTo(ma);
@@ -2798,8 +2787,9 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   @override
   void initState() {
     super.initState();
-    _editorWalkOrderByCustomer =
-        _copyWalkOrderByCustomerForEditor(widget.walkOrderByCustomer);
+    _editorWalkOrderByCustomer = _copyWalkOrderByCustomerForEditor(
+      widget.walkOrderByCustomer,
+    );
     final ids = _sortedCustomerIds;
     if (ids.isEmpty) {
       _customerId = null;
@@ -2858,7 +2848,9 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
 
   Future<void> _exportWalkOrderCsv() async {
     try {
-      final text = _editorWalkOrderMapToExportCsvText(_editorWalkOrderByCustomer);
+      final text = _editorWalkOrderMapToExportCsvText(
+        _editorWalkOrderByCustomer,
+      );
       final count = _totalWalkOrderRowCount(_editorWalkOrderByCustomer);
       await _saveWalkOrderEditorExportFile(text);
       debugPrint('[WalkOrderExport] rows exported: $count');
@@ -2870,9 +2862,9 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
       debugPrint('[WalkOrderExport] failed: $e');
       debugPrint('$st');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Walk order export failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Walk order export failed: $e')));
     }
   }
 
@@ -2889,10 +2881,7 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
       final item = itemNumbers[i];
       final row = byItem[item];
       if (row == null) continue;
-      byItem[item] = _customerWalkOrderRowWithSubPosition(
-        row,
-        (i + 1) * 10,
-      );
+      byItem[item] = _customerWalkOrderRowWithSubPosition(row, (i + 1) * 10);
     }
   }
 
@@ -2947,13 +2936,10 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   }) {
     final selected = _quickFilter == value;
     return FilterChip(
-      label: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
+      label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
       selected: selected,
-      onSelected: (on) => _setQuickFilter(on ? value : _WalkOrderQuickFilter.all),
+      onSelected: (on) =>
+          _setQuickFilter(on ? value : _WalkOrderQuickFilter.all),
       visualDensity: VisualDensity.compact,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
@@ -2963,10 +2949,7 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
   Widget build(BuildContext context) {
     final ids = _sortedCustomerIds;
     final categories = _distinctCategories(_baseRows).toList()..sort();
-    final subCats = _distinctSubCategories(
-      _baseRows,
-      _categoryFilter,
-    ).toList()
+    final subCats = _distinctSubCategories(_baseRows, _categoryFilter).toList()
       ..sort();
     final scoped = _categoryScopedRows;
     final rows = _displayRows;
@@ -2989,17 +2972,17 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                   Text(
                     'Changes apply only in this editor; use Export to save a CSV outside the app.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   if (_editorHasUnsavedChanges) ...[
                     const SizedBox(height: 2),
                     Text(
                       'Unsaved editor changes',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Theme.of(context).colorScheme.tertiary,
-                            fontWeight: FontWeight.w600,
-                          ),
+                        color: Theme.of(context).colorScheme.tertiary,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ],
                 ],
@@ -3031,16 +3014,19 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                           Icon(
                             Icons.edit_note,
                             size: 20,
-                            color: Theme.of(context).colorScheme.onTertiaryContainer,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onTertiaryContainer,
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               'Unsaved editor changes',
-                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onTertiaryContainer,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onTertiaryContainer,
                                     fontWeight: FontWeight.w600,
                                   ),
                             ),
@@ -3092,7 +3078,8 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                           const SizedBox(height: 4),
                           DropdownButton<String>(
                             isExpanded: true,
-                            value: _customerId != null && ids.contains(_customerId)
+                            value:
+                                _customerId != null && ids.contains(_customerId)
                                 ? _customerId
                                 : ids.first,
                             selectedItemBuilder: (context) => [
@@ -3126,7 +3113,8 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                           const SizedBox(height: 4),
                           DropdownButton<String?>(
                             isExpanded: true,
-                            value: _categoryFilter != null &&
+                            value:
+                                _categoryFilter != null &&
                                     categories.contains(_categoryFilter)
                                 ? _categoryFilter
                                 : null,
@@ -3172,7 +3160,8 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                           const SizedBox(height: 4),
                           DropdownButton<String?>(
                             isExpanded: true,
-                            value: _subCategoryFilter != null &&
+                            value:
+                                _subCategoryFilter != null &&
                                     subCats.contains(_subCategoryFilter)
                                 ? _subCategoryFilter
                                 : null,
@@ -3220,7 +3209,11 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                             scrollDirection: Axis.horizontal,
                             child: Row(
                               children: [
-                                _quickFilterChip(context, label: 'All', value: _WalkOrderQuickFilter.all),
+                                _quickFilterChip(
+                                  context,
+                                  label: 'All',
+                                  value: _WalkOrderQuickFilter.all,
+                                ),
                                 _quickFilterChip(
                                   context,
                                   label: 'Has WalkPosition',
@@ -3229,7 +3222,8 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                 _quickFilterChip(
                                   context,
                                   label: 'Missing WalkPosition',
-                                  value: _WalkOrderQuickFilter.missingWalkPosition,
+                                  value:
+                                      _WalkOrderQuickFilter.missingWalkPosition,
                                 ),
                                 _quickFilterChip(
                                   context,
@@ -3239,7 +3233,8 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                 _quickFilterChip(
                                   context,
                                   label: 'Missing SubPosition',
-                                  value: _WalkOrderQuickFilter.missingSubPosition,
+                                  value:
+                                      _WalkOrderQuickFilter.missingSubPosition,
                                 ),
                                 _quickFilterChip(
                                   context,
@@ -3312,10 +3307,9 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                       ),
                       const SizedBox(height: 6),
                       OutlinedButton.icon(
-                        onPressed:
-                            _reorderActionsEnabled && showing > 0
-                                ? _renumberVisibleItems
-                                : null,
+                        onPressed: _reorderActionsEnabled && showing > 0
+                            ? _renumberVisibleItems
+                            : null,
                         icon: const Icon(Icons.format_list_numbered, size: 20),
                         label: const Text('Renumber Visible Items'),
                       ),
@@ -3345,7 +3339,9 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                   Expanded(
                                     child: Text(
                                       r.itemNumber,
-                                      style: Theme.of(context).textTheme.titleMedium,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleMedium,
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                   ),
@@ -3360,9 +3356,10 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                   IconButton(
                                     tooltip: 'Move down',
                                     onPressed:
-                                        _reorderActionsEnabled && i < rows.length - 1
-                                            ? () => _moveVisibleRow(i, i + 1)
-                                            : null,
+                                        _reorderActionsEnabled &&
+                                            i < rows.length - 1
+                                        ? () => _moveVisibleRow(i, i + 1)
+                                        : null,
                                     icon: const Icon(Icons.arrow_downward),
                                     visualDensity: VisualDensity.compact,
                                   ),
@@ -3378,22 +3375,34 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                       _walkStatusBadge(
                                         context,
                                         label: 'WalkPosition missing',
-                                        color: Theme.of(context).colorScheme.errorContainer,
-                                        onColor: Theme.of(context).colorScheme.onErrorContainer,
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.errorContainer,
+                                        onColor: Theme.of(
+                                          context,
+                                        ).colorScheme.onErrorContainer,
                                       ),
                                     if (subMissing)
                                       _walkStatusBadge(
                                         context,
                                         label: 'SubPosition missing',
-                                        color: Theme.of(context).colorScheme.secondaryContainer,
-                                        onColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.secondaryContainer,
+                                        onColor: Theme.of(
+                                          context,
+                                        ).colorScheme.onSecondaryContainer,
                                       ),
                                     if (r.neverAdd)
                                       _walkStatusBadge(
                                         context,
                                         label: 'NeverAdd YES',
-                                        color: Theme.of(context).colorScheme.tertiaryContainer,
-                                        onColor: Theme.of(context).colorScheme.onTertiaryContainer,
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.tertiaryContainer,
+                                        onColor: Theme.of(
+                                          context,
+                                        ).colorScheme.onTertiaryContainer,
                                       ),
                                   ],
                                 ),
@@ -3411,10 +3420,15 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
                                 'SubPosition',
                                 r.subPosition?.toString() ?? '—',
                               ),
-                              _walkFieldLine('NeverAdd', r.neverAdd ? 'Yes' : 'No'),
+                              _walkFieldLine(
+                                'NeverAdd',
+                                r.neverAdd ? 'Yes' : 'No',
+                              ),
                               _walkFieldLine(
                                 'NeverAddReason',
-                                r.neverAddReason.isEmpty ? '—' : r.neverAddReason,
+                                r.neverAddReason.isEmpty
+                                    ? '—'
+                                    : r.neverAddReason,
                               ),
                               _walkFieldLine(
                                 'WalkEnabled',
@@ -3447,9 +3461,9 @@ class _WalkOrderViewerPageState extends State<_WalkOrderViewerPage> {
       child: Text(
         label,
         style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: onColor,
-              fontWeight: FontWeight.w600,
-            ),
+          color: onColor,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -3677,7 +3691,7 @@ class _LoadQuoteDialogContent extends StatefulWidget {
   final List<SavedQuoteInfo> allQuotes;
   final String Function(DateTime) formatDate;
   final BuildContext dialogContext;
-  final Future<void> Function(String id) onRemoveQuote;
+  final Future<bool> Function(String id) onRemoveQuote;
   final Future<void> Function(String id, String name) onShareQuote;
   final FocusNode searchQuotesFocusNode;
 
@@ -3758,7 +3772,9 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Tap a quote to load it. Email to share; remove only after emailing or saving elsewhere.',
+            'Tap a quote to load it. '
+            'Email Current / Email Customer moves those quotes to Archive after sharing. '
+            'Email All Saved is share-only (does not archive).',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
@@ -3924,24 +3940,22 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                               );
 
                                               if (confirm == true && mounted) {
-                                                await widget.onRemoveQuote(
-                                                  info.id,
-                                                );
-                                                if (mounted) {
-                                                  bool becameEmpty = false;
-                                                  setState(() {
-                                                    _quotes.removeWhere(
-                                                      (e) => e.id == info.id,
-                                                    );
-                                                    becameEmpty =
-                                                        _quotes.isEmpty;
-                                                  });
-                                                  if (becameEmpty) {
-                                                    FocusScope.of(
-                                                      context,
-                                                    ).unfocus();
-                                                    _searchController.clear();
-                                                  }
+                                                final removed = await widget
+                                                    .onRemoveQuote(info.id);
+                                                if (!mounted) return;
+                                                if (!removed) return;
+                                                bool becameEmpty = false;
+                                                setState(() {
+                                                  _quotes.removeWhere(
+                                                    (e) => e.id == info.id,
+                                                  );
+                                                  becameEmpty = _quotes.isEmpty;
+                                                });
+                                                if (becameEmpty) {
+                                                  FocusScope.of(
+                                                    context,
+                                                  ).unfocus();
+                                                  _searchController.clear();
                                                 }
                                               }
                                             },
@@ -4035,9 +4049,7 @@ class _SimpleCatalogTestCustomerPickerDialogState
                         final c = filtered[i];
                         return ListTile(
                           title: Text(c.displayName),
-                          subtitle: c.contact.isEmpty
-                              ? null
-                              : Text(c.contact),
+                          subtitle: c.contact.isEmpty ? null : Text(c.contact),
                           onTap: () => Navigator.of(context).pop(c),
                         );
                       },
@@ -4133,6 +4145,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   final Map<String, OrderLine> _orderLineByKey = {};
 
   Timer? _refocusTimer;
+
   /// Single follow-up pulse / keyboard hide for [_requestScannerFocus] (prevents stacked retries).
   Timer? _scannerFocusRetryTimer;
   Timer? _scannerFocusHideKeyboardTimer;
@@ -4292,11 +4305,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   // physical scan into partial fragments ("2", "73", "730", ...).
   static const int _scannerRefocusDelayMs = 35;
   static const int _tabReturnRefocusDelayMs = 120;
+
   /// Collapses burst calls (same-frame / input churn) without blocking tab refocus (~16ms vs ~35ms).
   static const int _scannerFocusRequestCooldownMs = 12;
   static const int _scannerFocusSingleRetryDelayMs = 80;
+
   /// Yield after the first frame before cold-start I/O and isolate work.
-  static const Duration _startupDeferAfterFirstFrame = Duration(milliseconds: 150);
+  static const Duration _startupDeferAfterFirstFrame = Duration(
+    milliseconds: 150,
+  );
+
   /// [rootBundle.loadString] can synchronously decode large assets; defer slightly so frames stay light.
   static const Duration _startupBundleLoadDelay = Duration(milliseconds: 120);
 
@@ -4362,6 +4380,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     // Startup order (after first frame + short yield): customers → product
     // refresh → quote maintenance → scanner focus (after UI-heavy work).
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      _quoteDiag('startup post-frame BEGIN');
       await Future<void>.delayed(_startupDeferAfterFirstFrame);
       if (!mounted) return;
       await _loadCustomersFromAssets();
@@ -4370,7 +4389,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       unawaited(_loadProductsOnStartup());
       try {
         final beforeId = _currentQuoteId;
+        final beforeLines = _orderLines.length;
+        _quoteDiag(
+          'startup prune-all ENTER beforeId=$beforeId beforeLines=$beforeLines',
+        );
         await _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers();
+        _quoteDiag(
+          'startup prune-all EXIT beforeId=$beforeId afterId=$_currentQuoteId '
+          'beforeLines=$beforeLines afterLines=${_orderLines.length}',
+        );
         if (kDebugMode && _quoteImportExportEmptyDebug) {
           final idx = await _loadQuoteIndex();
           _debugLogQuoteImportExport(
@@ -4380,8 +4407,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
       } catch (e, st) {
         debugPrint('[Startup] prune-all failed: $e\n$st');
+        _quoteDiag('startup prune-all FAILED error=$e');
       }
       _discardWorkingOrderIfNoCustomerSelected();
+      _quoteDiag('startup after discardWorkingOrderIfNoCustomerSelected');
       if (!mounted) return;
       _scannerStartupRefocusEnabled = true;
       _requestScannerFocus();
@@ -4392,6 +4421,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           if (!_scannerFocusNode.hasFocus) _requestScannerFocus();
         });
       }
+      _quoteDiag('startup post-frame END');
     });
 
     _scannerFocusNode.addListener(() {
@@ -4484,6 +4514,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   void _perfLog(String message) {
     if (!_scanPerfDebug) return;
     debugPrint('[ScanPerf] $message');
+  }
+
+  /// Temporary Create-Quote regression diagnostics ([QuoteDiag]).
+  /// Easy to remove: delete this helper and all `_quoteDiag(` / `reason:` call sites.
+  void _quoteDiag(String message) {
+    debugPrint(
+      '[QuoteDiag] $message '
+      'ts=${DateTime.now().toIso8601String()} '
+      'customer=${_selectedCustomer?.id} '
+      'bucket=$_activeQuoteBucketKey '
+      'currentId=$_currentQuoteId '
+      'lines=${_orderLines.length}',
+    );
   }
 
   /// Debug-only: labels which `setState` ran (gated by [_kScanRebuildInstrumentationEnabled]).
@@ -5016,23 +5059,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // Delay slightly to avoid racing with the user's attempt to focus another
       // text field (which can leave the keyboard suppressed).
       _scannerFocusHideKeyboardTimer?.cancel();
-      _scannerFocusHideKeyboardTimer = Timer(const Duration(milliseconds: 60), () {
-        _scannerFocusHideKeyboardTimer = null;
-        if (_suspendScannerFocusRecovery) return;
-        if (!mounted || _editDialogOpen) return;
-        if (!_scannerFocusNode.hasFocus) return;
+      _scannerFocusHideKeyboardTimer = Timer(
+        const Duration(milliseconds: 60),
+        () {
+          _scannerFocusHideKeyboardTimer = null;
+          if (_suspendScannerFocusRecovery) return;
+          if (!mounted || _editDialogOpen) return;
+          if (!_scannerFocusNode.hasFocus) return;
 
-        final hidePrimary = FocusManager.instance.primaryFocus;
-        if (hidePrimary != _scannerFocusNode) return;
+          final hidePrimary = FocusManager.instance.primaryFocus;
+          if (hidePrimary != _scannerFocusNode) return;
 
-        // If the app already moved focus into a normal entry field, don't hide
-        // the keyboard.
-        if (_quickEntryFocusNode.hasFocus || _quoteNameFocusNode.hasFocus) {
-          return;
-        }
+          // If the app already moved focus into a normal entry field, don't hide
+          // the keyboard.
+          if (_quickEntryFocusNode.hasFocus || _quoteNameFocusNode.hasFocus) {
+            return;
+          }
 
-        SystemChannels.textInput.invokeMethod('TextInput.hide');
-      });
+          SystemChannels.textInput.invokeMethod('TextInput.hide');
+        },
+      );
     } finally {
       _scannerFocusReclaimInFlight = false;
     }
@@ -5308,10 +5354,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final bytes = _windowsErrorScanBytes;
         if (bytes != null) {
           if (!_errorScanPlayerSourceReady) {
-            await errorScan.setSourceBytes(
-              bytes,
-              mimeType: 'audio/mpeg',
-            );
+            await errorScan.setSourceBytes(bytes, mimeType: 'audio/mpeg');
             if (!mounted) return;
             _errorScanPlayerSourceReady = true;
           } else {
@@ -5370,14 +5413,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return digits.isNotEmpty ? digits : trimmed.toUpperCase();
   }
 
-  String _normalizeBucketLookup(String value) {
-    var normalized = value.trim().toLowerCase();
-    normalized = normalized.replaceAll(RegExp(r"[`´’']"), "'");
-    normalized = normalized.replaceAll('&', ' and ');
-    normalized = normalized.replaceAll(RegExp(r'[^a-z0-9]+'), ' ');
-    normalized = normalized.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return normalized;
-  }
+  String _normalizeBucketLookup(String value) =>
+      normalizeBucketLookupKey(value);
 
   /// Single canonical bucket key for routing, index matching, export grouping, and import reuse.
   /// Blank/legacy keys normalize to the default Everyday bucket (see [_defaultQuoteBucketKey]).
@@ -5545,6 +5582,45 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return false;
   }
 
+  String _summerRouteResolveBranch(Product product) {
+    final fromProductType = product.productType.trim();
+    final fromCategory = product.category.trim();
+    if (_isAbsentProductType(product.productType)) {
+      return 'absent_product_type_default_everyday';
+    }
+    if (fromProductType.isNotEmpty) {
+      final typeNorm = _normalizeBucketLookup(fromProductType);
+      if (_quoteBucketsByRawType.containsKey(typeNorm)) {
+        return 'product_type_map_hit norm="$typeNorm"';
+      }
+      if (fromCategory.isNotEmpty) {
+        final catNorm = _normalizeBucketLookup(fromCategory);
+        if (_quoteBucketsByRawType.containsKey(catNorm)) {
+          return 'product_type_MISS_then_category_HIT '
+              'typeNorm="$typeNorm" catNorm="$catNorm"';
+        }
+        return 'product_type_MISS_and_category_MISS '
+            'typeNorm="$typeNorm" catNorm="$catNorm" -> default_everyday';
+      }
+      if (_containsPrideToken(fromProductType)) {
+        return 'product_type_MISS_then_pride_token typeNorm="$typeNorm"';
+      }
+      return 'product_type_MISS_no_category typeNorm="$typeNorm" -> default_everyday';
+    }
+    if (fromCategory.isNotEmpty) {
+      final catNorm = _normalizeBucketLookup(fromCategory);
+      if (_quoteBucketsByRawType.containsKey(catNorm)) {
+        return 'category_fallback_hit norm="$catNorm"';
+      }
+      return 'category_fallback_MISS norm="$catNorm" -> default_everyday';
+    }
+    if (_containsPrideToken(fromProductType) ||
+        _containsPrideToken(fromCategory)) {
+      return 'pride_token';
+    }
+    return 'default_everyday';
+  }
+
   QuoteBucketDefinition _resolveQuoteBucketForProduct(Product product) {
     final fromProductType = product.productType.trim();
     if (_isAbsentProductType(product.productType)) {
@@ -5572,6 +5648,46 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     return _defaultQuoteBucketDefinition;
+  }
+
+  bool _isSummerRouteDiagProduct(Product product) {
+    final blob =
+        '${product.productType} ${product.category} ${product.subCategory}'
+            .toUpperCase();
+    return blob.contains('SUMMER') || blob.contains('SPRING');
+  }
+
+  void _logSummerRouteDiag({
+    required Product product,
+    required String phase,
+    required QuoteBucketDefinition bucket,
+    required String branch,
+    String? currentBucketBefore,
+    String? currentQuoteIdBefore,
+    String? resultingQuoteId,
+  }) {
+    if (!_isSummerRouteDiagProduct(product)) return;
+    final rawType = product.productType;
+    final normType = _isAbsentProductType(rawType)
+        ? '(absent/blank/0)'
+        : _normalizeBucketLookup(rawType.trim());
+    debugPrint(
+      '[SummerRouteDiag] $phase '
+      'item=${product.itemNumber} '
+      'rawProductType="$rawType" '
+      'rawCategory="${product.category}" '
+      'rawSubCategory="${product.subCategory}" '
+      'normalizedProductType="$normType" '
+      'targetBucketKey=${bucket.bucketKey} '
+      'targetBucketLabel=${bucket.displayLabel} '
+      'logicalBucket=${_logicalQuoteBucketKey(bucket.bucketKey)} '
+      'currentBucketBefore=${currentBucketBefore ?? _activeQuoteBucketKey} '
+      'currentQuoteIdBefore=${currentQuoteIdBefore ?? _currentQuoteId} '
+      'routingBranch=$branch '
+      'resultingBucket=$_activeQuoteBucketKey '
+      'resultingQuoteId=${resultingQuoteId ?? _currentQuoteId} '
+      'lineCount=${_orderLines.length}',
+    );
   }
 
   /// Stable prefix for route keys when [Customer.id] is blank (name-scoped fallback).
@@ -5631,6 +5747,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required Customer customer,
     required String bucketKey,
   }) async {
+    _quoteDiag(
+      '_findExistingQuoteIdForCustomerBucket ENTER '
+      'soughtCustomer=${customer.id} soughtBucket=$bucketKey',
+    );
     final sought = _logicalQuoteBucketKey(bucketKey);
     final infos = await _loadQuoteIndex();
     final dir = await _getQuotesDirectory();
@@ -5642,7 +5762,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       matches.add(info);
     }
-    if (matches.isEmpty) return null;
+    if (matches.isEmpty) {
+      _quoteDiag(
+        '_findExistingQuoteIdForCustomerBucket EXIT found=null matches=0',
+      );
+      return null;
+    }
     for (final info in matches) {
       final f = File('${dir.path}/quote_${info.id}.json');
       if (!await f.exists()) continue;
@@ -5651,6 +5776,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           jsonDecode(await f.readAsString()) as Map,
         );
         if (!persistedQuoteDataIsEmptyForReuse(data)) {
+          _quoteDiag(
+            '_findExistingQuoteIdForCustomerBucket EXIT '
+            'foundId=${info.id} emptiness=non-empty '
+            'reason=prefer_non_empty_match',
+          );
           return info.id;
         }
       } catch (_) {}
@@ -5663,10 +5793,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           jsonDecode(await f.readAsString()) as Map,
         );
         if (persistedQuoteDataIsEmptyForReuse(data)) {
+          _quoteDiag(
+            '_findExistingQuoteIdForCustomerBucket EXIT '
+            'foundId=${info.id} emptiness=empty '
+            'reason=fallback_empty_match',
+          );
           return info.id;
         }
       } catch (_) {}
     }
+    _quoteDiag(
+      '_findExistingQuoteIdForCustomerBucket EXIT '
+      'foundId=${matches.first.id} emptiness=unknown '
+      'reason=matches_first_fallback',
+    );
     return matches.first.id;
   }
 
@@ -5675,6 +5815,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required Customer customer,
     required String bucketKey,
   }) async {
+    _quoteDiag(
+      '_findEmptyPersistedQuoteIdForCustomerBucket ENTER '
+      'soughtCustomer=${customer.id} soughtBucket=$bucketKey',
+    );
     final sought = _logicalQuoteBucketKey(bucketKey);
     final infos = await _loadQuoteIndex();
     final dir = await _getQuotesDirectory();
@@ -5690,10 +5834,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           jsonDecode(await f.readAsString()) as Map,
         );
         if (persistedQuoteDataIsEmptyForReuse(data)) {
+          _quoteDiag(
+            '_findEmptyPersistedQuoteIdForCustomerBucket EXIT '
+            'foundId=${info.id} emptiness=empty',
+          );
           return info.id;
         }
       } catch (_) {}
     }
+    _quoteDiag('_findEmptyPersistedQuoteIdForCustomerBucket EXIT found=null');
     return null;
   }
 
@@ -5724,6 +5873,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// active index (so Load Quote reflects [quotes_active.json] after cleanup).
   Future<void>
   _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers() async {
+    _quoteDiag(
+      '_pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers ENTER',
+    );
     final snapshot = await _loadQuoteIndex();
     final seenRoute = <String>{};
     for (final info in snapshot) {
@@ -5732,6 +5884,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!seenRoute.add(key)) continue;
       await _pruneSupersededEmptyDuplicateQuotesForCustomer(stub);
     }
+    _quoteDiag(
+      '_pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers EXIT',
+    );
   }
 
   /// Removes extra active index rows / files for the same logical customer + bucket when only
@@ -5739,6 +5894,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Future<void> _pruneSupersededEmptyDuplicateQuotesForCustomer(
     Customer customer,
   ) async {
+    final beforeId = _currentQuoteId;
+    final beforeLines = _orderLines.length;
+    _quoteDiag(
+      '_pruneSupersededEmptyDuplicateQuotesForCustomer ENTER '
+      'soughtCustomer=${customer.id} beforeId=$beforeId beforeLines=$beforeLines',
+    );
     try {
       final dir = await _getQuotesDirectory();
       final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
@@ -5825,7 +5986,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
       }
 
-      if (idsToRemove.isEmpty) return;
+      if (idsToRemove.isEmpty) {
+        _quoteDiag(
+          '_pruneSupersededEmptyDuplicateQuotesForCustomer EXIT '
+          'soughtCustomer=${customer.id} removedCount=0 '
+          'beforeId=$beforeId afterId=$_currentQuoteId '
+          'beforeLines=$beforeLines afterLines=${_orderLines.length}',
+        );
+        return;
+      }
 
       _debugLogQuoteImportExport(
         '[QuoteImport] pruneEmptyDupes customer="${customer.displayName}" '
@@ -5877,13 +6046,31 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '[QuoteImport] prune repoint current '
           'from=$_currentQuoteId to=$rep mounted=$mounted',
         );
+        _quoteDiag(
+          '_pruneSupersededEmptyDuplicateQuotesForCustomer REPOINT '
+          'from=$_currentQuoteId to=$rep '
+          'reason=prune_removed_empty_current_repoint_to_non_empty',
+        );
         // Always sync workspace when the current id was pruned so [_saveQuote]
         // cannot resurrect a removed row/file. [syncWorkspaceIfUnmounted] applies
         // in-memory state without setState when the widget is between frames.
-        await _loadQuoteById(rep, syncWorkspaceIfUnmounted: true);
+        await _loadQuoteById(
+          rep,
+          syncWorkspaceIfUnmounted: true,
+          reason: 'prune_repoint_current_to_non_empty',
+        );
       }
+      _quoteDiag(
+        '_pruneSupersededEmptyDuplicateQuotesForCustomer EXIT '
+        'soughtCustomer=${customer.id} removedCount=${idsToRemove.length} '
+        'beforeId=$beforeId afterId=$_currentQuoteId '
+        'beforeLines=$beforeLines afterLines=${_orderLines.length}',
+      );
     } catch (e) {
       debugPrint('[QuoteImport] pruneEmptyDupes failed: $e');
+      _quoteDiag(
+        '_pruneSupersededEmptyDuplicateQuotesForCustomer FAILED error=$e',
+      );
     }
   }
 
@@ -5902,8 +6089,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Future<void> _ensureRoutingForProduct(Product product) async {
+    final beforeId = _currentQuoteId;
+    final beforeLines = _orderLines.length;
+    final beforeBucket = _activeQuoteBucketKey;
+    _quoteDiag(
+      '_ensureRoutingForProduct ENTER item=${product.itemNumber} '
+      'beforeId=$beforeId beforeLines=$beforeLines',
+    );
     final customer = _selectedCustomer;
     final bucket = _resolveQuoteBucketForProduct(product);
+    final resolveBranch = _summerRouteResolveBranch(product);
+    _logSummerRouteDiag(
+      product: product,
+      phase: 'ensureRouting_ENTER',
+      bucket: bucket,
+      branch: resolveBranch,
+      currentBucketBefore: beforeBucket,
+      currentQuoteIdBefore: beforeId,
+    );
     final rawType = product.productType;
     final normType = _isAbsentProductType(product.productType)
         ? '(absent/blank/0)'
@@ -5949,6 +6152,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '[Routing] No customer selected — routing/switch skipped (no order line added)',
         );
       }
+      _quoteDiag(
+        '_ensureRoutingForProduct EXIT reason=no_customer '
+        'afterId=$_currentQuoteId afterLines=${_orderLines.length}',
+      );
       return;
     }
 
@@ -5962,34 +6169,38 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       // Import / scan: user is already on this bucket but never adopted a saved id
       // (e.g. [_currentQuoteId] still null). Reuse an empty on-disk starter for this
       // customer + bucket so [_saveQuote] updates that file instead of minting a new id.
-      // After CSV import, reuse the persisted quote for this bucket (non–import runs only)
-      // so scanning appends instead of saving under the wrong id.
+      // Do NOT adopt a non-empty saved quote here — that pulled prior orders (and
+      // full-catalog test quotes) into a freshly created empty workspace.
       if (_currentQuoteId == null) {
-        if (!_orderCsvImportInProgress) {
-          final existingId = await _findExistingQuoteIdForCustomerBucket(
-            customer: customer,
-            bucketKey: _activeQuoteBucketKey,
-          );
-          if (existingId != null) {
-            await _loadQuoteById(existingId);
+        _quoteDiag(
+          '_ensureRoutingForProduct alreadyOnTarget skip_non_empty_adopt '
+          'reason=create_quote_safe_empty_starter_only',
+        );
+        final emptyReuseId = await _findEmptyPersistedQuoteIdForCustomerBucket(
+          customer: customer,
+          bucketKey: _activeQuoteBucketKey,
+        );
+        _quoteDiag(
+          '_ensureRoutingForProduct alreadyOnTarget emptyReuseId=$emptyReuseId '
+          'reason=adopt_empty_starter_when_currentId_null',
+        );
+        if (emptyReuseId != null) {
+          if (_orderLines.isEmpty) {
+            await _loadQuoteById(
+              emptyReuseId,
+              reason: 'ensureRouting_alreadyOnTarget_empty_reuse_load',
+            );
             if (!mounted) return;
-          }
-        }
-        if (_currentQuoteId == null) {
-          final emptyReuseId =
-              await _findEmptyPersistedQuoteIdForCustomerBucket(
-                customer: customer,
-                bucketKey: _activeQuoteBucketKey,
-              );
-          if (emptyReuseId != null) {
-            if (_orderLines.isEmpty) {
-              await _loadQuoteById(emptyReuseId);
-              if (!mounted) return;
-            } else {
-              _currentQuoteId = emptyReuseId;
-              if (_orderCsvImportInProgress) {
-                _orderImportTouchedQuoteIds.add(emptyReuseId);
-              }
+          } else {
+            final prevId = _currentQuoteId;
+            _currentQuoteId = emptyReuseId;
+            _quoteDiag(
+              '_ensureRoutingForProduct ASSIGN _currentQuoteId '
+              'from=$prevId to=$emptyReuseId '
+              'reason=empty_reuse_bind_id_only_lines_present',
+            );
+            if (_orderCsvImportInProgress) {
+              _orderImportTouchedQuoteIds.add(emptyReuseId);
             }
           }
         }
@@ -6010,6 +6221,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         targetLogicalBucket: targetId,
         normType: normType,
         note: 'alreadyOnTargetBucket',
+      );
+      _quoteDiag(
+        '_ensureRoutingForProduct EXIT reason=already_on_target '
+        'beforeId=$beforeId afterId=$_currentQuoteId '
+        'beforeLines=$beforeLines afterLines=${_orderLines.length}',
       );
       return;
     }
@@ -6039,6 +6255,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               '$tracePrefix Final target quote: "${_quoteNameController.text.trim()}"',
         );
       }
+      _quoteDiag(
+        '_ensureRoutingForProduct EXIT reason=same_route_key_no_switch '
+        'afterId=$_currentQuoteId afterLines=${_orderLines.length}',
+      );
       return;
     }
 
@@ -6073,7 +6293,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '[Routing] Existing quote found: yes (id=$existingQuoteId)',
         );
       }
-      await _loadQuoteById(existingQuoteId);
+      await _loadQuoteById(
+        existingQuoteId,
+        reason: 'ensureRouting_bucket_switch_reuse_existing',
+      );
       if (!mounted) return;
       if (bucketTrace) {
         _traceBucketRouteLine(
@@ -6097,6 +6320,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _setStateDebug('routing_after_load_bucket_quote', () {
         _status = 'Switched to ${bucket.displayLabel} quote';
       });
+      _quoteDiag(
+        '_ensureRoutingForProduct EXIT reason=bucket_switch_loaded_existing '
+        'beforeId=$beforeId afterId=$_currentQuoteId '
+        'beforeLines=$beforeLines afterLines=${_orderLines.length}',
+      );
       return;
     }
 
@@ -6133,6 +6361,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       targetLogicalBucket: targetId,
       normType: normType,
       note: 'startNewRoutedQuote',
+    );
+    _quoteDiag(
+      '_ensureRoutingForProduct EXIT reason=bucket_switch_started_new '
+      'beforeId=$beforeId afterId=$_currentQuoteId '
+      'beforeLines=$beforeLines afterLines=${_orderLines.length}',
     );
   }
 
@@ -6201,8 +6434,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _configuredRawQuoteBucketKeys.add(normalizedRawKey);
         _quoteBucketsByBucketKey[bucketKey] = definition;
       }
+      final summerKeys =
+          _quoteBucketsByRawType.keys
+              .where((k) => k.contains('summer') || k.contains('spring'))
+              .toList()
+            ..sort();
+      debugPrint(
+        '[SummerRouteDiag] bucket config loaded. '
+        'configuredProductTypeSortOrder=${(_configuredRawQuoteBucketKeys.toList()..sort()).join(' | ')}',
+      );
+      debugPrint(
+        '[SummerRouteDiag] summer/spring mapped norms=${summerKeys.join(' | ')} '
+        'bucketKeys=${_quoteBucketsByBucketKey.keys.where((k) => k.contains('summer')).join(' | ')}',
+      );
     } catch (_) {
       // Optional config; default fallback behavior applies if missing/invalid.
+      debugPrint('[SummerRouteDiag] bucket config load FAILED or skipped');
     }
   }
 
@@ -6226,7 +6473,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   String? _orderLineKeyFromPersistedQuoteLine(Map<String, dynamic> map) {
-    final item = normalizeItemNumber((map['itemNumber'] as String?)?.trim() ?? '');
+    final item = normalizeItemNumber(
+      (map['itemNumber'] as String?)?.trim() ?? '',
+    );
     if (item.isNotEmpty) return 'ITEM:$item';
     final upc = _normalizeUpcLookupKey((map['upc'] as String?)?.trim() ?? '');
     if (upc.isEmpty) return null;
@@ -6421,12 +6670,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final normalizedExportTypeKey = rawExportType.toUpperCase();
     final canonicalSystemType =
         normalizedExportTypeKey == 'ALL_EXPORTED_QUOTE_ITEMS'
-            ? 'ALL_EXPORTED_ITEMS'
-            : normalizedExportTypeKey == 'ITEMS_NOT_FOUND'
-            ? 'ITEMS_NOT_FOUND'
-            : normalizedExportTypeKey == 'ITEMS_WITHOUT_UPC'
-            ? 'ITEMS_WITHOUT_UPC'
-            : rawExportType;
+        ? 'ALL_EXPORTED_ITEMS'
+        : normalizedExportTypeKey == 'ITEMS_NOT_FOUND'
+        ? 'ITEMS_NOT_FOUND'
+        : normalizedExportTypeKey == 'ITEMS_WITHOUT_UPC'
+        ? 'ITEMS_WITHOUT_UPC'
+        : rawExportType;
     final pseudoQuoteName =
         '${_sanitizeOrderExportFileSegment(canonicalSystemType, ifEmpty: 'QUOTE')}_'
         '${now.year.toString().padLeft(4, '0')}_'
@@ -6456,27 +6705,29 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         '${quoteDate.day.toString().padLeft(2, '0')}';
     final timestamp = _formatExportTimestamp(exportTime);
 
-    final safeType = _sanitizeOrderExportFileSegment(quoteType, ifEmpty: 'QUOTE');
+    final safeType = _sanitizeOrderExportFileSegment(
+      quoteType,
+      ifEmpty: 'QUOTE',
+    );
     final safeCustomer = _sanitizeOrderExportFileSegment(
       customerName,
       ifEmpty: 'UNKNOWN_CUSTOMER',
     );
     final parsedSequence = int.tryParse(uniqueQuoteNumber.trim());
-    final safeUnique =
-        parsedSequence == null
-            ? '001'
-            : parsedSequence.toString().padLeft(3, '0');
+    final safeUnique = parsedSequence == null
+        ? '001'
+        : parsedSequence.toString().padLeft(3, '0');
 
     // Keep customer + timestamp in the filename even when clipping is needed.
-    final requiredTail = '_${datePart}_${safeUnique}_${safeCustomer}_$timestamp';
+    final requiredTail =
+        '_${datePart}_${safeUnique}_${safeCustomer}_$timestamp';
     final maxTypeLen =
         _kMaxExportCsvFilenameLength - '.csv'.length - requiredTail.length - 1;
-    final adjustedType =
-        maxTypeLen >= 5
-            ? (safeType.length > maxTypeLen
-                ? safeType.substring(0, maxTypeLen)
-                : safeType)
-            : 'QUOTE';
+    final adjustedType = maxTypeLen >= 5
+        ? (safeType.length > maxTypeLen
+              ? safeType.substring(0, maxTypeLen)
+              : safeType)
+        : 'QUOTE';
 
     return _clipExportCsvFilename(
       ensureCsvFilename('$adjustedType$requiredTail'),
@@ -6487,9 +6738,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     Map<String, dynamic> quoteData,
     DateTime fallback,
   ) {
-    final createdAt = DateTime.tryParse((quoteData['createdAt'] as String?) ?? '');
+    final createdAt = DateTime.tryParse(
+      (quoteData['createdAt'] as String?) ?? '',
+    );
     if (createdAt != null) return createdAt;
-    final updatedAt = DateTime.tryParse((quoteData['updatedAt'] as String?) ?? '');
+    final updatedAt = DateTime.tryParse(
+      (quoteData['updatedAt'] as String?) ?? '',
+    );
     if (updatedAt != null) return updatedAt;
     return fallback;
   }
@@ -6506,12 +6761,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required DateTime exportedOn,
   }) {
     final parsed = _extractQuoteNamingParts(quoteName);
-    final rawTypeCandidate =
-        parsed.quoteType.trim().isNotEmpty
-            ? parsed.quoteType
-            : ((quoteBucketLabel ?? quoteBucketKey ?? '').trim().isNotEmpty
-                ? '${(quoteBucketLabel ?? quoteBucketKey ?? '').trim()} QUOTE'
-                : 'QUOTE');
+    final rawTypeCandidate = parsed.quoteType.trim().isNotEmpty
+        ? parsed.quoteType
+        : ((quoteBucketLabel ?? quoteBucketKey ?? '').trim().isNotEmpty
+              ? '${(quoteBucketLabel ?? quoteBucketKey ?? '').trim()} QUOTE'
+              : 'QUOTE');
     final normalizedType = _sanitizeOrderExportFileSegment(
       rawTypeCandidate,
       ifEmpty: 'QUOTE',
@@ -6530,7 +6784,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     var filename = _buildQuoteExportCsvFilename(
       quoteType: normalizedType,
       quoteDate: parsed.quoteDate ?? quoteDate ?? exportedOn,
-      uniqueQuoteNumber: normalizedSequence.isEmpty ? '001' : normalizedSequence,
+      uniqueQuoteNumber: normalizedSequence.isEmpty
+          ? '001'
+          : normalizedSequence,
       customerName: resolvedCustomerName,
       exportedAt: exportedOn,
     );
@@ -6598,7 +6854,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final tsStart = timestampMatch.start;
       final ts = timestampMatch.group(1)!;
       var prefix = stem.substring(0, tsStart).replaceFirst(RegExp(r'_+$'), '');
-      if (!prefix.toUpperCase().contains('_${safeCustomerName.toUpperCase()}_')) {
+      if (!prefix.toUpperCase().contains(
+        '_${safeCustomerName.toUpperCase()}_',
+      )) {
         prefix = '${prefix}_$safeCustomerName';
       }
       rebuilt = '${prefix}_$ts.csv';
@@ -6808,14 +7066,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final whse2OutOfStock = (lineMap['whse2OutOfStock'] as bool?) ?? false;
     final whse1ComingSoon = (lineMap['whse1ComingSoon'] as bool?) ?? false;
     final whse2ComingSoon = (lineMap['whse2ComingSoon'] as bool?) ?? false;
-    final whse1AvailabilityDisplay =
-        _repairMojibakeText(
-          (lineMap['whse1AvailabilityDisplay'] as String?)?.trim() ?? '',
-        );
-    final whse2AvailabilityDisplay =
-        _repairMojibakeText(
-          (lineMap['whse2AvailabilityDisplay'] as String?)?.trim() ?? '',
-        );
+    final whse1AvailabilityDisplay = _repairMojibakeText(
+      (lineMap['whse1AvailabilityDisplay'] as String?)?.trim() ?? '',
+    );
+    final whse2AvailabilityDisplay = _repairMojibakeText(
+      (lineMap['whse2AvailabilityDisplay'] as String?)?.trim() ?? '',
+    );
     final minOrderQty = _quantityFromJson(lineMap['minOrderQty']);
     final caseQty = _quantityFromJson(lineMap['caseQty']);
     final listPrice = (lineMap['listPrice'] as num?)?.toDouble() ?? 0.0;
@@ -6882,14 +7138,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (isNumericItemLabel) {
         final candidateWidths =
             (_productsByItemNumber.keys
-                  .where(
-                    (k) =>
-                        k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
-                  )
-                  .map((k) => k.length)
-                  .toSet()
-                  .toList()
-                ..sort());
+                .where(
+                  (k) =>
+                      k.length > itemKey.length && RegExp(r'^\d+$').hasMatch(k),
+                )
+                .map((k) => k.length)
+                .toSet()
+                .toList()
+              ..sort());
         for (final width in candidateWidths) {
           if (width <= itemKey.length) continue;
           final padded = itemKey.padLeft(width, '0');
@@ -6949,21 +7205,21 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return out.join('\n');
   }
 
-  String _formatItemsNotFoundRowsCsv(
-    List<OrderImportItemsWithoutUpcRow> rows,
-  ) {
+  String _formatItemsNotFoundRowsCsv(List<OrderImportItemsWithoutUpcRow> rows) {
     final out = <String>['Item Number,Quantity'];
     for (final r in rows) {
-      out.add('${_csvEscape(r.itemNumber)},${_csvEscape(r.quantity.toString())}');
+      out.add(
+        '${_csvEscape(r.itemNumber)},${_csvEscape(r.quantity.toString())}',
+      );
     }
     return out.join('\n');
   }
 
   bool _itemsWithoutUpcRowIsNotFound(OrderImportItemsWithoutUpcRow row) {
-    final normalized = row.resolutionStatus
-        .trim()
-        .toUpperCase()
-        .replaceAll(RegExp(r'[^A-Z0-9]+'), '_');
+    final normalized = row.resolutionStatus.trim().toUpperCase().replaceAll(
+      RegExp(r'[^A-Z0-9]+'),
+      '_',
+    );
     if (normalized == 'NOT_FOUND') return true;
     if (normalized == 'ITEM_NOT_FOUND') return true;
     return normalized.contains('NOT_FOUND');
@@ -7038,8 +7294,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (decoded is! Map) return const [];
       final payload = Map<String, dynamic>.from(decoded);
       final storedCustomerId = (payload['customerId'] ?? '').toString().trim();
-      final storedCustomerName =
-          (payload['customerName'] ?? '').toString().trim();
+      final storedCustomerName = (payload['customerName'] ?? '')
+          .toString()
+          .trim();
       if (!_sameLogicalCustomerQuoteRows(
         customerIdA: customer.id,
         customerNameA: customer.displayName,
@@ -7445,11 +7702,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               if (n.isNotEmpty) quoteCustomerName = n;
             } catch (_) {}
           }
-          final poNumber = ((quoteData['poNumber'] as String?) ??
-                  (quoteData['po'] as String?) ??
-                  (quoteData['purchaseOrderNumber'] as String?) ??
-                  '')
-              .trim();
+          final poNumber =
+              ((quoteData['poNumber'] as String?) ??
+                      (quoteData['po'] as String?) ??
+                      (quoteData['purchaseOrderNumber'] as String?) ??
+                      '')
+                  .trim();
           final quoteLines =
               quoteData['lines'] as List<dynamic>? ??
               quoteData['items'] as List<dynamic>? ??
@@ -7501,14 +7759,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             customerFolderName: customerName,
             quoteBucketLabel:
                 (quoteData['quoteBucketLabel'] as String?)?.trim().isNotEmpty ==
-                        true
-                    ? (quoteData['quoteBucketLabel'] as String?)?.trim()
-                    : info.quoteBucketLabel,
+                    true
+                ? (quoteData['quoteBucketLabel'] as String?)?.trim()
+                : info.quoteBucketLabel,
             quoteBucketKey:
                 (quoteData['quoteBucketKey'] as String?)?.trim().isNotEmpty ==
-                        true
-                    ? (quoteData['quoteBucketKey'] as String?)?.trim()
-                    : info.quoteBucketKey,
+                    true
+                ? (quoteData['quoteBucketKey'] as String?)?.trim()
+                : info.quoteBucketKey,
             quoteDate: _quoteDateFromMapOrFallback(quoteData, exportedOn),
             exportedOn: exportedOn,
           );
@@ -7596,10 +7854,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _csvEscape(pricing?.psCol ?? ''),
           _csvEscape(matchedProduct?.isNewRelease == true ? 'YES' : ''),
           _csvEscape(
-            matchedProduct == null ? '' : _availabilityLabelForWhse1(matchedProduct),
+            matchedProduct == null
+                ? ''
+                : _availabilityLabelForWhse1(matchedProduct),
           ),
           _csvEscape(
-            matchedProduct == null ? '' : _availabilityLabelForWhse2(matchedProduct),
+            matchedProduct == null
+                ? ''
+                : _availabilityLabelForWhse2(matchedProduct),
           ),
           _csvEscape(matchedProduct?.productType ?? ''),
           _csvEscape(matchedProduct?.category ?? ''),
@@ -8010,9 +8272,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final rowQuantity = r.quantity;
       final explicitUpc = r.upc.trim();
       print('[ImportPrepare] processing item=$item upc=$explicitUpc');
-      print(
-        '[ImportPrepare] row item=$item upc=$explicitUpc qty=$rowQuantity',
-      );
+      print('[ImportPrepare] row item=$item upc=$explicitUpc qty=$rowQuantity');
       final hasExplicitUpc = explicitUpc.isNotEmpty;
       final matchedByUpc = hasExplicitUpc ? lookupByUpcOnly(explicitUpc) : null;
       final matchedByItemNumber = lookupByItemNumberOnly(item);
@@ -8525,9 +8785,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         );
         debugPrint('[ImportOrder] file name: ${file.name}');
         debugPrint('[ImportOrder] path: ${file.path ?? '(none)'}');
-        debugPrint(
-          '[ImportOrder] bytes length: ${file.bytes?.length ?? 0}',
-        );
+        debugPrint('[ImportOrder] bytes length: ${file.bytes?.length ?? 0}');
 
         final ext = p.extension(file.name).toLowerCase();
         final isExcel = _orderImportIsExcelFileName(file.name);
@@ -8574,15 +8832,15 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     );
                   }
                 }();
-          debugPrint('[ImportOrder] parse complete: rows=${outcome.rows.length}');
+          debugPrint(
+            '[ImportOrder] parse complete: rows=${outcome.rows.length}',
+          );
           combinedRows.addAll(outcome.rows);
           allParseSkipped.addAll(outcome.skippedRows);
           contributingFileNames.add(file.name);
         } on FormatException catch (e) {
           if (!mounted) return;
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(
+          ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
                 '${file.name}: ${e.message} '
@@ -8692,7 +8950,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _lastItemsWithoutUpcRows,
       );
       if (skippedRows.isNotEmpty) {
-        _lastItemsNotImportedRows = List<OrderImportSkippedRow>.from(skippedRows);
+        _lastItemsNotImportedRows = List<OrderImportSkippedRow>.from(
+          skippedRows,
+        );
         _lastItemsNotImportedRowsCustomerId = _selectedCustomer!.id;
         _lastItemsNotImportedRowsCustomerName = _selectedCustomer!.displayName;
       } else {
@@ -8703,7 +8963,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       final quoteIdToSync = _currentQuoteId;
       if (quoteIdToSync != null) {
-        await _loadQuoteById(quoteIdToSync);
+        await _loadQuoteById(
+          quoteIdToSync,
+          reason: 'import_order_reload_after_save',
+        );
         if (kDebugMode) {
           debugPrint('[ImportSync] quote reloaded id=$quoteIdToSync');
         }
@@ -8737,9 +9000,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       debugPrint('[ImportOrder] import failed: $e');
       debugPrint('[OrderImport] failed: $e\n$st');
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             'Import failed: ${e is FormatException ? e.message : e.toString()}',
@@ -8897,8 +9158,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<void> _debugLoadCustomerWalkOrderCsv() async {
     try {
-      final rawCsv =
-          await rootBundle.loadString('assets/data/customer_walk_order.csv');
+      final rawCsv = await rootBundle.loadString(
+        'assets/data/customer_walk_order.csv',
+      );
       final lines = const LineSplitter().convert(rawCsv);
       List<List<dynamic>> rows;
       try {
@@ -9053,13 +9315,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   void _openWalkOrderViewer() {
     final snapshot =
         UnmodifiableMapView<String, Map<String, CustomerWalkOrderRow>>(
-      _customerWalkOrderByCustomerAndItem.map(
-        (k, v) => MapEntry(
-          k,
-          UnmodifiableMapView<String, CustomerWalkOrderRow>(v),
-        ),
-      ),
-    );
+          _customerWalkOrderByCustomerAndItem.map(
+            (k, v) => MapEntry(
+              k,
+              UnmodifiableMapView<String, CustomerWalkOrderRow>(v),
+            ),
+          ),
+        );
     Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (context) =>
@@ -9752,9 +10014,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           );
         },
       );
-      debugPrint(
-        '[DependentsDiag] closing picker dialog result=$picked',
-      );
+      debugPrint('[DependentsDiag] closing picker dialog result=$picked');
       return picked;
     } finally {
       debugPrint(
@@ -9768,9 +10028,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   Future<void> _showSelectCustomerDialog() async {
+    _quoteDiag('_showSelectCustomerDialog ENTER');
     final picked = await _runCustomerPickerDialog();
     if (!mounted) return;
     debugPrint('[WalkOrder] sync source: customer picker');
+    final beforeId = _currentQuoteId;
+    final beforeLines = _orderLines.length;
     setState(() {
       _selectedCustomer = picked;
       _syncCustomerWalkOrderEnabledForCustomer(picked);
@@ -9778,6 +10041,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ? 'Customer cleared'
           : 'Customer: ${picked.displayName}';
     });
+    _quoteDiag(
+      '_showSelectCustomerDialog AFTER setState picked=${picked?.id} '
+      'beforeId=$beforeId afterId=$_currentQuoteId '
+      'beforeLines=$beforeLines afterLines=${_orderLines.length} '
+      'note=does_not_call_loadQuoteById',
+    );
     unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
     if (!mounted) return;
     debugPrint(
@@ -9785,11 +10054,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      _quoteDiag(
+        '_showSelectCustomerDialog post-frame scanner focus '
+        'currentId=$_currentQuoteId lines=${_orderLines.length}',
+      );
       _requestScannerFocus();
     });
     debugPrint(
       '[DependentsDiag] _showSelectCustomerDialog: after _requestScannerFocus()',
     );
+    _quoteDiag('_showSelectCustomerDialog EXIT');
   }
 
   Product? _findProduct(String input) {
@@ -9823,10 +10097,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return mounted && _selectedCustomer != null;
   }
 
-  void _showExactLookupMessageForQuery(
-    String query, {
-    required bool scanTab,
-  }) {
+  void _showExactLookupMessageForQuery(String query, {required bool scanTab}) {
     final trimmed = query.trim();
     final hasPartialMatches =
         trimmed.isNotEmpty &&
@@ -10135,12 +10406,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
       await _ensureRoutingForProduct(product);
       final bucket = _resolveQuoteBucketForProduct(product);
+      _logSummerRouteDiag(
+        product: product,
+        phase: 'processScan_after_routing',
+        bucket: bucket,
+        branch: _summerRouteResolveBranch(product),
+      );
       final added = _addProduct(
         product,
         raw,
         bucket: bucket,
         scheduleScanTabOrderRowReveal: true,
         feedbackSource: source,
+      );
+      _logSummerRouteDiag(
+        product: product,
+        phase: 'processScan_after_add',
+        bucket: bucket,
+        branch: added ? 'item_added' : 'add_blocked',
       );
       _restoreScanFieldFocus();
       if (sampleId > 0) {
@@ -10351,7 +10634,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (!added) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
-          _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntryAddFailed');
+          _requestScannerFocusAfterManualEntry(
+            debugLabel: 'quickEntryAddFailed',
+          );
         });
         return;
       }
@@ -10440,7 +10725,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   void _forceScannerFocusAfterInvalidQuickEntry() {
     debugPrint('[ManualEntry][InvalidFocusRestore] start');
     if (!mounted) {
-      debugPrint('[ManualEntry][InvalidFocusRestore] return early: not mounted');
+      debugPrint(
+        '[ManualEntry][InvalidFocusRestore] return early: not mounted',
+      );
       return;
     }
     if (!_scanTabActive) {
@@ -10631,6 +10918,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (_selectedCustomer != null) return;
     if (_currentQuoteId == null && _orderLines.isEmpty) return;
 
+    _quoteDiag(
+      '_discardWorkingOrderIfNoCustomerSelected ENTER '
+      'clearing currentId=$_currentQuoteId lines=${_orderLines.length}',
+    );
     void clear() {
       _currentQuoteId = null;
       _activeQuoteBucketKey = _defaultQuoteBucketDefinition.bucketKey;
@@ -10653,6 +10944,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } else {
       clear();
     }
+    _quoteDiag('_discardWorkingOrderIfNoCustomerSelected EXIT');
     if (showMessage && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please select a customer first.')),
@@ -10691,6 +10983,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<void> _confirmNewQuote() async {
     if (!mounted) return;
+    _quoteDiag('_confirmNewQuote ENTER');
     // Create Quote must not require a pre-selected customer: open the picker first,
     // then continue into the same quote flow. Working-order paths still use
     // [_requireSelectedCustomerForWorkingOrder].
@@ -10699,10 +10992,18 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Load customers CSV first.')),
         );
+        _quoteDiag('_confirmNewQuote EXIT reason=no_customers_loaded');
         return;
       }
+      _quoteDiag('_confirmNewQuote opening customer picker');
       await _showSelectCustomerDialog();
-      if (!mounted || _selectedCustomer == null) return;
+      if (!mounted || _selectedCustomer == null) {
+        _quoteDiag('_confirmNewQuote EXIT reason=customer_picker_cancelled');
+        return;
+      }
+      _quoteDiag(
+        '_confirmNewQuote after customer picker selected=${_selectedCustomer?.id}',
+      );
     }
 
     final hasItems = _orderLines.isNotEmpty;
@@ -10733,18 +11034,39 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       },
     );
 
-    if (confirm != true || !mounted) return;
+    if (confirm != true || !mounted) {
+      _quoteDiag('_confirmNewQuote EXIT reason=confirm_cancelled');
+      return;
+    }
 
-    if (hasItems) await _saveQuote();
+    if (hasItems) {
+      _quoteDiag('_confirmNewQuote saving current order before new quote');
+      await _saveQuote();
+    }
     if (!mounted) return;
 
+    _quoteDiag(
+      '_confirmNewQuote calling _startNewQuote '
+      'customer=${customerForNewQuote.id} hasItems=$hasItems',
+    );
     await _startNewQuote(customerForNewQuote);
+    _quoteDiag(
+      '_confirmNewQuote EXIT after _startNewQuote '
+      'currentId=$_currentQuoteId lines=${_orderLines.length}',
+    );
   }
 
   Future<void> _startNewQuote(
     Customer customer, {
     QuoteBucketDefinition? initialBucket,
   }) async {
+    final beforeId = _currentQuoteId;
+    final beforeLines = _orderLines.length;
+    _quoteDiag(
+      '_startNewQuote ENTER customer=${customer.id} '
+      'beforeId=$beforeId beforeLines=$beforeLines '
+      'initialBucket=${initialBucket?.bucketKey}',
+    );
     final defaultName = await _generateDefaultQuoteName();
     final bucket = initialBucket ?? _defaultQuoteBucketDefinition;
     final isEverydayBucket =
@@ -10772,6 +11094,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _activeQuoteBucketKey = bucket.bucketKey;
       _activeQuoteBucketLabel = bucket.displayLabel;
     });
+    _quoteDiag(
+      '_startNewQuote AFTER clear workspace '
+      'beforeId=$beforeId afterId=$_currentQuoteId '
+      'beforeLines=$beforeLines afterLines=${_orderLines.length} '
+      'name=$initialName',
+    );
     unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
 
     _requestScannerFocus();
@@ -10784,10 +11112,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      _quoteDiag(
+        '_startNewQuote post-frame '
+        'currentId=$_currentQuoteId lines=${_orderLines.length} '
+        'quoteNameFocus=${_quoteNameFocusNode.hasFocus} '
+        'quickEntryFocus=${_quickEntryFocusNode.hasFocus}',
+      );
       if (!_quoteNameFocusNode.hasFocus && !_quickEntryFocusNode.hasFocus) {
         _scheduleScannerRefocus();
       }
     });
+    _quoteDiag('_startNewQuote EXIT');
   }
 
   Future<Directory> _getQuotesDirectory() async {
@@ -11237,13 +11572,14 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         quoteData: quoteData,
         customerFolderName: info.customerName,
         quoteBucketLabel:
-            (quoteData['quoteBucketLabel'] as String?)?.trim().isNotEmpty == true
-                ? (quoteData['quoteBucketLabel'] as String?)?.trim()
-                : info.quoteBucketLabel,
+            (quoteData['quoteBucketLabel'] as String?)?.trim().isNotEmpty ==
+                true
+            ? (quoteData['quoteBucketLabel'] as String?)?.trim()
+            : info.quoteBucketLabel,
         quoteBucketKey:
             (quoteData['quoteBucketKey'] as String?)?.trim().isNotEmpty == true
-                ? (quoteData['quoteBucketKey'] as String?)?.trim()
-                : info.quoteBucketKey,
+            ? (quoteData['quoteBucketKey'] as String?)?.trim()
+            : info.quoteBucketKey,
         quoteDate: _quoteDateFromMapOrFallback(quoteData, exportedOn),
         exportedOn: exportedOn,
       );
@@ -11563,7 +11899,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return p.category.trim() == _kEcatalogDecorAndGiftwareCategory;
     }
     if (m == 'seasonal') {
-      return _kEcatalogSeasonalLabelToProductType.values.contains(pt);
+      return isEcatalogSeasonalProductType(pt);
     }
     if (m == 'sale') return p.isPs;
     return true;
@@ -11577,7 +11913,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required bool previouslyOrderedOnly,
   }) {
     if (!_productMatchesEcatalogMerchandising(p)) return false;
-    if (inOrderOnly && !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
+    if (inOrderOnly &&
+        !_orderLineByKey.containsKey(_orderLineKeyForProduct(p))) {
       return false;
     }
     if (inStockOnly && !_isProductInStockForEcatalog(p)) return false;
@@ -11825,7 +12162,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (previouslyOrderedOnly &&
         selectedCustomerId == dbgPrevOrderedCustomer &&
         cat == dbgPrevOrderedCategory) {
-      final walk302021 = _customerWalkOrderByCustomerAndItem[dbgPrevOrderedCustomer];
+      final walk302021 =
+          _customerWalkOrderByCustomerAndItem[dbgPrevOrderedCustomer];
       final walkNorm302021 = <String, CustomerWalkOrderRow>{};
       if (walk302021 != null) {
         for (final e in walk302021.entries) {
@@ -11856,7 +12194,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         final row = walk302021 == null
             ? null
             : (walk302021[itemRaw] ??
-                walkNorm302021[normalizeItemNumber(itemRaw)]);
+                  walkNorm302021[normalizeItemNumber(itemRaw)]);
         debugPrint(
           '[PrevOrderedDebug] item=$itemRaw historyPo=$historyPo '
           'walk302021.containsKey(itemNumber)=$walkMapHasKey '
@@ -11883,8 +12221,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         walkOrderByItemForPreviouslyOrdered = m;
         walkOrderNormalizedForPreviouslyOrdered = {};
         for (final e in m.entries) {
-          walkOrderNormalizedForPreviouslyOrdered[
-              normalizeItemNumber(e.key)] = e.value;
+          walkOrderNormalizedForPreviouslyOrdered[normalizeItemNumber(e.key)] =
+              e.value;
         }
       }
     }
@@ -11907,7 +12245,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       if (previouslyOrderedOnly) {
         final historyPo = _isPreviouslyOrdered(p);
         final rawItem = p.itemNumber.trim();
-        final inWalkCsv = walkOrderByItemForPreviouslyOrdered != null &&
+        final inWalkCsv =
+            walkOrderByItemForPreviouslyOrdered != null &&
             (walkOrderByItemForPreviouslyOrdered.containsKey(rawItem) ||
                 walkOrderNormalizedForPreviouslyOrdered!.containsKey(
                   normalizeItemNumber(rawItem),
@@ -11916,9 +12255,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             walkOrderByItemForPreviouslyOrdered != null) {
           if (!historyPo && !inWalkCsv) continue;
           if (inWalkCsv && !historyPo) {
-            debugPrint(
-              '[PrevOrderedDebug] kept by walk CSV item=$rawItem',
-            );
+            debugPrint('[PrevOrderedDebug] kept by walk CSV item=$rawItem');
           }
         } else if (!historyPo) {
           continue;
@@ -11939,14 +12276,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         normalizedByItem[normalizeItemNumber(entry.key)] = entry.value;
       }
 
-      final indexed = out.indexed.map((entry) {
-        final product = entry.$2;
-        final rawKey = product.itemNumber.trim();
-        final row =
-            byItem[rawKey] ?? normalizedByItem[normalizeItemNumber(rawKey)];
-        if (row?.walkPosition != null) positionedCount++;
-        return (index: entry.$1, product: product, row: row);
-      }).toList(growable: false);
+      final indexed = out.indexed
+          .map((entry) {
+            final product = entry.$2;
+            final rawKey = product.itemNumber.trim();
+            final row =
+                byItem[rawKey] ?? normalizedByItem[normalizeItemNumber(rawKey)];
+            if (row?.walkPosition != null) positionedCount++;
+            return (index: entry.$1, product: product, row: row);
+          })
+          .toList(growable: false);
 
       debugPrint('[WalkOrder] positioned count=$positionedCount');
       indexed.sort((a, b) {
@@ -12159,29 +12498,32 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (_loadingProducts) {
       return const Center(child: CircularProgressIndicator());
     }
-    final selectedCustomerHistoryKey = _customerHistoryCacheKey(_selectedCustomer);
+    final selectedCustomerHistoryKey = _customerHistoryCacheKey(
+      _selectedCustomer,
+    );
     if (_selectedCustomer != null &&
         selectedCustomerHistoryKey.isNotEmpty &&
         _previouslyOrderedCustomerCacheKey != selectedCustomerHistoryKey &&
-        _previouslyOrderedHistoryLoadInFlightKey != selectedCustomerHistoryKey) {
+        _previouslyOrderedHistoryLoadInFlightKey !=
+            selectedCustomerHistoryKey) {
       unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
     }
     final filtered = _filteredCatalogProducts();
     final String ecatalogWalkCustomerId = _selectedCustomer?.id.trim() ?? '';
     final Map<String, CustomerWalkOrderRow>? ecatalogWalkByItem =
         ecatalogWalkCustomerId.isEmpty
-            ? null
-            : _customerWalkOrderByCustomerAndItem[ecatalogWalkCustomerId];
+        ? null
+        : _customerWalkOrderByCustomerAndItem[ecatalogWalkCustomerId];
     final Map<String, CustomerWalkOrderRow>? ecatalogWalkByNormalizedItem =
         ecatalogWalkByItem == null || ecatalogWalkByItem.isEmpty
-            ? null
-            : () {
-                final out = <String, CustomerWalkOrderRow>{};
-                for (final e in ecatalogWalkByItem.entries) {
-                  out[normalizeItemNumber(e.key)] = e.value;
-                }
-                return out;
-              }();
+        ? null
+        : () {
+            final out = <String, CustomerWalkOrderRow>{};
+            for (final e in ecatalogWalkByItem.entries) {
+              out[normalizeItemNumber(e.key)] = e.value;
+            }
+            return out;
+          }();
     final int totalCatalogProducts = _productsByItemNumber.length;
     final categories = _catalogCategories();
     final validatedCatalogCategory =
@@ -12257,9 +12599,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                       'Item #, description, UPC, type, category',
                                 ),
                                 textInputAction: TextInputAction.search,
-                                onSubmitted: (_) => unawaited(
-                                  _addECatalogSearchEntry(),
-                                ),
+                                onSubmitted: (_) =>
+                                    unawaited(_addECatalogSearchEntry()),
                                 onChanged: _onCatalogSearchChanged,
                               ),
                             ),
@@ -12267,9 +12608,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                             Padding(
                               padding: const EdgeInsets.only(top: 8),
                               child: FilledButton.tonal(
-                                onPressed: () => unawaited(
-                                  _addECatalogSearchEntry(),
-                                ),
+                                onPressed: () =>
+                                    unawaited(_addECatalogSearchEntry()),
                                 style: FilledButton.styleFrom(
                                   visualDensity: VisualDensity.compact,
                                   padding: const EdgeInsets.symmetric(
@@ -12394,7 +12734,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                               selected: _catalogPreviouslyOrderedOnly,
                               onSelected: (selected) {
                                 setState(
-                                  () => _catalogPreviouslyOrderedOnly = selected,
+                                  () =>
+                                      _catalogPreviouslyOrderedOnly = selected,
                                 );
                               },
                             ),
@@ -12515,9 +12856,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     SliverList(
                       delegate: SliverChildBuilderDelegate((context, index) {
                         final listedProduct = filtered[index];
-                        final orderLineKey = _orderLineKeyForProduct(listedProduct);
+                        final orderLineKey = _orderLineKeyForProduct(
+                          listedProduct,
+                        );
                         final line = _orderLineByKey[orderLineKey];
-                        final displayProduct = _productsByItemNumber[orderLineKey];
+                        final displayProduct =
+                            _productsByItemNumber[orderLineKey];
                         final product =
                             displayProduct ?? line?.product ?? listedProduct;
                         final inCurrentOrder = line != null;
@@ -12745,9 +13089,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                                                 _warehouseAvailabilityLinesWidget(
                                                   context,
                                                   product,
-                                                  padding: const EdgeInsets.only(
-                                                    top: 4,
-                                                  ),
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        top: 4,
+                                                      ),
                                                 ),
                                               ],
                                             )
@@ -13076,15 +13421,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required DateTime exportedAt,
     required File exportedFile,
   }) async {
+    debugPrint(
+      '[EmailArchive][Move] ENTER quoteId=$quoteId '
+      'exportedFile=${exportedFile.path}',
+    );
     try {
       final dir = await _getQuotesDirectory();
       final activeFile = await _activeQuoteIndexFileForReadWrite(dir);
+      debugPrint(
+        '[EmailArchive][Move] activeIndexPath=${activeFile.path} '
+        'exists=${await activeFile.exists()}',
+      );
       if (!await activeFile.exists()) {
+        debugPrint('[EmailArchive][Move] FAIL: active index file missing');
         return false;
       }
       final content = await activeFile.readAsString();
       final decoded = jsonDecode(content);
       if (decoded is! List) {
+        debugPrint('[EmailArchive][Move] FAIL: active index not a List');
         return false;
       }
       final list = List<Map<String, dynamic>>.from(
@@ -13094,6 +13449,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           .where((e) => e['id']?.toString() == quoteId)
           .toList();
       if (matchingRows.isEmpty) {
+        debugPrint(
+          '[EmailArchive][Move] FAIL: quoteId=$quoteId not found in active '
+          'index (rows=${list.length})',
+        );
         return false;
       }
       final map = Map<String, dynamic>.from(matchingRows.first);
@@ -13102,6 +13461,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         primaryInfo = SavedQuoteInfo.fromJson(map);
       } catch (e, st) {
         debugPrint('[MoveQuoteArchive] parse entry failed: $e\n$st');
+        debugPrint('[EmailArchive][Move] FAIL: parse SavedQuoteInfo');
         return false;
       }
 
@@ -13143,6 +13503,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           'customer+bucket export key=$bucketExportKey ids=${idsToMove.join(',')}',
         );
       }
+      debugPrint(
+        '[EmailArchive][Move] idsToMove=${idsToMove.join(",")} '
+        'bucket=$bucketExportKey',
+      );
 
       SavedQuoteInfo archivedCopy(SavedQuoteInfo info) {
         return SavedQuoteInfo(
@@ -13180,6 +13544,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       await _saveArchiveQuoteIndex(newArchive);
+      debugPrint(
+        '[EmailArchive][Move] archive index WRITTEN '
+        'archiveCount=${newArchive.length} '
+        'containsTarget=${newArchive.any((e) => e.id == quoteId)}',
+      );
 
       try {
         list.removeWhere((e) => idsToMove.contains(e['id']?.toString()));
@@ -13190,16 +13559,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           );
         }
         await activeFile.writeAsString(jsonEncode(list), flush: true);
+        debugPrint(
+          '[EmailArchive][Move] active index WRITTEN '
+          'remainingRows=${list.length} '
+          'stillContainsTarget=${list.any((e) => e['id']?.toString() == quoteId)}',
+        );
       } catch (e, st) {
         debugPrint(
           '[MoveQuoteArchive] active index update failed; rolling back archive: $e\n$st',
         );
+        debugPrint(
+          '[EmailArchive][Move] FAIL: active write; archive rolled back',
+        );
         await _saveArchiveQuoteIndex(previousArchive);
         return false;
       }
+      debugPrint('[EmailArchive][Move] SUCCESS quoteId=$quoteId');
       return true;
     } catch (e, st) {
       debugPrint('[MoveQuoteArchive] failed: $e\n$st');
+      debugPrint('[EmailArchive][Move] FAIL: exception $e');
       return false;
     }
   }
@@ -13618,6 +13997,39 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       await file.writeAsString(jsonEncode(quoteJson), flush: true);
 
+      // Never re-activate an archived quote via a late save after email/export.
+      if (await _isQuoteIdInArchiveButNotActive(id)) {
+        debugPrint(
+          '[SaveQuote] refuse active-index reinsert for archived id=$id',
+        );
+        _quoteDiag(
+          '_saveQuote refuse active reinsert archived id=$id '
+          'currentId=$_currentQuoteId lines=${_orderLines.length}',
+        );
+        if (_currentQuoteId == id) {
+          final c = _selectedCustomer;
+          if (c != null) {
+            await _startNewQuote(c);
+          } else if (mounted) {
+            setState(() {
+              _currentQuoteId = null;
+              _orderLines.clear();
+              _orderLineByKey.clear();
+              _orderListVersion += 1;
+              _recalculateTotals();
+              _resetQuoteDisplayAndScanState();
+              _status = 'Quote is in Archive';
+            });
+          } else {
+            _currentQuoteId = null;
+            _orderLines.clear();
+            _orderLineByKey.clear();
+          }
+        }
+        _requestScannerFocus();
+        return;
+      }
+
       final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
       List<Map<String, dynamic>> list = [];
 
@@ -13671,6 +14083,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _activeQuoteBucketKey = rootBucketKey;
         _status = 'Quote saved: $name';
       });
+      _quoteDiag(
+        '_saveQuote ASSIGN _currentQuoteId=$id '
+        'lines=${_orderLines.length} name=$name '
+        'reason=save_persisted_workspace_id',
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -13858,9 +14275,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           );
         },
       );
-      debugPrint(
-        '[DependentsDiag] closing confirm dialog confirm=$confirm',
-      );
+      debugPrint('[DependentsDiag] closing confirm dialog confirm=$confirm');
       if (confirm != true || !mounted) return;
 
       await _persistFullCatalogTestQuote(customer);
@@ -13970,9 +14385,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           );
         },
       );
-      debugPrint(
-        '[DependentsDiag] closing confirm dialog confirm=$confirm',
-      );
+      debugPrint('[DependentsDiag] closing confirm dialog confirm=$confirm');
       if (confirm != true || !mounted) return;
       debugPrint('[ExportDiag] confirm accepted');
 
@@ -14108,9 +14521,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text(
-                  'Export failed: Excel encode returned no data.',
-                ),
+                content: Text('Export failed: Excel encode returned no data.'),
               ),
             );
             await showDialog<void>(
@@ -14198,9 +14609,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                 'Path:\n$pathStr';
             return AlertDialog(
               title: const Text('Export complete'),
-              content: SingleChildScrollView(
-                child: SelectableText(body),
-              ),
+              content: SingleChildScrollView(child: SelectableText(body)),
               actions: [
                 TextButton(
                   onPressed: () async {
@@ -14226,9 +14635,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                     } catch (_) {
                       if (ctx.mounted) {
                         ScaffoldMessenger.of(ctx).showSnackBar(
-                          const SnackBar(
-                            content: Text('Unable to share file'),
-                          ),
+                          const SnackBar(content: Text('Unable to share file')),
                         );
                       }
                     }
@@ -14298,7 +14705,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       debugPrint('[ExportDiag] $diagFileTag encode returned null/empty');
       return false;
     }
-    debugPrint('[ExportDiag] $diagFileTag writeAsBytes start path=${file.path}');
+    debugPrint(
+      '[ExportDiag] $diagFileTag writeAsBytes start path=${file.path}',
+    );
     await file.writeAsBytes(bytes, flush: true);
     debugPrint('[ExportDiag] $diagFileTag writeAsBytes complete');
     final existsAfter = await file.exists();
@@ -14363,25 +14772,23 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    OutlinedButton(
-                      onPressed: onPick,
-                      child: Text(label),
-                    ),
+                    OutlinedButton(onPressed: onPick, child: Text(label)),
                     const SizedBox(height: 4),
                     Text(
                       path == null ? '—' : p.basename(path),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: _kSecondaryText,
-                          ),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: _kSecondaryText),
                     ),
                   ],
                 ),
               );
             }
 
-            final allSet = quotePath != null &&
+            final allSet =
+                quotePath != null &&
                 productsPath != null &&
                 psPath != null &&
                 newReleasePath != null &&
@@ -14409,9 +14816,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                         if (!dialogContext.mounted) return;
                         if (path != null) {
                           setLocalState(() => quotePath = path);
-                          debugPrint(
-                            '[MasterBuildDiag] Quote selected: $path',
-                          );
+                          debugPrint('[MasterBuildDiag] Quote selected: $path');
                         }
                       },
                     ),
@@ -14614,9 +15019,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
 
       if (!report.success || report.bytes == null) {
-        debugPrint(
-          '[MasterBuildDiag] build failed: ${report.errorMessage}',
-        );
+        debugPrint('[MasterBuildDiag] build failed: ${report.errorMessage}');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -14685,9 +15088,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               'Removed rows: $removedRows';
           return AlertDialog(
             title: const Text('Master Products Build Complete'),
-            content: SingleChildScrollView(
-              child: SelectableText(body),
-            ),
+            content: SingleChildScrollView(child: SelectableText(body)),
             actions: [
               TextButton(
                 onPressed: () async {
@@ -14702,9 +15103,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                   } catch (_) {
                     if (ctx.mounted) {
                       ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(
-                          content: Text('Unable to share file'),
-                        ),
+                        const SnackBar(content: Text('Unable to share file')),
                       );
                     }
                   }
@@ -14742,9 +15141,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } catch (e, st) {
       debugPrint('[MasterBuildDiag] exception $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Master build failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Master build failed: $e')));
       }
     } finally {
       if (mounted) {
@@ -14813,10 +15212,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       );
 
       final listPriceRows = products.length;
-      final psProducts =
-          products.where((p) => p.isPs).toList(growable: false);
-      final newProducts =
-          products.where((p) => p.isNewRelease).toList(growable: false);
+      final psProducts = products.where((p) => p.isPs).toList(growable: false);
+      final newProducts = products
+          .where((p) => p.isNewRelease)
+          .toList(growable: false);
       final psRows = psProducts.length;
       final newRows = newProducts.length;
 
@@ -14862,7 +15261,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       // --- New release only
       final excelNew = xlsx.Excel.createExcel();
-      final newDefault = excelNew.getDefaultSheet() ?? excelNew.tables.keys.first;
+      final newDefault =
+          excelNew.getDefaultSheet() ?? excelNew.tables.keys.first;
       excelNew.rename(newDefault, 'New Update');
       final sheetNew = excelNew['New Update'];
       sheetNew.appendRow([txt('Item Number'), txt('New Release')]);
@@ -14872,7 +15272,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       // --- Combined pack
       final excelPack = xlsx.Excel.createExcel();
-      final packDefault = excelPack.getDefaultSheet() ?? excelPack.tables.keys.first;
+      final packDefault =
+          excelPack.getDefaultSheet() ?? excelPack.tables.keys.first;
       excelPack.rename(packDefault, 'List Price Update');
       final packList = excelPack['List Price Update'];
       packList.appendRow([txt('Item Number'), txt('List Price')]);
@@ -14899,8 +15300,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         packNew.appendRow([txt(p.itemNumber), txt('YES')]);
       }
 
-      final pathListPrice =
-          p.join(docs.path, 'MASTER_UPDATE_LIST_PRICE_$stamp.xlsx');
+      final pathListPrice = p.join(
+        docs.path,
+        'MASTER_UPDATE_LIST_PRICE_$stamp.xlsx',
+      );
       final pathPs = p.join(docs.path, 'MASTER_UPDATE_PS_$stamp.xlsx');
       final pathNew = p.join(docs.path, 'MASTER_UPDATE_NEW_$stamp.xlsx');
       final pathPack = p.join(docs.path, 'MASTER_UPDATE_PACK_$stamp.xlsx');
@@ -14915,7 +15318,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Master update export failed: list price encode/write.'),
+              content: Text(
+                'Master update export failed: list price encode/write.',
+              ),
             ),
           );
         }
@@ -14995,9 +15400,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         builder: (ctx) {
           return AlertDialog(
             title: const Text('Master update export complete'),
-            content: SingleChildScrollView(
-              child: SelectableText(body),
-            ),
+            content: SingleChildScrollView(child: SelectableText(body)),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
@@ -15010,9 +15413,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     } catch (e, st) {
       debugPrint('Master update sheets export failed: $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Master update export failed: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Master update export failed: $e')),
+        );
       }
     } finally {
       if (mounted) {
@@ -15062,26 +15465,69 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   /// Remove quote from index and delete its file. Call after user confirms.
-  Future<void> _removeQuoteFromIndex(String id) async {
+  /// Returns true on success. Clears the in-memory workspace when [id] is active
+  /// so a later [_saveQuote] cannot recreate the deleted file.
+  Future<bool> _removeQuoteFromIndex(String id) async {
+    _quoteDiag(
+      '_removeQuoteFromIndex ENTER quoteId=$id '
+      'wasActive=${_currentQuoteId == id}',
+    );
     try {
       final dir = await _getQuotesDirectory();
       final quoteFile = File('${dir.path}/quote_$id.json');
-      if (await quoteFile.exists()) await quoteFile.delete();
+      if (await quoteFile.exists()) {
+        await quoteFile.delete();
+      }
 
       final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
-      if (!await indexFile.exists()) return;
+      if (await indexFile.exists()) {
+        final content = await indexFile.readAsString();
+        final decoded = jsonDecode(content);
+        if (decoded is List) {
+          final list = List<Map<String, dynamic>>.from(
+            decoded.map((e) => Map<String, dynamic>.from(e as Map)),
+          );
+          list.removeWhere((e) => e['id']?.toString() == id);
+          await indexFile.writeAsString(jsonEncode(list), flush: true);
+        }
+      }
 
-      final content = await indexFile.readAsString();
-      final decoded = jsonDecode(content);
-      if (decoded is! List) return;
+      if (_currentQuoteId == id) {
+        void clearActiveWorkspace() {
+          _currentQuoteId = null;
+          _orderLines.clear();
+          _orderLineByKey.clear();
+          _orderListVersion += 1;
+          _recalculateTotals();
+          _selectedLine = null;
+          _resetQuoteDisplayAndScanState();
+          _quickEntryStatus = '-';
+          _status = 'Quote deleted';
+        }
 
-      final list = List<Map<String, dynamic>>.from(
-        decoded.map((e) => Map<String, dynamic>.from(e as Map)),
-      );
+        if (mounted) {
+          setState(clearActiveWorkspace);
+        } else {
+          clearActiveWorkspace();
+        }
+        _quoteDiag(
+          '_removeQuoteFromIndex cleared active workspace after delete '
+          'quoteId=$id',
+        );
+      }
 
-      list.removeWhere((e) => e['id']?.toString() == id);
-      await indexFile.writeAsString(jsonEncode(list), flush: true);
-    } catch (_) {}
+      _quoteDiag('_removeQuoteFromIndex EXIT ok quoteId=$id');
+      return true;
+    } catch (e, st) {
+      debugPrint('[QuoteDelete] failed id=$id: $e\n$st');
+      _quoteDiag('_removeQuoteFromIndex EXIT failed quoteId=$id error=$e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Could not delete quote: $e')));
+      }
+      return false;
+    }
   }
 
   /// List Price column for email/share attachments: persisted line [listPrice], else
@@ -15550,8 +15996,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return null;
   }
 
-  /// Load-quote Email menu: single quote (existing behavior), all for workspace customer, or all saved.
-  Future<void> _onLoadQuoteEmailTapped(String tappedQuoteId, String tappedQuoteName) async {
+  /// Load-quote Email menu: share attachments; Current + Customer also archive.
+  Future<void> _onLoadQuoteEmailTapped(
+    String tappedQuoteId,
+    String tappedQuoteName,
+  ) async {
     if (!mounted) return;
     final action = await showDialog<String>(
       context: context,
@@ -15563,15 +16012,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           children: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, 'current'),
-              child: const Text('Email Current Quote Only'),
+              child: const Text('Email Current Quote Only\n(moves to Archive)'),
             ),
             TextButton(
               onPressed: () => Navigator.pop(ctx, 'customer'),
-              child: const Text('Email All Quotes for This Customer'),
+              child: const Text(
+                'Email All Quotes for This Customer\n(archives included active quotes)',
+              ),
             ),
             TextButton(
               onPressed: () => Navigator.pop(ctx, 'all'),
-              child: const Text('Email All Saved Quotes'),
+              child: const Text(
+                'Email All Saved Quotes\n(share only — does not archive)',
+              ),
             ),
           ],
         ),
@@ -15586,7 +16039,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (!mounted) return;
     if (action == null) return;
     if (action == 'current') {
-      await _shareQuoteById(tappedQuoteId, tappedQuoteName);
+      debugPrint(
+        '[EmailShare] menu action=current '
+        'tappedId=$tappedQuoteId tappedName=$tappedQuoteName '
+        'workspaceCurrentId=$_currentQuoteId '
+        'idsMatch=${_currentQuoteId == tappedQuoteId}',
+      );
+      await _shareQuoteById(
+        tappedQuoteId,
+        tappedQuoteName,
+        archiveAfterShare: true,
+      );
       return;
     }
     if (action == 'customer') {
@@ -15618,6 +16081,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       await _shareMultipleSavedQuotesForEmail(
         subset,
         subject: 'Quotes (${subset.length}) — ${cust.displayName}',
+        archiveAfterShare: true,
       );
       return;
     }
@@ -15627,7 +16091,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         builder: (ctx) => AlertDialog(
           title: const Text('Email all saved quotes'),
           content: const Text(
-            'This will include quotes for all customers. Are you sure?',
+            'This will include quotes for all customers and is share-only '
+            '(quotes stay in Active / are not moved to Archive). Are you sure?',
           ),
           actions: [
             TextButton(
@@ -15653,12 +16118,21 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       await _shareMultipleSavedQuotesForEmail(
         index,
         subject: 'All saved quotes (${index.length})',
+        archiveAfterShare: false,
       );
     }
   }
 
   /// CSV + XLSX + text body for one saved quote (same files as legacy email/share).
-  Future<({List<XFile> attachments, String text, String displayName})?>
+  Future<
+    ({
+      List<XFile> attachments,
+      String text,
+      String displayName,
+      File csvFile,
+      DateTime exportedAt,
+    })?
+  >
   _buildQuoteShareBundleForEmail(String id, String fallbackName) async {
     if (!await _quoteIdHasActiveEligibleRowInActiveIndexStorage(id)) {
       return null;
@@ -15768,19 +16242,163 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ),
       );
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint(
+        '[EmailShare] xlsx attachment skipped for quoteId=$id: $e\n$st',
+      );
+    }
 
     final displayName = (data['name'] as String?)?.trim() ?? fallbackName;
-    return (attachments: attachments, text: text, displayName: displayName);
+    return (
+      attachments: attachments,
+      text: text,
+      displayName: displayName,
+      csvFile: csvFile,
+      exportedAt: exportedOn,
+    );
+  }
+
+  /// After the email share sheet opens: move still-active quoted ids to Archive
+  /// via [_moveActiveQuoteToArchiveAfterSuccessfulExport]. Resets the workspace
+  /// when the current quote is no longer active (archived by this pass). Does
+  /// not mark Confirmed.
+  Future<void> _archiveActiveQuotesAfterEmailShare({
+    required List<({String quoteId, File exportedFile, DateTime exportedAt})>
+    items,
+  }) async {
+    debugPrint(
+      '[EmailArchive] ENTER items=${items.length} '
+      'ids=${items.map((e) => e.quoteId).join(",")} '
+      'workspaceCurrentId=$_currentQuoteId '
+      'workspaceLines=${_orderLines.length} '
+      'customer=${_selectedCustomer?.id}',
+    );
+    _quoteDiag(
+      '_archiveActiveQuotesAfterEmailShare ENTER itemCount=${items.length}',
+    );
+    if (items.isEmpty) {
+      debugPrint('[EmailArchive] EXIT early: empty items');
+      return;
+    }
+
+    for (final item in items) {
+      final eligibleBefore =
+          await _quoteIdHasActiveEligibleRowInActiveIndexStorage(item.quoteId);
+      final inArchiveBefore = await _archiveIndexContainsQuoteId(item.quoteId);
+      debugPrint(
+        '[EmailArchive] before-move id=${item.quoteId} '
+        'activeEligible=$eligibleBefore inArchive=$inArchiveBefore '
+        'csvExists=${await item.exportedFile.exists()} '
+        'csvPath=${item.exportedFile.path}',
+      );
+      if (!eligibleBefore) {
+        _quoteDiag(
+          'email archive skip id=${item.quoteId} '
+          'reason=not_active_eligible_already_archived_or_missing',
+        );
+        debugPrint(
+          '[EmailArchive] SKIP id=${item.quoteId} '
+          'reason=not_active_eligible',
+        );
+        continue;
+      }
+      final moved = await _moveActiveQuoteToArchiveAfterSuccessfulExport(
+        quoteId: item.quoteId,
+        exportedAt: item.exportedAt,
+        exportedFile: item.exportedFile,
+      );
+      final eligibleAfter =
+          await _quoteIdHasActiveEligibleRowInActiveIndexStorage(item.quoteId);
+      final inArchiveAfter = await _archiveIndexContainsQuoteId(item.quoteId);
+      _quoteDiag(
+        'email archive move id=${item.quoteId} moved=$moved '
+        'currentId=$_currentQuoteId',
+      );
+      debugPrint(
+        '[EmailArchive] after-move id=${item.quoteId} moved=$moved '
+        'activeEligible=$eligibleAfter inArchive=$inArchiveAfter '
+        'workspaceCurrentId=$_currentQuoteId',
+      );
+      if (!moved) {
+        debugPrint(
+          '[EmailArchive] move FAILED or already moved for id=${item.quoteId}',
+        );
+      }
+    }
+
+    final currentId = _currentQuoteId;
+    if (currentId == null) {
+      debugPrint(
+        '[EmailArchive] workspace reset skipped: _currentQuoteId is null '
+        '(Load Quote dialog list is NOT refreshed by this path)',
+      );
+      debugPrint('[EmailArchive] EXIT');
+      return;
+    }
+    if (await _quoteIdHasActiveEligibleRowInActiveIndexStorage(currentId)) {
+      debugPrint(
+        '[EmailArchive] workspace reset skipped: currentId=$currentId '
+        'still active-eligible '
+        '(emailed id may differ from workspace; dialog list NOT refreshed)',
+      );
+      debugPrint('[EmailArchive] EXIT');
+      return;
+    }
+    if (!await _isQuoteIdInArchiveButNotActive(currentId)) {
+      debugPrint(
+        '[EmailArchive] workspace reset skipped: currentId=$currentId '
+        'not archive-only',
+      );
+      debugPrint('[EmailArchive] EXIT');
+      return;
+    }
+
+    _quoteDiag(
+      'email archive reset workspace after archiving currentId=$currentId',
+    );
+    debugPrint(
+      '[EmailArchive] resetting workspace via startNewQuote/clear '
+      'currentId=$currentId',
+    );
+    if (!mounted) return;
+    final customer = _selectedCustomer;
+    if (customer != null) {
+      await _startNewQuote(customer);
+    } else {
+      setState(() {
+        _currentQuoteId = null;
+        _activeQuoteBucketKey = _defaultQuoteBucketDefinition.bucketKey;
+        _activeQuoteBucketLabel = _defaultQuoteBucketDefinition.displayLabel;
+        _orderLines.clear();
+        _orderLineByKey.clear();
+        _orderListVersion += 1;
+        _recalculateTotals();
+        _quoteNameController.text = 'NEW QUOTE';
+        _savedQuoteNameBeforeEdit = 'NEW QUOTE';
+        _quoteNameUserEdited = false;
+        _selectedLine = null;
+        _resetQuoteDisplayAndScanState();
+        _status = 'Quote moved to Archive';
+        _quickEntryStatus = '-';
+      });
+    }
+    debugPrint(
+      '[EmailArchive] EXIT after workspace reset '
+      'currentId=$_currentQuoteId lines=${_orderLines.length} '
+      'note=LoadQuoteDialog_local_list_not_refreshed',
+    );
   }
 
   Future<void> _shareMultipleSavedQuotesForEmail(
     List<SavedQuoteInfo> quotes, {
     required String subject,
+    bool archiveAfterShare = false,
   }) async {
     try {
       final attachments = <XFile>[];
       final textParts = <String>[];
+      final archiveItems =
+          <({String quoteId, File exportedFile, DateTime exportedAt})>[];
       for (final q in quotes) {
         final bundle = await _buildQuoteShareBundleForEmail(q.id, q.name);
         if (bundle == null) continue;
@@ -15788,34 +16406,133 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           '=== ${bundle.displayName} (${q.id}) ===\n${bundle.text}',
         );
         attachments.addAll(bundle.attachments);
+        archiveItems.add((
+          quoteId: q.id,
+          exportedFile: bundle.csvFile,
+          exportedAt: bundle.exportedAt,
+        ));
       }
-      if (attachments.isEmpty) return;
+      if (attachments.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No quotes available to email.')),
+        );
+        return;
+      }
       await Share.shareXFiles(
         attachments,
         text: textParts.join('\n\n---\n\n'),
         subject: subject,
       );
-    } catch (_) {}
+      if (archiveAfterShare) {
+        await _archiveActiveQuotesAfterEmailShare(items: archiveItems);
+      }
+    } catch (e, st) {
+      debugPrint('[EmailShare] multi-share failed: $e\n$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not email quotes: $e')));
+    }
   }
 
   /// Share quote by id: attaches line-detail CSV + .xlsx (same columns) and text summary.
-  Future<void> _shareQuoteById(String id, String name) async {
+  /// When [archiveAfterShare] is true (Email Current), archives after the share sheet opens.
+  Future<void> _shareQuoteById(
+    String id,
+    String name, {
+    bool archiveAfterShare = false,
+  }) async {
+    debugPrint(
+      '[EmailShare] _shareQuoteById ENTER '
+      'emailedId=$id name=$name archiveAfterShare=$archiveAfterShare '
+      'workspaceCurrentId=$_currentQuoteId '
+      'idsMatch=${_currentQuoteId == id} '
+      'workspaceLines=${_orderLines.length} '
+      'customer=${_selectedCustomer?.id}',
+    );
     try {
       final bundle = await _buildQuoteShareBundleForEmail(id, name);
-      if (bundle == null) return;
-      await Share.shareXFiles(
+      if (bundle == null) {
+        debugPrint(
+          '[EmailShare] bundle null — cannot email id=$id '
+          '(missing file or not active-eligible)',
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'That quote is not available to email (missing or not active).',
+            ),
+          ),
+        );
+        return;
+      }
+      debugPrint(
+        '[EmailShare] calling Share.shareXFiles '
+        'attachments=${bundle.attachments.length} id=$id',
+      );
+      final shareResult = await Share.shareXFiles(
         bundle.attachments,
         text: bundle.text,
         subject: 'Quote: $name',
       );
-    } catch (_) {}
+      debugPrint(
+        '[EmailShare] Share.shareXFiles RETURNED '
+        'status=${shareResult.status} raw=${shareResult.raw} id=$id',
+      );
+      if (archiveAfterShare) {
+        debugPrint(
+          '[EmailShare] invoking _archiveActiveQuotesAfterEmailShare '
+          'for id=$id',
+        );
+        await _archiveActiveQuotesAfterEmailShare(
+          items: [
+            (
+              quoteId: id,
+              exportedFile: bundle.csvFile,
+              exportedAt: bundle.exportedAt,
+            ),
+          ],
+        );
+        debugPrint(
+          '[EmailShare] _archiveActiveQuotesAfterEmailShare finished '
+          'for id=$id workspaceCurrentId=$_currentQuoteId',
+        );
+      } else {
+        debugPrint(
+          '[EmailShare] archiveAfterShare=false — skip archive for id=$id',
+        );
+      }
+    } catch (e, st) {
+      debugPrint('[EmailShare] share failed id=$id: $e\n$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not email quote: $e')));
+    }
   }
 
   Future<void> _loadQuoteById(
     String id, {
     bool syncWorkspaceIfUnmounted = false,
-    _ECatalogNavigationSource navigationSource = _ECatalogNavigationSource.other,
+    _ECatalogNavigationSource navigationSource =
+        _ECatalogNavigationSource.other,
+    String reason = 'unspecified',
   }) async {
+    final beforeId = _currentQuoteId;
+    final beforeLines = _orderLines.length;
+    debugPrint(
+      '[QuoteDiag] _loadQuoteById called '
+      'quoteId=$id '
+      'customer=${_selectedCustomer?.id} '
+      'bucket=$_activeQuoteBucketKey '
+      'currentId=$_currentQuoteId '
+      'lines=${_orderLines.length} '
+      'reason=$reason '
+      'ts=${DateTime.now().toIso8601String()}',
+    );
+    debugPrint(StackTrace.current.toString());
     try {
       final dir = await _getQuotesDirectory();
       final file = File('${dir.path}/quote_$id.json');
@@ -15826,6 +16543,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _setStateDebug('load_quote_file_missing', () {
           _status = 'Quote file not found; removed from list';
         });
+        _quoteDiag(
+          '_loadQuoteById EXIT reason=$reason outcome=file_missing quoteId=$id',
+        );
         return;
       }
 
@@ -15839,6 +16559,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               : 'That quote is not in your active saved quotes (it may exist on disk only).';
         });
         _requestScannerFocus();
+        _quoteDiag(
+          '_loadQuoteById EXIT reason=$reason outcome=blocked_non_active '
+          'quoteId=$id archiveOnly=$archiveOnly',
+        );
         return;
       }
 
@@ -15854,6 +16578,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           data['lines'] as List<dynamic>? ??
           data['items'] as List<dynamic>? ??
           [];
+      final diskEmpty = persistedQuoteDataIsEmptyForReuse(data);
+      _quoteDiag(
+        '_loadQuoteById disk snapshot quoteId=$id name=$name '
+        'diskLines=${linesList.length} emptiness=${diskEmpty ? 'empty' : 'non-empty'} '
+        'reason=$reason',
+      );
 
       Customer? loadedCustomer;
       final customerMap = data['customer'];
@@ -15970,6 +16700,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           const SnackBar(content: Text('Please select a customer first.')),
         );
         _requestScannerFocus();
+        _quoteDiag(
+          '_loadQuoteById EXIT reason=$reason outcome=no_resolved_customer '
+          'quoteId=$id beforeId=$beforeId beforeLines=$beforeLines',
+        );
         return;
       }
 
@@ -16023,16 +16757,36 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _debugLogQuoteImportExport(
             '[LoadQuoteById] sync workspace without mount id=$id',
           );
+          _quoteDiag(
+            '_loadQuoteById EXIT reason=$reason outcome=applied_unmounted '
+            'quoteId=$id beforeId=$beforeId afterId=$_currentQuoteId '
+            'beforeLines=$beforeLines afterLines=${_orderLines.length}',
+          );
+        } else {
+          _quoteDiag(
+            '_loadQuoteById EXIT reason=$reason outcome=skipped_unmounted '
+            'quoteId=$id beforeId=$beforeId beforeLines=$beforeLines',
+          );
         }
         return;
       }
 
       _setStateDebug('load_quote_by_id_apply', applyWorkspace);
+      _quoteDiag(
+        '_loadQuoteById EXIT reason=$reason outcome=applied '
+        'quoteId=$id beforeId=$beforeId afterId=$_currentQuoteId '
+        'beforeLines=$beforeLines afterLines=${_orderLines.length}',
+      );
       unawaited(_refreshPreviouslyOrderedHistoryForSelectedCustomer());
       _maybeNavigateToECatalogTab(navigationSource);
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+        _quoteDiag(
+          '_loadQuoteById post-frame after apply '
+          'quoteId=$id currentId=$_currentQuoteId lines=${_orderLines.length} '
+          'reason=$reason',
+        );
         _setStateDebug('load_quote_post_frame_empty', () {});
       });
     } catch (e) {
@@ -16040,6 +16794,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       _setStateDebug('load_quote_error', () {
         _status = 'Error loading quote: $e';
       });
+      _quoteDiag(
+        '_loadQuoteById EXIT reason=$reason outcome=error error=$e '
+        'quoteId=$id beforeId=$beforeId beforeLines=$beforeLines',
+      );
     }
 
     _requestScannerFocus();
@@ -16055,9 +16813,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     // Rebuild so [MediaQuery.removeViewInsets] above the scaffold applies before
     // the dialog search field raises the keyboard (avoids a one-frame overflow).
     setState(() {});
+    _quoteDiag('_showLoadQuoteDialog ENTER before prune/save');
     // Prune before save so a stale [_currentQuoteId] cannot re-insert a
     // superseded empty quote into [quotes_active.json] via [_saveQuote].
     await _pruneSupersededEmptyDuplicateQuotesForAllActiveIndexCustomers();
+    _quoteDiag('_showLoadQuoteDialog after prune');
 
     // Persist the current working quote so it appears in the Load Quote list
     // (and updates the existing quote by id, not duplicates).
@@ -16066,18 +16826,26 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (_currentQuoteId != null ||
         _orderLines.isNotEmpty ||
         _quoteNameUserEdited) {
+      debugPrint(
+        '[EmailArchive] LoadQuoteDialog pre-open _saveQuote '
+        'currentId=$_currentQuoteId lines=${_orderLines.length} '
+        'userEdited=$_quoteNameUserEdited',
+      );
       await _saveQuote(
         notifyOnArchiveSideSave: false,
         rebindWorkspaceIfArchiveSideSave: true,
       );
+      debugPrint(
+        '[EmailArchive] LoadQuoteDialog after pre-open _saveQuote '
+        'currentId=$_currentQuoteId lines=${_orderLines.length}',
+      );
     }
 
     final list = await _loadQuoteIndex();
-    if (kDebugMode && _quoteImportExportEmptyDebug) {
-      _debugLogQuoteImportExport(
-        '[LoadQuoteDialog] list ids=${list.map((e) => e.id).join(',')}',
-      );
-    }
+    debugPrint(
+      '[EmailArchive] LoadQuoteDialog list from disk '
+      'count=${list.length} ids=${list.map((e) => e.id).join(",")}',
+    );
 
     if (!mounted) {
       return;
@@ -16168,7 +16936,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       } else {
         await Future.delayed(const Duration(milliseconds: 150));
         if (mounted) {
-          await _loadQuoteById(id);
+          await _loadQuoteById(id, reason: 'load_quote_dialog_user_selected');
         }
       }
     }
@@ -16403,7 +17171,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
-          _requestScannerFocusAfterManualEntry(debugLabel: 'quickEntrySearchTap');
+          _requestScannerFocusAfterManualEntry(
+            debugLabel: 'quickEntrySearchTap',
+          );
         });
       },
     );
@@ -16472,7 +17242,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     Product? displayProduct,
   }) {
     final Product presentationProduct = displayProduct ?? line.product;
-    final OrderLine presentationLine = identical(presentationProduct, line.product)
+    final OrderLine presentationLine =
+        identical(presentationProduct, line.product)
         ? line
         : OrderLine(
             product: presentationProduct,
@@ -16670,11 +17441,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ? _exportFullCatalogExcelQuoteFlow
           : null,
       exportingFullCatalogExcel: _exportingFullCatalogExcel,
-      onExportMasterUpdateSheets:
-          kDebugMode ? _exportMasterUpdateSheetsFlow : null,
+      onExportMasterUpdateSheets: kDebugMode
+          ? _exportMasterUpdateSheetsFlow
+          : null,
       exportingMasterUpdateSheets: _exportingMasterUpdateSheets,
-      onBuildUpdatedMasterProductsSheet:
-          kDebugMode ? _buildUpdatedMasterProductsSheetFlow : null,
+      onBuildUpdatedMasterProductsSheet: kDebugMode
+          ? _buildUpdatedMasterProductsSheetFlow
+          : null,
       buildingUpdatedMasterSheet: _buildingUpdatedMasterSheet,
     );
   }
@@ -16770,7 +17543,12 @@ class _ScanTabLayout extends StatelessWidget {
     12,
     0,
   );
-  static const EdgeInsets _modeHeaderPadding = EdgeInsets.fromLTRB(12, 12, 12, 0);
+  static const EdgeInsets _modeHeaderPadding = EdgeInsets.fromLTRB(
+    12,
+    12,
+    12,
+    0,
+  );
   static const EdgeInsets _livePanelPadding = EdgeInsets.symmetric(
     horizontal: 12,
   );
@@ -16818,9 +17596,9 @@ class _ScanTabLayout extends StatelessWidget {
           padding: _modeHeaderPadding,
           child: Text(
             'Fast Scan Mode',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
         ),
         Padding(
@@ -17782,7 +18560,10 @@ class _ECatalogTopActionBar extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           ),
           onPressed: onExportAll,
-          child: const Text('Export All Quotes', style: TextStyle(fontSize: 13)),
+          child: const Text(
+            'Export All Quotes',
+            style: TextStyle(fontSize: 13),
+          ),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
@@ -18168,10 +18949,7 @@ Widget _ecatalogPreviouslyOrderedBadge(BuildContext context) {
   );
 }
 
-Widget _ecatalogNeverAddBadge(
-  BuildContext context,
-  String neverAddReason,
-) {
+Widget _ecatalogNeverAddBadge(BuildContext context, String neverAddReason) {
   final textTheme = Theme.of(context).textTheme;
   final badge = Container(
     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -18680,9 +19458,7 @@ class _OrderLineCardRow extends StatelessWidget {
           product: product,
           hasDiscount: lineHasDiscount,
           discountedUnitPrice: discountedUnitPrice,
-          regularStyle: line3BaseStyle.copyWith(
-            fontWeight: FontWeight.w700,
-          ),
+          regularStyle: line3BaseStyle.copyWith(fontWeight: FontWeight.w700),
           mutedStyle: line3BaseStyle,
           highlightedStyle: line3BaseStyle.copyWith(
             color: highlightPriceStyle.color,
