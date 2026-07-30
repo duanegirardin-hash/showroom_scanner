@@ -18,6 +18,7 @@ import 'package:share_plus/share_plus.dart';
 
 import 'customer_quote_email.dart';
 import 'master_products_sheet_builder.dart';
+import 'pricing_math.dart' as pricing;
 import 'quote_deleted_lifecycle.dart';
 
 /// Paths chosen in the master build staging dialog (Build Updated Master Products Sheet).
@@ -1258,22 +1259,23 @@ List<Widget> _productFlagChips(BuildContext context, Product product) {
   return chips;
 }
 
-/// Cent-rounded money — single source of truth for quote line and order totals.
-double _roundMoney(num value) {
-  return (value * 100).roundToDouble() / 100.0;
-}
+/// Cent-rounded money — delegates to [pricing.roundMoney].
+double _roundMoney(num value) => pricing.roundMoney(value);
 
-double _roundedUnitPrice(double rawUnitPrice) {
-  return _roundMoney(rawUnitPrice);
-}
+/// Display / Method-A unit round — delegates to [pricing.roundedUnitPrice].
+double _roundedUnitPrice(double rawUnitPrice) =>
+    pricing.roundedUnitPrice(rawUnitPrice);
 
-double _lineTotalFromRoundedUnitPrice({
-  required double rawUnitPrice,
+/// Pay line total: Method A when [discountPercent] > 0, else full-precision extend.
+double _lineTotalForPay({
+  required double shelfPrice,
+  required double discountPercent,
   required num qty,
-}) {
-  final unit = _roundedUnitPrice(rawUnitPrice);
-  return _roundMoney(unit * qty);
-}
+}) => pricing.lineTotalForPay(
+  shelfPrice: shelfPrice,
+  discountPercent: discountPercent,
+  qty: qty,
+);
 
 /// List price for PS "Reg. Price" display when present; otherwise sheet unit price.
 double _displayRegUnitPrice(Product product) => _roundedUnitPrice(
@@ -2320,22 +2322,19 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
         : ProductPricingState.regular;
   }
 
-  double discountedUnit(Map<String, dynamic> map, double regularUnit) {
-    if (linePricingState(map) != ProductPricingState.discountEligible ||
-        customerDiscPct <= 0) {
-      return regularUnit;
-    }
-    return regularUnit * (1 - customerDiscPct / 100.0);
-  }
-
   var sum = 0.0;
   for (final lineJson in lines) {
     final map = Map<String, dynamic>.from(lineJson as Map);
     final qty = _quantityFromJson(map['quantity']);
     final price = (map['price'] as num?)?.toDouble() ?? 0.0;
-    final effectiveUnit = discountedUnit(map, price);
-    sum += _lineTotalFromRoundedUnitPrice(
-      rawUnitPrice: effectiveUnit,
+    final state = linePricingState(map);
+    final discountPercent =
+        state == ProductPricingState.discountEligible && customerDiscPct > 0
+        ? customerDiscPct
+        : 0.0;
+    sum += _lineTotalForPay(
+      shelfPrice: price,
+      discountPercent: discountPercent,
       qty: qty,
     );
   }
@@ -9941,16 +9940,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return line.product.price * (1 - d / 100.0);
   }
 
-  double _getRegularLineTotal(OrderLine line) => _lineTotalFromRoundedUnitPrice(
-    rawUnitPrice: line.product.price,
+  double _getRegularLineTotal(OrderLine line) => _lineTotalForPay(
+    shelfPrice: line.product.price,
+    discountPercent: 0,
     qty: line.quantity,
   );
 
-  double _getDiscountedLineTotal(OrderLine line) =>
-      _lineTotalFromRoundedUnitPrice(
-        rawUnitPrice: _getDiscountedUnitPrice(line),
-        qty: line.quantity,
-      );
+  double _getDiscountedLineTotal(OrderLine line) => _lineTotalForPay(
+    shelfPrice: line.product.price,
+    discountPercent: _getLineDiscountPercent(line),
+    qty: line.quantity,
+  );
 
   double _getLineDiscountAmount(OrderLine line) =>
       _getRegularLineTotal(line) - _getDiscountedLineTotal(line);
@@ -15458,14 +15458,20 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final qty = _quantityFromJson(map['quantity']);
       final shelfUnit = (map['price'] as num?)?.toDouble() ?? 0.0;
       final unitRaw = discountedUnit(map, shelfUnit);
+      final state = linePricingState(map);
+      final discountPercent =
+          state == ProductPricingState.discountEligible && customerDiscPct > 0
+          ? customerDiscPct
+          : 0.0;
       yield (
         itemNumber: itemNumber,
         description: desc,
         listUnit: _listUnitForQuoteShareAttachmentLine(map),
         unit: _roundedUnitPrice(unitRaw),
         qty: qty,
-        lineTotal: _lineTotalFromRoundedUnitPrice(
-          rawUnitPrice: unitRaw,
+        lineTotal: _lineTotalForPay(
+          shelfPrice: shelfUnit,
+          discountPercent: discountPercent,
           qty: qty,
         ),
       );
@@ -15777,12 +15783,19 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final qty = _quantityFromJson(map['quantity']);
       final price = (map['price'] as num?)?.toDouble() ?? 0.0;
       final du = discountedUnit(map, price);
-      final lineRegular = _lineTotalFromRoundedUnitPrice(
-        rawUnitPrice: price,
+      final state = linePricingState(map);
+      final discountPercent =
+          state == ProductPricingState.discountEligible && customerDiscPct > 0
+          ? customerDiscPct
+          : 0.0;
+      final lineRegular = _lineTotalForPay(
+        shelfPrice: price,
+        discountPercent: 0,
         qty: qty,
       );
-      final linePay = _lineTotalFromRoundedUnitPrice(
-        rawUnitPrice: du,
+      final linePay = _lineTotalForPay(
+        shelfPrice: price,
+        discountPercent: discountPercent,
         qty: qty,
       );
       regularOrderSum += lineRegular;
