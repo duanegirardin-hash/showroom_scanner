@@ -21,8 +21,7 @@ double lineTotalRoundUnitThenQty({
   return roundMoney(unit * qty);
 }
 
-/// Legacy full-precision extend (unit × qty then cent-round). Kept for contrast
-/// tests only — pay paths must use [lineTotalRoundUnitThenQty] / [lineTotalForPay].
+/// Full stored unit × qty, then cent-round (PS path).
 double lineTotalFullUnitThenRound({
   required double unitPrice,
   required num qty,
@@ -30,30 +29,69 @@ double lineTotalFullUnitThenRound({
   return roundMoney(unitPrice * qty);
 }
 
-/// Single pay-line rule (EMUN-aligned).
+/// Pricing class for pay-line branching (mirrors app PS→NET→DISCOUNT→direct).
+enum PayPricingClass {
+  /// Full stored precision × qty, then round¢.
+  ps,
+
+  /// Round unit to cents, then × qty, then round¢.
+  net,
+
+  /// Percentage-discount eligible; Method A when [discountPercent] > 0,
+  /// otherwise same as [regular] (unproven at 0% — unit-round).
+  discountEligible,
+
+  /// Direct / regular shelf (unproven high-precision) — unit-round.
+  regular,
+}
+
+/// Branch name selected by [lineTotalForPay] (for diagnostics).
+String payLineBranchName({
+  required double discountPercent,
+  required PayPricingClass pricingClass,
+}) {
+  if (discountPercent > 0) return 'methodA';
+  if (pricingClass == PayPricingClass.ps) return 'fullStoredThenRound';
+  return 'roundUnitThenQty';
+}
+
+/// Class-aware pay-line rule (EMUN-aligned).
 ///
 /// When [discountPercent] > 0 (percentage-discount Method A):
 ///   customerUnit = round¢(shelfPrice × (1 − discountPercent/100))
 ///   lineTotal = round¢(customerUnit × qty)
 ///
-/// Otherwise (PS, NET, regular, or discount-eligible with 0%):
+/// When [pricingClass] is [PayPricingClass.ps] and disc% == 0:
+///   lineTotal = round¢(shelfPrice × qty)  // full stored precision
+///
+/// Otherwise (NET, discount@0%, regular):
 ///   lineTotal = round¢(round¢(shelfPrice) × qty)
 double lineTotalForPay({
   required double shelfPrice,
   required double discountPercent,
   required num qty,
+  PayPricingClass pricingClass = PayPricingClass.regular,
 }) {
   if (discountPercent > 0) {
     final raw = shelfPrice * (1 - discountPercent / 100.0);
     return lineTotalRoundUnitThenQty(rawUnitPrice: raw, qty: qty);
   }
+  if (pricingClass == PayPricingClass.ps) {
+    return lineTotalFullUnitThenRound(unitPrice: shelfPrice, qty: qty);
+  }
   return lineTotalRoundUnitThenQty(rawUnitPrice: shelfPrice, qty: qty);
 }
 
-/// Regular (pre-discount) line extend from catalog shelf — same unit-round rule.
+/// Regular (pre-discount) shelf extend — class-aware like [lineTotalForPay] at 0%.
 double lineTotalRegularFromShelf({
   required double shelfPrice,
   required num qty,
+  PayPricingClass pricingClass = PayPricingClass.regular,
 }) {
-  return lineTotalRoundUnitThenQty(rawUnitPrice: shelfPrice, qty: qty);
+  return lineTotalForPay(
+    shelfPrice: shelfPrice,
+    discountPercent: 0,
+    qty: qty,
+    pricingClass: pricingClass,
+  );
 }

@@ -1267,15 +1267,30 @@ double _roundMoney(num value) => pricing.roundMoney(value);
 double _roundedUnitPrice(double rawUnitPrice) =>
     pricing.roundedUnitPrice(rawUnitPrice);
 
-/// Pay line total: Method A when [discountPercent] > 0, else round¢(unit)×qty.
+pricing.PayPricingClass _payPricingClassForState(ProductPricingState state) {
+  switch (state) {
+    case ProductPricingState.ps:
+      return pricing.PayPricingClass.ps;
+    case ProductPricingState.net:
+      return pricing.PayPricingClass.net;
+    case ProductPricingState.discountEligible:
+      return pricing.PayPricingClass.discountEligible;
+    case ProductPricingState.regular:
+      return pricing.PayPricingClass.regular;
+  }
+}
+
+/// Pay line total: Method A when [discountPercent] > 0; PS uses full×qty; else unit-round.
 double _lineTotalForPay({
   required double shelfPrice,
   required double discountPercent,
   required num qty,
+  required ProductPricingState pricingState,
 }) => pricing.lineTotalForPay(
   shelfPrice: shelfPrice,
   discountPercent: discountPercent,
   qty: qty,
+  pricingClass: _payPricingClassForState(pricingState),
 );
 
 /// List price for PS "Reg. Price" display when present; otherwise sheet unit price.
@@ -2337,6 +2352,7 @@ double _orderTotalFromQuoteDataMap(Map<String, dynamic> data) {
       shelfPrice: price,
       discountPercent: discountPercent,
       qty: qty,
+      pricingState: state,
     );
   }
   return _roundMoney(sum);
@@ -8865,6 +8881,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     debugPrint(
       '[ProductsLoad] contains item 13932=${_productsByItemNumber.containsKey('13932')}',
     );
+    final p46314 = _productsByItemNumber['46314'];
+    if (p46314 != null) {
+      final state = _productPricingState(p46314);
+      debugPrint(
+        '[PricingDiag] liveRecord item=46314 '
+        'source=$sourceLabel '
+        'rawPrice=${p46314.price} '
+        'listPrice=${p46314.listPrice} '
+        'discountRaw="${p46314.discountRaw}" '
+        'netRaw="${p46314.netRaw}" '
+        'psRaw="${p46314.psRaw}" '
+        'isPs=${p46314.isPs} isNet=${p46314.isNet} '
+        'discountEligible=${p46314.discountEligible} '
+        'state=${state.name}',
+      );
+    } else {
+      debugPrint('[PricingDiag] liveRecord item=46314 NOT_FOUND source=$sourceLabel');
+    }
 
     if (!result.isEmptyFile) {
       _debugLogMissingProductTypeMappings();
@@ -10092,13 +10126,56 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     shelfPrice: line.product.price,
     discountPercent: 0,
     qty: line.quantity,
+    pricingState: _productPricingState(line.product),
   );
 
-  double _getDiscountedLineTotal(OrderLine line) => _lineTotalForPay(
-    shelfPrice: line.product.price,
-    discountPercent: _getLineDiscountPercent(line),
-    qty: line.quantity,
-  );
+  void _logPricingDiag46314({
+    required OrderLine line,
+    required ProductPricingState state,
+    required double discountPercent,
+    required double lineTotal,
+  }) {
+    final item = line.product.itemNumber.trim();
+    if (item != '46314') return;
+    final payClass = _payPricingClassForState(state);
+    final branch = pricing.payLineBranchName(
+      discountPercent: discountPercent,
+      pricingClass: payClass,
+    );
+    debugPrint(
+      '[PricingDiag] item=$item '
+      'rawPrice=${line.product.price} '
+      'displayedRoundedPrice=${_roundedUnitPrice(line.product.price)} '
+      'isPs=${line.product.isPs} '
+      'isNet=${line.product.isNet} '
+      'discountEligible=${line.product.discountEligible} '
+      'discountFlag=${line.product.discountRaw} '
+      'state=${state.name} '
+      'customerDiscountPercent=${_getCustomerDiscountPercent()} '
+      'qty=${line.quantity} '
+      'pricingClass=${payClass.name} '
+      'branch=$branch '
+      'lineTotal=$lineTotal',
+    );
+  }
+
+  double _getDiscountedLineTotal(OrderLine line) {
+    final state = _productPricingState(line.product);
+    final discountPercent = _getLineDiscountPercent(line);
+    final lineTotal = _lineTotalForPay(
+      shelfPrice: line.product.price,
+      discountPercent: discountPercent,
+      qty: line.quantity,
+      pricingState: state,
+    );
+    _logPricingDiag46314(
+      line: line,
+      state: state,
+      discountPercent: discountPercent,
+      lineTotal: lineTotal,
+    );
+    return lineTotal;
+  }
 
   double _getLineDiscountAmount(OrderLine line) =>
       _getRegularLineTotal(line) - _getDiscountedLineTotal(line);
@@ -15621,6 +15698,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           shelfPrice: shelfUnit,
           discountPercent: discountPercent,
           qty: qty,
+          pricingState: state,
         ),
       );
     }
@@ -15940,11 +16018,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         shelfPrice: price,
         discountPercent: 0,
         qty: qty,
+        pricingState: state,
       );
       final linePay = _lineTotalForPay(
         shelfPrice: price,
         discountPercent: discountPercent,
         qty: qty,
+        pricingState: state,
       );
       regularOrderSum += lineRegular;
       discountedOrderSum += linePay;

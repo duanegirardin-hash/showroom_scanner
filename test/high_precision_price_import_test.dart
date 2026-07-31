@@ -102,9 +102,18 @@ void main() {
     );
     expect(
       source,
-      contains(
-        'double _getDiscountedLineTotal(OrderLine line) => _lineTotalForPay(',
-      ),
+      contains('double _getDiscountedLineTotal(OrderLine line)'),
+      reason: 'Discounted line totals must go through class-aware pay math.',
+    );
+    expect(
+      source,
+      contains('pricingState:'),
+      reason: 'Call sites must pass ProductPricingState into _lineTotalForPay.',
+    );
+    expect(
+      source,
+      contains('[PricingDiag]'),
+      reason: 'Temporary 46314 runtime diagnostics must be present.',
     );
     expect(
       RegExp(r'sum \+= _lineTotalForPay\(').allMatches(source).length,
