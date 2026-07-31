@@ -9,10 +9,10 @@ double roundMoney(num value) {
   return (value * 100).roundToDouble() / 100.0;
 }
 
-/// Display / Method-A customer unit — round shelf or discounted raw unit to cents.
+/// Display / customer unit — round shelf or discounted raw unit to cents.
 double roundedUnitPrice(double rawUnitPrice) => roundMoney(rawUnitPrice);
 
-/// EMUN Method A: round unit to cents, then × qty, then round line.
+/// EMUN: round unit to cents, then × qty, then round line.
 double lineTotalRoundUnitThenQty({
   required double rawUnitPrice,
   required num qty,
@@ -21,7 +21,8 @@ double lineTotalRoundUnitThenQty({
   return roundMoney(unit * qty);
 }
 
-/// Direct customer price (PS / NET / shelf): full unit × qty, then round line.
+/// Legacy full-precision extend (unit × qty then cent-round). Kept for contrast
+/// tests only — pay paths must use [lineTotalRoundUnitThenQty] / [lineTotalForPay].
 double lineTotalFullUnitThenRound({
   required double unitPrice,
   required num qty,
@@ -29,14 +30,14 @@ double lineTotalFullUnitThenRound({
   return roundMoney(unitPrice * qty);
 }
 
-/// Single pay-line rule.
+/// Single pay-line rule (EMUN-aligned).
 ///
-/// When [discountPercent] > 0 (percentage-discount path only):
+/// When [discountPercent] > 0 (percentage-discount Method A):
 ///   customerUnit = round¢(shelfPrice × (1 − discountPercent/100))
 ///   lineTotal = round¢(customerUnit × qty)
 ///
 /// Otherwise (PS, NET, regular, or discount-eligible with 0%):
-///   lineTotal = round¢(shelfPrice × qty)  // full stored precision
+///   lineTotal = round¢(round¢(shelfPrice) × qty)
 double lineTotalForPay({
   required double shelfPrice,
   required double discountPercent,
@@ -46,13 +47,13 @@ double lineTotalForPay({
     final raw = shelfPrice * (1 - discountPercent / 100.0);
     return lineTotalRoundUnitThenQty(rawUnitPrice: raw, qty: qty);
   }
-  return lineTotalFullUnitThenRound(unitPrice: shelfPrice, qty: qty);
+  return lineTotalRoundUnitThenQty(rawUnitPrice: shelfPrice, qty: qty);
 }
 
-/// Regular (pre-discount) line extend from catalog shelf price — always full-unit path.
+/// Regular (pre-discount) line extend from catalog shelf — same unit-round rule.
 double lineTotalRegularFromShelf({
   required double shelfPrice,
   required num qty,
 }) {
-  return lineTotalFullUnitThenRound(unitPrice: shelfPrice, qty: qty);
+  return lineTotalRoundUnitThenQty(rawUnitPrice: shelfPrice, qty: qty);
 }

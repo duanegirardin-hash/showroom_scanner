@@ -9,82 +9,83 @@ void main() {
       expect(roundedUnitPrice(0.585), 0.59);
     });
 
+    test('S612CA-CD displays as 3.13', () {
+      expect(roundedUnitPrice(3.125), 3.13);
+    });
+
     test('two-decimal shelf unchanged when displayed', () {
       expect(roundedUnitPrice(5.00), 5.00);
       expect(roundedUnitPrice(0.90), 0.90);
     });
   });
 
-  group('pricing_math — direct price (PS/NET/shelf)', () {
-    test('1.125 × 8 uses full unit precision and totals 9.00', () {
+  group('pricing_math — direct / 0% discount (EMUN unit-round first)', () {
+    test('S612CA-CD 3.125 × 36 = 112.68', () {
+      expect(roundedUnitPrice(3.125), 3.13);
+      expect(
+        lineTotalForPay(shelfPrice: 3.125, discountPercent: 0, qty: 36),
+        112.68,
+      );
+      // Old incorrect full-precision path:
+      expect(lineTotalFullUnitThenRound(unitPrice: 3.125, qty: 36), 112.50);
+    });
+
+    test('GC473517 0.625 × 96 = 60.48', () {
+      expect(
+        lineTotalForPay(shelfPrice: 0.625, discountPercent: 0, qty: 96),
+        60.48,
+      );
+    });
+
+    test('GC477311 0.375 × 72 = 27.36', () {
+      expect(
+        lineTotalForPay(shelfPrice: 0.375, discountPercent: 0, qty: 72),
+        27.36,
+      );
+    });
+
+    test('59521 0.864 × 72 = 61.92', () {
+      expect(
+        lineTotalForPay(shelfPrice: 0.864, discountPercent: 0, qty: 72),
+        61.92,
+      );
+    });
+
+    test('1.125 × 8 totals 9.04 (unit-round then × qty)', () {
+      expect(roundedUnitPrice(1.125), 1.13);
       expect(
         lineTotalForPay(shelfPrice: 1.125, discountPercent: 0, qty: 8),
-        9.00,
+        9.04,
       );
-      expect(lineTotalRoundUnitThenQty(rawUnitPrice: 1.125, qty: 8), 9.04);
+      expect(lineTotalFullUnitThenRound(unitPrice: 1.125, qty: 8), 9.00);
     });
 
-    test('1.125 × 3 retains raw 3.375 before final cent rounding', () {
-      const unit = 1.125;
-      const qty = 3;
-      expect(unit * qty, 3.375);
-      expect(
-        lineTotalForPay(shelfPrice: unit, discountPercent: 0, qty: qty),
-        3.38,
-      );
-    });
-
-    test('4.6875 × 16 totals 75.00 without unit rounding', () {
-      expect(
-        lineTotalForPay(shelfPrice: 4.6875, discountPercent: 0, qty: 16),
-        75.00,
-      );
-      expect(lineTotalRoundUnitThenQty(rawUnitPrice: 4.6875, qty: 16), 75.04);
-    });
-
-    test('0.833333 retains fractional precision across quantity', () {
-      const unit = 0.833333;
-      const qty = 6;
-      expect(unit * qty, closeTo(4.999998, 1e-12));
-      expect(
-        lineTotalForPay(shelfPrice: unit, discountPercent: 0, qty: qty),
-        5.00,
-      );
-    });
-
-    test('46314 qty 12 → 7.02 (not 7.08)', () {
+    test('46314 qty 12 → 7.08 (not full-precision 7.02)', () {
       final total = lineTotalForPay(
         shelfPrice: 0.585,
         discountPercent: 0,
         qty: 12,
       );
-      expect(total, 7.02);
-      // Old wrong path (unit-round first):
-      expect(lineTotalRoundUnitThenQty(rawUnitPrice: 0.585, qty: 12), 7.08);
-      // Delta old→new is exactly $0.06 (matches reported Scanner−EMUN gap)
-      expect(
-        lineTotalRoundUnitThenQty(rawUnitPrice: 0.585, qty: 12) - total,
-        closeTo(0.06, 1e-9),
-      );
+      expect(total, 7.08);
+      expect(lineTotalFullUnitThenRound(unitPrice: 0.585, qty: 12), 7.02);
     });
 
-    test('11406 qty 12 → round¢(0.992×12)=11.90', () {
+    test('11406 qty 12 → 0.99×12 = 11.88', () {
+      expect(roundedUnitPrice(0.992), 0.99);
       expect(
         lineTotalForPay(shelfPrice: 0.992, discountPercent: 0, qty: 12),
-        11.90,
+        11.88,
       );
-      expect(roundedUnitPrice(0.992), 0.99);
     });
 
-    test('S612CA-CD qty 12 → 37.50', () {
+    test('S612CA-CD qty 12 → 3.13×12 = 37.56', () {
       expect(
         lineTotalForPay(shelfPrice: 3.125, discountPercent: 0, qty: 12),
-        37.50,
+        37.56,
       );
-      expect(roundedUnitPrice(3.125), 3.13);
     });
 
-    test('two-decimal PS unchanged vs Method A', () {
+    test('two-decimal PS unchanged vs Method A unit path', () {
       const price = 5.00;
       const qty = 12;
       final direct = lineTotalForPay(
@@ -97,7 +98,7 @@ void main() {
       expect(direct, 60.00);
     });
 
-    test('two-decimal NET unchanged vs Method A', () {
+    test('two-decimal NET unchanged vs Method A unit path', () {
       const price = 0.90;
       const qty = 24;
       final direct = lineTotalForPay(
@@ -110,35 +111,30 @@ void main() {
       expect(direct, 21.60);
     });
 
-    test('three-decimal PS uses full precision', () {
+    test('three-decimal PS uses display-rounded unit', () {
       expect(
         lineTotalForPay(shelfPrice: 0.585, discountPercent: 0, qty: 12),
-        isNot(lineTotalRoundUnitThenQty(rawUnitPrice: 0.585, qty: 12)),
+        lineTotalRoundUnitThenQty(rawUnitPrice: 0.585, qty: 12),
       );
     });
 
-    test('three-decimal NET uses full precision', () {
-      // Synthetic NET-style shelf price (analysis: 2 NET high-precision SKUs).
+    test('three-decimal NET uses display-rounded unit', () {
       const price = 1.255;
       const qty = 8;
       expect(
         lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: qty),
-        roundMoney(price * qty),
-      );
-      expect(
-        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: qty),
-        isNot(lineTotalRoundUnitThenQty(rawUnitPrice: price, qty: qty)),
+        lineTotalRoundUnitThenQty(rawUnitPrice: price, qty: qty),
       );
     });
 
-    test('four-decimal direct uses full precision', () {
+    test('four-decimal direct uses display-rounded unit', () {
       const price = 3.8528;
       const qty = 12;
+      expect(roundedUnitPrice(price), 3.85);
       expect(
         lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: qty),
-        roundMoney(price * qty),
+        lineTotalRoundUnitThenQty(rawUnitPrice: price, qty: qty),
       );
-      expect(roundedUnitPrice(price), 3.85);
     });
   });
 
@@ -158,10 +154,14 @@ void main() {
       expect(roundMoney(raw * qty), 31.10);
     });
 
-    test('discount-eligible with 0% uses direct full-unit path', () {
+    test('discount-eligible with 0% uses unit-round-then-qty (same as direct)', () {
+      expect(
+        lineTotalForPay(shelfPrice: 3.125, discountPercent: 0, qty: 36),
+        112.68,
+      );
       expect(
         lineTotalForPay(shelfPrice: 0.585, discountPercent: 0, qty: 12),
-        7.02,
+        7.08,
       );
     });
   });
@@ -192,7 +192,7 @@ void main() {
     test('JSON round-trip retains a high-precision saved price', () {
       final encoded = jsonEncode({
         'lines': [
-          {'price': 4.6875, 'quantity': 16, 'scans': 3},
+          {'price': 3.125, 'quantity': 36, 'scans': 1},
         ],
       });
       final decoded = jsonDecode(encoded) as Map<String, dynamic>;
@@ -200,35 +200,35 @@ void main() {
       final price = (line['price'] as num).toDouble();
       final quantity = (line['quantity'] as num).toInt();
 
-      expect(price, 4.6875);
+      expect(price, 3.125);
       expect(
         lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: quantity),
-        75.00,
+        112.68,
       );
     });
 
     test('quantity increase and decrease never alter stored unit price', () {
-      const price = 1.125;
+      const price = 3.125;
       expect(
-        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: 7),
-        7.88,
+        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: 35),
+        roundMoney(roundedUnitPrice(price) * 35),
       );
       expect(
-        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: 8),
-        9.00,
+        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: 36),
+        112.68,
       );
       expect(
-        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: 7),
-        7.88,
+        lineTotalForPay(shelfPrice: price, discountPercent: 0, qty: 35),
+        roundMoney(roundedUnitPrice(price) * 35),
       );
-      expect(price, 1.125);
+      expect(price, 3.125);
     });
 
-    test('mixed subtotal sums full-precision and ordinary line totals', () {
+    test('mixed subtotal uses unit-rounded line totals', () {
       final highPrecision = lineTotalForPay(
-        shelfPrice: 1.125,
+        shelfPrice: 3.125,
         discountPercent: 0,
-        qty: 8,
+        qty: 36,
       );
       final ordinary = lineTotalForPay(
         shelfPrice: 2.35,
@@ -236,22 +236,35 @@ void main() {
         qty: 4,
       );
 
-      expect(roundMoney(highPrecision + ordinary), 18.40);
+      expect(highPrecision, 112.68);
+      expect(ordinary, 9.40);
+      expect(roundMoney(highPrecision + ordinary), 122.08);
     });
   });
 
-  group(r'paired-quote $0.06 gap class', () {
-    test('46314×12 alone explains Scanner 12421.92 vs EMUN 12421.86', () {
-      const previousScanner = 12421.92;
-      const emun = 12421.86;
-      final oldLine = lineTotalRoundUnitThenQty(rawUnitPrice: 0.585, qty: 12);
-      final newLine = lineTotalForPay(
-        shelfPrice: 0.585,
-        discountPercent: 0,
-        qty: 12,
+  group(r'comparison quote — Emun $7,742.08', () {
+    test('S612CA-CD correction lifts previous Scanner 7741.90 to 7742.08', () {
+      const previousIncorrectScannerTotal = 7741.90;
+      const expectedEmunTotal = 7742.08;
+      final incorrectLine = lineTotalFullUnitThenRound(
+        unitPrice: 3.125,
+        qty: 36,
       );
-      expect(oldLine - newLine, closeTo(previousScanner - emun, 1e-9));
-      expect(previousScanner - (oldLine - newLine), closeTo(emun, 1e-9));
+      final correctedLine = lineTotalForPay(
+        shelfPrice: 3.125,
+        discountPercent: 0,
+        qty: 36,
+      );
+
+      expect(incorrectLine, 112.50);
+      expect(correctedLine, 112.68);
+      expect(correctedLine - incorrectLine, closeTo(0.18, 1e-9));
+      expect(
+        roundMoney(
+          previousIncorrectScannerTotal - incorrectLine + correctedLine,
+        ),
+        expectedEmunTotal,
+      );
     });
   });
 }

@@ -110,17 +110,17 @@ void main() {
       RegExp(r'sum \+= _lineTotalForPay\(').allMatches(source).length,
       1,
       reason:
-          'Persisted/archive quote totals must use full-precision pay math.',
+          'Persisted/archive quote totals must use Emun-aligned pay math.',
     );
     expect(
       RegExp(r'lineTotal: _lineTotalForPay\(').allMatches(source).length,
       1,
-      reason: 'CSV/XLSX/email attachment totals must use precision-safe math.',
+      reason: 'CSV/XLSX/email attachment totals must use Emun-aligned math.',
     );
     expect(
       RegExp(r'final linePay = _lineTotalForPay\(').allMatches(source).length,
       1,
-      reason: 'Text quote totals must use precision-safe math.',
+      reason: 'Text quote totals must use Emun-aligned math.',
     );
 
     // Protect the c92a912 workflows from accidental replacement while pricing

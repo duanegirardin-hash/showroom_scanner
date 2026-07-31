@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'customer_quote_email.dart';
+import 'customers_official_cache.dart';
 import 'master_products_sheet_builder.dart';
 import 'pricing_math.dart' as pricing;
 import 'quote_deleted_lifecycle.dart';
@@ -1266,7 +1267,7 @@ double _roundMoney(num value) => pricing.roundMoney(value);
 double _roundedUnitPrice(double rawUnitPrice) =>
     pricing.roundedUnitPrice(rawUnitPrice);
 
-/// Pay line total: Method A when [discountPercent] > 0, else full-precision extend.
+/// Pay line total: Method A when [discountPercent] > 0, else round¢(unit)×qty.
 double _lineTotalForPay({
   required double shelfPrice,
   required double discountPercent,
@@ -4372,6 +4373,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   List<Customer> _customers = [];
   final Map<String, Customer> _customersByKey = {};
   Customer? _selectedCustomer;
+  /// Provenance of the current official customer catalog in [_customers].
+  OfficialCustomersCatalogSource _officialCustomersCatalogSource =
+      OfficialCustomersCatalogSource.none;
   bool _isCustomerWalkOrderEnabled = false;
   final Map<String, Map<String, CustomerWalkOrderRow>>
   _customerWalkOrderByCustomerAndItem = {};
@@ -4425,7 +4429,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await Future<void>.delayed(_startupDeferAfterFirstFrame);
       if (!mounted) return;
-      await _loadCustomersFromAssets();
+      await _loadCustomersOnStartup();
       if (!mounted) return;
       unawaited(_debugLoadCustomerWalkOrderCsv());
       unawaited(_loadProductsOnStartup());
@@ -8934,29 +8938,109 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
+  /// Startup: prefer last successful Load Customers cache, else bundled seed.
+  Future<void> _loadCustomersOnStartup() async {
+    final loadedFromCache = await _loadCustomersFromOfficialCache();
+    if (loadedFromCache) return;
+    await _loadCustomersFromAssets();
+  }
+
+  Future<File> _officialCustomersCacheFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File(p.join(dir.path, kOfficialCustomersCacheFilename));
+  }
+
+  Future<void> _writeOfficialCustomersCache(String csv) async {
+    try {
+      final file = await _officialCustomersCacheFile();
+      await file.writeAsString(csv, flush: true);
+      debugPrint(
+        '[Customers] Wrote official cache '
+        '(${csv.length} chars) → ${file.path}',
+      );
+    } catch (e, st) {
+      debugPrint('[Customers] Official cache write failed: $e\n$st');
+    }
+  }
+
+  /// Restores the last successful Load Customers CSV when present.
+  Future<bool> _loadCustomersFromOfficialCache() async {
+    try {
+      final file = await _officialCustomersCacheFile();
+      if (!await file.exists()) return false;
+      final rawCsv = await file.readAsString();
+      if (rawCsv.trim().isEmpty) return false;
+      debugPrint(
+        '[Customers] Loading official cache (${rawCsv.length} characters)',
+      );
+      final appliedCount = await _parseAndStoreCustomers(
+        rawCsv,
+        source: OfficialCustomersCatalogSource.officialCache,
+      );
+      if (appliedCount == null) return false;
+      debugPrint('[Customers] Official cache applied');
+      return true;
+    } catch (e, st) {
+      debugPrint('[Customers] Official cache load failed: $e\n$st');
+      return false;
+    }
+  }
+
   /// Load customers from assets/data/customers.csv (non-fatal if missing/bad).
-  /// Called from [initState] so it always runs even if built-in product loading fails.
+  /// Called from startup when no official cache exists. Never overwrites a
+  /// preferred sheet/cache catalog already in memory.
   Future<void> _loadCustomersFromAssets() async {
     debugPrint('[Customers] _loadCustomersFromAssets called');
+    if (shouldSkipOfficialCustomersCatalogApply(
+      current: _officialCustomersCatalogSource,
+      candidate: OfficialCustomersCatalogSource.bundledAssets,
+    )) {
+      debugPrint(
+        '[Customers] Skipping bundled assets; preferred catalog already loaded '
+        '(${_officialCustomersCatalogSource.name})',
+      );
+      return;
+    }
     try {
       debugPrint('[Customers] Attempting to load assets/data/customers.csv');
       await Future<void>.delayed(_startupBundleLoadDelay);
       if (!mounted) return;
+      if (shouldSkipOfficialCustomersCatalogApply(
+        current: _officialCustomersCatalogSource,
+        candidate: OfficialCustomersCatalogSource.bundledAssets,
+      )) {
+        debugPrint(
+          '[Customers] Skipping bundled assets after delay; preferred catalog '
+          'already loaded (${_officialCustomersCatalogSource.name})',
+        );
+        return;
+      }
       final rawCsv = await rootBundle.loadString('assets/data/customers.csv');
       debugPrint(
         '[Customers] customers.csv loaded successfully '
         '(${rawCsv.length} characters)',
       );
-      await _parseAndStoreCustomers(rawCsv);
+      await _parseAndStoreCustomers(
+        rawCsv,
+        source: OfficialCustomersCatalogSource.bundledAssets,
+      );
       debugPrint('[Customers] parse completed');
     } catch (e, st) {
       debugPrint('[Customers] Failed to load assets/data/customers.csv: $e');
       debugPrint('[Customers] Stack: $st');
+      if (shouldSkipOfficialCustomersCatalogApply(
+        current: _officialCustomersCatalogSource,
+        candidate: OfficialCustomersCatalogSource.bundledAssets,
+      )) {
+        return;
+      }
       if (mounted) {
         setState(() {
           _customers = [];
           _customersByKey.clear();
           _selectedCustomer = null;
+          _officialCustomersCatalogSource =
+              OfficialCustomersCatalogSource.none;
           _syncCustomerWalkOrderEnabledForCustomer(null);
           debugPrint('[WalkOrder] sync source: customers load failure');
           _customersLoadDebugLine =
@@ -8966,6 +9050,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _customers = [];
         _customersByKey.clear();
         _selectedCustomer = null;
+        _officialCustomersCatalogSource = OfficialCustomersCatalogSource.none;
         _syncCustomerWalkOrderEnabledForCustomer(null);
         debugPrint('[WalkOrder] sync source: customers load failure');
       }
@@ -9316,12 +9401,28 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       final csvString = response.body;
-      await _parseAndStoreCustomers(csvString);
-      final count = _customers.length;
+      final officialCount = await _parseAndStoreCustomers(
+        csvString,
+        source: OfficialCustomersCatalogSource.liveSheet,
+      );
+      if (officialCount == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to load customers'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+      await _writeOfficialCustomersCache(csvString);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('$count customers loaded'),
+          content: Text(
+            officialCustomersLoadedSnackBarMessage(officialCount),
+          ),
           duration: const Duration(seconds: 2),
         ),
       );
@@ -9639,10 +9740,38 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   /// Customers.csv headers: Id, CompanyName, Address, Address2, City, State, Zip, Phone, Fax, Email, Contact, SalesRepName, PriceList, Discount, PaymentTerms.
-  Future<void> _parseAndStoreCustomers(String rawCsv) async {
-    debugPrint('[Customers] parse started');
+  ///
+  /// Returns the official parsed/deduped customer count when applied, or null
+  /// when [source] was skipped or parse failed without applying.
+  Future<int?> _parseAndStoreCustomers(
+    String rawCsv, {
+    required OfficialCustomersCatalogSource source,
+  }) async {
+    debugPrint('[Customers] parse started source=${source.name}');
+    if (shouldSkipOfficialCustomersCatalogApply(
+      current: _officialCustomersCatalogSource,
+      candidate: source,
+    )) {
+      debugPrint(
+        '[Customers] Skipping apply of ${source.name}; preferred catalog '
+        'already loaded (${_officialCustomersCatalogSource.name})',
+      );
+      return null;
+    }
+
     final result = await compute(_parseCustomersCatalogCsvIsolate, rawCsv);
     _debugPrintCustomerLoadReportFromResult(result);
+
+    if (shouldSkipOfficialCustomersCatalogApply(
+      current: _officialCustomersCatalogSource,
+      candidate: source,
+    )) {
+      debugPrint(
+        '[Customers] Skipping apply after isolate; preferred catalog already '
+        'loaded (${_officialCustomersCatalogSource.name})',
+      );
+      return null;
+    }
 
     void applyEmpty() {
       _pendingRestoreCustomerAfterLocalMerge = _selectedCustomer;
@@ -9652,6 +9781,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           _customers = [];
           _customersByKey.clear();
           _selectedCustomer = null;
+          _officialCustomersCatalogSource =
+              OfficialCustomersCatalogSource.none;
           _syncCustomerWalkOrderEnabledForCustomer(null);
           debugPrint('[WalkOrder] sync source: startup restore');
           _customersLoadDebugLine = debugLine;
@@ -9660,6 +9791,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _customers = [];
         _customersByKey.clear();
         _selectedCustomer = null;
+        _officialCustomersCatalogSource = OfficialCustomersCatalogSource.none;
         _syncCustomerWalkOrderEnabledForCustomer(null);
         debugPrint('[WalkOrder] sync source: startup restore');
         _customersLoadDebugLine = debugLine;
@@ -9669,12 +9801,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     if (result.outcome == _CustomersCsvIsolateOutcome.earlyFailure) {
+      // Do not wipe a preferred catalog on a failed refresh.
+      if (_officialCustomersCatalogSource ==
+              OfficialCustomersCatalogSource.liveSheet ||
+          _officialCustomersCatalogSource ==
+              OfficialCustomersCatalogSource.officialCache) {
+        debugPrint(
+          '[Customers] Parse failed; keeping preferred catalog '
+          '(${_officialCustomersCatalogSource.name})',
+        );
+        return null;
+      }
       applyEmpty();
-      return;
+      return null;
     }
 
     final list = result.customers;
     final byKey = result.customersByKey;
+    final officialCount = list.length;
     final previous = _selectedCustomer;
     Customer? resolvedSelection;
     if (previous != null && list.isNotEmpty) {
@@ -9696,6 +9840,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           ..clear()
           ..addAll(byKey);
         _selectedCustomer = resolvedSelection;
+        _officialCustomersCatalogSource = source;
         _syncCustomerWalkOrderEnabledForCustomer(resolvedSelection);
         debugPrint('[WalkOrder] sync source: startup restore');
         _customersLoadDebugLine = debugLine;
@@ -9707,11 +9852,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ..clear()
         ..addAll(byKey);
       _selectedCustomer = resolvedSelection;
+      _officialCustomersCatalogSource = source;
       _syncCustomerWalkOrderEnabledForCustomer(resolvedSelection);
       debugPrint('[WalkOrder] sync source: startup restore');
       _customersLoadDebugLine = debugLine;
     }
     scheduleMicrotask(() => _reapplyLocalAddedCustomers());
+    return officialCount;
   }
 
   /// Isolated minimal picker for full-catalog test/export flows (dependents crash diagnosis).
@@ -9764,7 +9911,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
                           c.email.toLowerCase().contains(q) ||
                           c.companyName.toLowerCase().contains(q) ||
                           c.city.toLowerCase().contains(q) ||
-                          c.state.toLowerCase().contains(q);
+                          c.state.toLowerCase().contains(q) ||
+                          c.id.toLowerCase().contains(q);
                     }),
                   );
                 if (!dialogAlive || !ctx.mounted) return;
