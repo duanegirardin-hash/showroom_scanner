@@ -24,6 +24,7 @@ import 'pricing_math.dart' as pricing;
 import 'quote_deleted_lifecycle.dart';
 import 'quote_routing_gate.dart';
 import 'recently_deleted_screen.dart';
+import 'trade_show_quote_routing.dart';
 
 /// Paths chosen in the master build staging dialog (Build Updated Master Products Sheet).
 class _MasterBuildFileSet {
@@ -4194,6 +4195,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   final Map<String, QuoteBucketDefinition> _quoteBucketsByRawType = {};
   final Map<String, QuoteBucketDefinition> _quoteBucketsByBucketKey = {};
   final Set<String> _configuredRawQuoteBucketKeys = {};
+  TradeShowQuoteRoutingConfig _tradeShowQuoteRouting =
+      TradeShowQuoteRoutingConfig.disabled;
 
   List<Product> get _allProducts =>
       _productsByItemNumber.values.toList(growable: false);
@@ -5648,6 +5651,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   QuoteBucketDefinition _resolveQuoteBucketForProduct(Product product) {
+    // Trade-show quote-routing overrides (Glassware / Furniture / Incense)
+    // run before normal Product Type routing. They do not mutate Product fields.
+    final tradeShow = resolveTradeShowQuoteRoute(
+      config: _tradeShowQuoteRouting,
+      itemNumber: product.itemNumber,
+      productType: product.productType,
+      category: product.category,
+      subCategory: product.subCategory,
+    );
+    if (tradeShow.bucket != null) {
+      final registered =
+          _quoteBucketsByBucketKey[tradeShow.bucket!.bucketKey];
+      if (registered != null) return registered;
+      return QuoteBucketDefinition(
+        bucketKey: tradeShow.bucket!.bucketKey,
+        displayLabel: tradeShow.bucket!.displayLabel,
+      );
+    }
+
     final fromProductType = product.productType.trim();
     if (_isAbsentProductType(product.productType)) {
       return _defaultQuoteBucketDefinition;
@@ -6434,39 +6456,75 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _quoteBucketsByRawType.clear();
     _quoteBucketsByBucketKey.clear();
     _configuredRawQuoteBucketKeys.clear();
+    _tradeShowQuoteRouting = TradeShowQuoteRoutingConfig.disabled;
     try {
       await Future<void>.delayed(_startupBundleLoadDelay);
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
       final raw = await rootBundle.loadString(
         'assets/data/product_type_buckets.json',
       );
       final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) return;
+      if (decoded is Map<String, dynamic>) {
+        final mappings = decoded['mappings'];
+        if (mappings is Map<String, dynamic>) {
+          for (final entry in mappings.entries) {
+            final rawKey = entry.key.trim();
+            final rawValue = entry.value;
+            if (rawKey.isEmpty || rawValue is! Map<String, dynamic>) continue;
 
-      final mappings = decoded['mappings'];
-      if (mappings is! Map<String, dynamic>) return;
+            final bucketKey = (rawValue['bucketKey'] as String?)?.trim() ?? '';
+            final displayLabel =
+                (rawValue['displayLabel'] as String?)?.trim() ?? '';
+            if (bucketKey.isEmpty || displayLabel.isEmpty) continue;
 
-      for (final entry in mappings.entries) {
-        final rawKey = entry.key.trim();
-        final rawValue = entry.value;
-        if (rawKey.isEmpty || rawValue is! Map<String, dynamic>) continue;
-
-        final bucketKey = (rawValue['bucketKey'] as String?)?.trim() ?? '';
-        final displayLabel =
-            (rawValue['displayLabel'] as String?)?.trim() ?? '';
-        if (bucketKey.isEmpty || displayLabel.isEmpty) continue;
-
-        final definition = QuoteBucketDefinition(
-          bucketKey: bucketKey,
-          displayLabel: displayLabel,
-        );
-        final normalizedRawKey = _normalizeBucketLookup(rawKey);
-        _quoteBucketsByRawType[normalizedRawKey] = definition;
-        _configuredRawQuoteBucketKeys.add(normalizedRawKey);
-        _quoteBucketsByBucketKey[bucketKey] = definition;
+            final definition = QuoteBucketDefinition(
+              bucketKey: bucketKey,
+              displayLabel: displayLabel,
+            );
+            final normalizedRawKey = _normalizeBucketLookup(rawKey);
+            _quoteBucketsByRawType[normalizedRawKey] = definition;
+            _configuredRawQuoteBucketKeys.add(normalizedRawKey);
+            _quoteBucketsByBucketKey[bucketKey] = definition;
+          }
+        }
       }
     } catch (_) {
       // Optional config; default fallback behavior applies if missing/invalid.
+    }
+    if (!mounted) return;
+    await _loadTradeShowQuoteRoutingConfig();
+  }
+
+  /// Loads optional trade-show Glassware / Furniture / Incense quote overrides.
+  /// When `enabled` is false, products fall back to normal Product Type routing.
+  Future<void> _loadTradeShowQuoteRoutingConfig() async {
+    _tradeShowQuoteRouting = TradeShowQuoteRoutingConfig.disabled;
+    try {
+      if (!mounted) return;
+      final raw = await rootBundle.loadString(
+        'assets/data/trade_show_quote_routing.json',
+      );
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final config = parseTradeShowQuoteRoutingConfig(
+        Map<String, dynamic>.from(decoded),
+      );
+      _tradeShowQuoteRouting = config;
+      // Register labels so saved quotes / email / export resolve display names
+      // even if the feature is later disabled mid-show.
+      for (final b in config.allBuckets) {
+        _quoteBucketsByBucketKey.putIfAbsent(
+          b.bucketKey,
+          () => QuoteBucketDefinition(
+            bucketKey: b.bucketKey,
+            displayLabel: b.displayLabel,
+          ),
+        );
+      }
+    } catch (_) {
+      _tradeShowQuoteRouting = TradeShowQuoteRoutingConfig.disabled;
     }
   }
 

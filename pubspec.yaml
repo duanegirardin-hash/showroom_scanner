@@ -32,6 +32,7 @@ flutter:
     - assets/data/customers.csv
     - assets/data/customer_walk_order.csv
     - assets/data/product_type_buckets.json
+    - assets/data/trade_show_quote_routing.json
     - assets/sounds/good_scan.mp3
     - assets/sounds/good_scan2.mp3
     - assets/sounds/error_scan.mp3
