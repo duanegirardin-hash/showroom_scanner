@@ -8,14 +8,17 @@ void main() {
   test('main retains deleted UI and email feature wiring', () async {
     final source = await File('lib/main.dart').readAsString();
     expect(source, contains("import 'quote_deleted_lifecycle.dart';"));
+    expect(source, contains("import 'recently_deleted_screen.dart';"));
     expect(source, contains('loadDeleted: _loadDeletedQuoteIndex'));
-    expect(source, contains("_sectionHeader('Recently Deleted')"));
+    expect(source, contains('RecentlyDeletedScreen('));
+    expect(source, contains("Key('open_recently_deleted_button')"));
+    expect(source, contains('_onPermanentlyDeleteAllDeletedQuotes'));
     expect(source, contains("child: const Text('Restore')"));
-    expect(source, contains("label: const Text('Delete Permanently')"));
     expect(source, contains("pop('removed:\${info.id}')"));
     expect(source, contains("'Move to Recently Deleted?'"));
     expect(source, contains("'Move to Recently Deleted'"));
     expect(source, contains("tooltip: 'Move to Recently Deleted'"));
+    expect(source, contains('duration: const Duration(seconds: 1)'));
     expect(source, isNot(contains("'Delete Quote'")));
     expect(
       source,
@@ -24,6 +27,14 @@ void main() {
     expect(source, isNot(contains("tooltip: 'Delete from archive'")));
     expect(source, contains('persistCsvCopies: true'));
     expect(source, contains('archiveActiveQuotesAfterShare: true'));
+
+    final screen = await File('lib/recently_deleted_screen.dart').readAsString();
+    expect(screen, contains("_sectionHeader('Recently Deleted')"));
+    expect(screen, contains("label: const Text('Delete Permanently')"));
+    expect(screen, contains("child: const Text('Restore')"));
+    expect(screen, contains("'Delete All Permanently'"));
+    expect(screen, contains('clampScrollOffsetAfterRemoval'));
+    expect(screen, contains('recently_deleted_empty_state'));
 
     const current = 'Email Current Quote Only\\n(moves to Archive)';
     const customer =
@@ -642,6 +653,112 @@ void main() {
       expect(await store.quoteFileFor('rb1').exists(), isTrue);
 
       await Directory(archivePath).delete(recursive: true);
+    });
+
+    test(
+      'bulk permanent delete removes only Recently Deleted entries',
+      () async {
+        for (final id in ['d1', 'd2', 'keep-active', 'keep-archive']) {
+          await writeQuote(id);
+        }
+        await store.activeIndexFile.writeAsString(
+          jsonEncode([snap(id: 'keep-active', status: 'active')]),
+          flush: true,
+        );
+        await store.archiveIndexFile.writeAsString(
+          jsonEncode([snap(id: 'keep-archive', status: 'archived')]),
+          flush: true,
+        );
+        for (final id in ['d1', 'd2']) {
+          await store.softDeleteQuote(
+            indexSnapshot: snap(id: id, status: 'archived'),
+            originalStatus: 'archived',
+          );
+        }
+
+        final snapshot = await store.loadDeletedIndex();
+        expect(snapshot.map((e) => e.quoteId).toSet(), {'d1', 'd2'});
+
+        var succeeded = 0;
+        var failed = 0;
+        for (final e in snapshot) {
+          final ok = await store.permanentlyDeleteQuote(e.quoteId);
+          if (ok) {
+            succeeded++;
+          } else {
+            failed++;
+          }
+        }
+        expect(succeeded, 2);
+        expect(failed, 0);
+        expect(await store.loadDeletedIndex(), isEmpty);
+        expect(await store.quoteFileFor('d1').exists(), isFalse);
+        expect(await store.quoteFileFor('d2').exists(), isFalse);
+
+        final active =
+            jsonDecode(await store.activeIndexFile.readAsString()) as List;
+        final archive =
+            jsonDecode(await store.archiveIndexFile.readAsString()) as List;
+        expect(active.single['id'], 'keep-active');
+        expect(archive.single['id'], 'keep-archive');
+        expect(await store.quoteFileFor('keep-active').exists(), isTrue);
+        expect(await store.quoteFileFor('keep-archive').exists(), isTrue);
+      },
+    );
+
+    test(
+      'permanent delete keeps payload when still referenced by archive',
+      () async {
+        await writeQuote('shared');
+        await store.archiveIndexFile.writeAsString(
+          jsonEncode([snap(id: 'shared', status: 'archived')]),
+          flush: true,
+        );
+        // Manually place a deleted row while archive still references the id
+        // (shared/reference safety path).
+        await store.saveDeletedIndex([
+          DeletedQuoteInfo(
+            quoteId: 'shared',
+            deletedAt: clock,
+            originalStatus: 'archived',
+            indexSnapshot: snap(id: 'shared', status: 'archived'),
+          ),
+        ]);
+
+        expect(await store.permanentlyDeleteQuote('shared'), isTrue);
+        expect(await store.loadDeletedIndex(), isEmpty);
+        expect(await store.quoteFileFor('shared').exists(), isTrue);
+        final archive =
+            jsonDecode(await store.archiveIndexFile.readAsString()) as List;
+        expect(archive.single['id'], 'shared');
+      },
+    );
+
+    test('bulk permanent delete partial failure preserves remaining rows', () async {
+      await writeQuote('ok1');
+      await writeQuote('ok2');
+      for (final id in ['ok1', 'ok2']) {
+        await store.softDeleteQuote(
+          indexSnapshot: snap(id: id, status: 'archived'),
+          originalStatus: 'archived',
+        );
+      }
+      // Inject a phantom deleted row with no matching soft-delete path that
+      // permanentlyDeleteQuote will reject (empty id filtered) — use a real id
+      // then delete the index entry out from under the second call by removing
+      // it after first success via a concurrent-style snapshot.
+      final snapshot = await store.loadDeletedIndex();
+      expect(snapshot.length, 2);
+
+      final first = await store.permanentlyDeleteQuote(snapshot.first.quoteId);
+      expect(first, isTrue);
+      // Second id already gone from index → permanent delete reports false.
+      final ghost = await store.permanentlyDeleteQuote('not-present');
+      expect(ghost, isFalse);
+
+      final remaining = await store.loadDeletedIndex();
+      expect(remaining.length, 1);
+      expect(remaining.single.quoteId, snapshot.last.quoteId);
     });
   });
 }

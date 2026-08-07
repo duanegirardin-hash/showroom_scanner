@@ -19,8 +19,11 @@ import 'package:share_plus/share_plus.dart';
 import 'customer_quote_email.dart';
 import 'customers_official_cache.dart';
 import 'master_products_sheet_builder.dart';
+import 'active_quote_continuation.dart' show canonicalQuoteBucketKey;
 import 'pricing_math.dart' as pricing;
 import 'quote_deleted_lifecycle.dart';
+import 'quote_routing_gate.dart';
+import 'recently_deleted_screen.dart';
 
 /// Paths chosen in the master build staging dialog (Build Updated Master Products Sheet).
 class _MasterBuildFileSet {
@@ -4331,6 +4334,13 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Grep: [ImportRoute] — first routing touch per customer+bucket during CSV import.
   final Set<String> _orderImportRouteTraceKeys = <String>{};
 
+  /// Serializes quote routing so concurrent entry paths cannot create a second
+  /// active quote for the same customer + canonical Product Type.
+  final QuoteRoutingGate _quoteRoutingGate = QuoteRoutingGate();
+
+  /// Whether the last gated route reached [_startNewQuote] (diagnostics only).
+  bool _routingStartedNewQuote = false;
+
   /// Every quote id persisted via [_saveQuote] during a single order CSV import (all routed buckets).
   final Set<String> _orderImportTouchedQuoteIds = <String>{};
 
@@ -4851,19 +4861,57 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     super.dispose();
   }
 
+  /// In-flight lifecycle persist. `paused` and `hidden` both fire on many
+  /// devices; without coalescing they can start two overlapping [_saveQuote]
+  /// calls while `_currentQuoteId` is still null and mint a duplicate.
+  Future<void>? _workingQuotePersistInFlight;
+
   /// Persists the Scan workspace with [_saveQuote] when the app is not in the
   /// foreground. Order edits (scan, manual add, import merge, qty, delete)
   /// otherwise update memory only until routing, export, Load Quote, or import
   /// triggers a save — so closing the app without those would drop changes.
-  Future<void> _persistWorkingQuoteIfAny() async {
-    if (_orderCsvImportInProgress) return;
-    if (_loadingProducts) return;
-    if (_orderLines.isEmpty && _currentQuoteId == null) return;
-    try {
-      await _saveQuote(notifyOnArchiveSideSave: false);
-    } catch (e, st) {
-      debugPrint('[PersistWorkingQuote] failed: $e\n$st');
+  ///
+  /// Runs through [_quoteRoutingGate] so a focus/lifecycle save cannot race a
+  /// routing switch that is also minting an id for the same workspace.
+  Future<void> _persistWorkingQuoteIfAny({String reason = 'lifecycle'}) {
+    if (_orderCsvImportInProgress) return Future<void>.value();
+    if (_loadingProducts) return Future<void>.value();
+    if (_orderLines.isEmpty && _currentQuoteId == null) {
+      return Future<void>.value();
     }
+
+    final inFlight = _workingQuotePersistInFlight;
+    if (inFlight != null) {
+      _debugLogQuoteRouting(
+        '[PersistWorkingQuote] coalesce reason=$reason '
+        '(paused+hidden share one persist)',
+      );
+      return inFlight;
+    }
+
+    final customer = _selectedCustomer;
+    final gateKey = quoteRoutingGateKey(
+      customerId: customer?.id ?? '',
+      customerName: customer?.displayName ?? '',
+      bucketKey: _activeQuoteBucketKey,
+    );
+    final done = _quoteRoutingGate
+        .run(gateKey, () async {
+          if (_orderLines.isEmpty && _currentQuoteId == null) return;
+          try {
+            await _saveQuote(
+              notifyOnArchiveSideSave: false,
+              saveSource: reason,
+            );
+          } catch (e, st) {
+            debugPrint('[PersistWorkingQuote] failed: $e\n$st');
+          }
+        })
+        .whenComplete(() {
+          _workingQuotePersistInFlight = null;
+        });
+    _workingQuotePersistInFlight = done;
+    return done;
   }
 
   @override
@@ -4871,7 +4919,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (!mounted) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
-      unawaited(_persistWorkingQuoteIfAny());
+      unawaited(_persistWorkingQuoteIfAny(reason: 'lifecycle:$state'));
     }
     if (state == AppLifecycleState.resumed) {
       _scheduleScannerRefocus();
@@ -5469,44 +5517,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   /// Single canonical bucket key for routing, index matching, export grouping, and import reuse.
   /// Blank/legacy keys normalize to the default Everyday bucket (see [_defaultQuoteBucketKey]).
-  String _logicalQuoteBucketKey(String raw) {
-    final t = raw.trim().toLowerCase();
-    if (t.isEmpty) {
-      return _defaultQuoteBucketKey;
-    }
-
-    if (t == _defaultQuoteBucketKey ||
-        t == 'everyday' ||
-        t == 'every day' ||
-        t.replaceAll('_', ' ').trim() == 'every day' ||
-        t == 'everyday_quote' ||
-        t == 'every day quote') {
-      return _defaultQuoteBucketKey;
-    }
-
-    if (t == 'christmas' ||
-        t == 'xmas' ||
-        t == 'christmas_quote' ||
-        t == 'christmas quote') {
-      return 'christmas';
-    }
-
-    if (t == 'fall_winter' ||
-        t == 'fall/winter' ||
-        t == 'fall winter' ||
-        t == 'fall-winter') {
-      return 'fall_winter';
-    }
-
-    if (t == 'halloween' || t == 'halloween_quote' || t == 'halloween quote') {
-      return 'halloween';
-    }
-
-    return t
-        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
-        .replaceAll(RegExp(r'_+'), '_')
-        .trim();
-  }
+  ///
+  /// Delegates to [canonicalQuoteBucketKey] so the app and the persisted-quote
+  /// matching library can never drift apart on whitespace or Unicode punctuation.
+  String _logicalQuoteBucketKey(String raw) => canonicalQuoteBucketKey(raw);
 
   void _debugLogQuoteRouting(String message) {
     if (!kDebugMode || !_quoteRoutingDebug) return;
@@ -5723,25 +5737,50 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     final infos = await _loadQuoteIndex();
     final dir = await _getQuotesDirectory();
     final matches = <SavedQuoteInfo>[];
+    final rejected = <String>[];
     for (final info in infos) {
-      if (!_savedQuoteInfoMatchesCustomer(info, customer)) continue;
+      if (!_savedQuoteInfoMatchesCustomer(info, customer)) {
+        rejected.add('${info.id}=customerMismatch(${info.customerId})');
+        continue;
+      }
       if (!await _quoteIndexEntryMatchesLogicalBucket(info, dir, sought)) {
+        rejected.add('${info.id}=bucket(${info.quoteBucketKey})!=$sought');
         continue;
       }
       matches.add(info);
     }
-    if (matches.isEmpty) return null;
+
+    // [_loadQuoteIndex] preserves quotes_active.json row order and [_saveQuote]
+    // inserts at row 0, so this list is newest-saved-first: the first readable
+    // non-empty match *is* the newest valid quote for this customer + bucket.
+    _logQuoteLookup(
+      'customer="${customer.id}" sought=$sought activeRows=${infos.length} '
+      'bucketMatches=[${matches.map((e) => e.id).join(',')}] '
+      'rejected=[${rejected.join(',')}]',
+    );
+
+    if (matches.isEmpty) {
+      _logQuoteLookup('selected=null reason=noActiveIndexRowForCustomerBucket');
+      return null;
+    }
     for (final info in matches) {
       final f = File('${dir.path}/quote_${info.id}.json');
-      if (!await f.exists()) continue;
+      if (!await f.exists()) {
+        _logQuoteLookup('skip id=${info.id} reason=payloadMissing');
+        continue;
+      }
       try {
         final data = Map<String, dynamic>.from(
           jsonDecode(await f.readAsString()) as Map,
         );
         if (!persistedQuoteDataIsEmptyForReuse(data)) {
+          _logQuoteLookup('selected=${info.id} reason=newestValidNonEmpty');
           return info.id;
         }
-      } catch (_) {}
+        _logQuoteLookup('skip id=${info.id} reason=emptyForReuse');
+      } catch (e) {
+        _logQuoteLookup('skip id=${info.id} reason=payloadUnreadable($e)');
+      }
     }
     for (final info in matches) {
       final f = File('${dir.path}/quote_${info.id}.json');
@@ -5751,11 +5790,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
           jsonDecode(await f.readAsString()) as Map,
         );
         if (persistedQuoteDataIsEmptyForReuse(data)) {
+          _logQuoteLookup('selected=${info.id} reason=newestEmptyStarter');
           return info.id;
         }
       } catch (_) {}
     }
+    _logQuoteLookup(
+      'selected=${matches.first.id} reason=fallbackFirstMatchNoReadablePayload',
+    );
     return matches.first.id;
+  }
+
+  /// Grep: [QuoteLookup] — active-quote selection trace, debug diagnostic mode
+  /// only. Carries the routing-gate sequence so concurrent routes stay orderable
+  /// against the [QuoteRoutingDiagnostic] lines they belong to.
+  void _logQuoteLookup(String message) {
+    _debugLogQuoteRouting(
+      '[QuoteLookup] seq=${_quoteRoutingGate.completedOperations} $message',
+    );
   }
 
   /// Empty starter / placeholder file for this customer + bucket (import reuse).
@@ -5989,7 +6041,130 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     ).hasMatch(text);
   }
 
-  Future<void> _ensureRoutingForProduct(Product product) async {
+  /// Serializes every routing transaction for one customer + canonical bucket.
+  ///
+  /// Routing is a check-then-act sequence (`_saveQuote` →
+  /// `_findExistingQuoteIdForCustomerBucket` → `_loadQuoteById` /
+  /// `_startNewQuote`) over one shared workspace, and `_startNewQuote` persists
+  /// nothing — the id is minted later inside [_saveQuote]. Without a gate, two
+  /// overlapping entry paths both observe "no quote for this bucket" (or both
+  /// observe `_currentQuoteId == null`) and each mints its own id, producing a
+  /// second active quote for a Product Type that already had one.
+  ///
+  /// Product-add entry paths (HID / camera / Quick Entry / search / ECatalog)
+  /// must use [_routeAndAddProduct] so `_addProduct` stays inside the same gate
+  /// acquisition. Import and other route-only callers use this helper.
+  Future<void> _ensureRoutingForProduct(
+    Product product, {
+    String source = 'scan',
+  }) {
+    final customer = _selectedCustomer;
+    final bucket = _resolveQuoteBucketForProduct(product);
+    final gateKey = quoteRoutingGateKey(
+      customerId: customer?.id ?? '',
+      customerName: customer?.displayName ?? '',
+      bucketKey: bucket.bucketKey,
+    );
+    final currentQuoteIdBefore = _currentQuoteId;
+    return _quoteRoutingGate.run(
+      gateKey,
+      () async {
+        await _ensureRoutingForProductWithinGate(product);
+        _logRoutingDecision(
+          gateKey: gateKey,
+          customer: customer,
+          product: product,
+          bucket: bucket,
+          source: source,
+          currentQuoteIdBefore: currentQuoteIdBefore,
+        );
+      },
+    );
+  }
+
+  /// Route then mutate shared order state under one gate acquisition.
+  ///
+  /// Holding the gate across [_addProduct] closes the race where one path
+  /// finishes routing (and releases), another path runs `_startNewQuote` /
+  /// `_saveQuote`, and the first path's `_addProduct` lands on the wrong
+  /// workspace — or two overlapping adds both see a null id and later mint
+  /// duplicates when lifecycle/routing saves fire.
+  Future<bool> _routeAndAddProduct(
+    Product product, {
+    required String source,
+    required String addSourceLabel,
+    bool scheduleScanTabOrderRowReveal = false,
+    String? feedbackSource,
+  }) {
+    final customer = _selectedCustomer;
+    final bucket = _resolveQuoteBucketForProduct(product);
+    final gateKey = quoteRoutingGateKey(
+      customerId: customer?.id ?? '',
+      customerName: customer?.displayName ?? '',
+      bucketKey: bucket.bucketKey,
+    );
+    final currentQuoteIdBefore = _currentQuoteId;
+    return _quoteRoutingGate.run(gateKey, () async {
+      await _ensureRoutingForProductWithinGate(product);
+      _logRoutingDecision(
+        gateKey: gateKey,
+        customer: customer,
+        product: product,
+        bucket: bucket,
+        source: source,
+        currentQuoteIdBefore: currentQuoteIdBefore,
+      );
+      if (!mounted) return false;
+      final routedBucket = _resolveQuoteBucketForProduct(product);
+      final added = _addProduct(
+        product,
+        addSourceLabel,
+        bucket: routedBucket,
+        scheduleScanTabOrderRowReveal: scheduleScanTabOrderRowReveal,
+        feedbackSource: feedbackSource ?? source,
+      );
+      _debugLogQuoteRouting(
+        '[QuoteAdd] seq=${_quoteRoutingGate.completedOperations} '
+        'gate="$gateKey" source=$source item=${product.itemNumber} '
+        'added=$added quoteId=${_currentQuoteId ?? 'null'} '
+        'lines=${_orderLines.length} startedNewQuote=$_routingStartedNewQuote',
+      );
+      return added;
+    });
+  }
+
+  void _logRoutingDecision({
+    required String gateKey,
+    required Customer? customer,
+    required Product product,
+    required QuoteBucketDefinition bucket,
+    required String source,
+    required String? currentQuoteIdBefore,
+  }) {
+    _debugLogQuoteRouting(
+      QuoteRoutingDiagnostic(
+        gateKey: gateKey,
+        customerId: customer?.id ?? '(none)',
+        rawProductType: product.productType,
+        canonicalBucketKey: _logicalQuoteBucketKey(bucket.bucketKey),
+        scanSource: source,
+        sequence: _quoteRoutingGate.completedOperations,
+        currentQuoteIdBefore: currentQuoteIdBefore,
+        selectedQuoteId: _currentQuoteId,
+        startedNewQuote: _routingStartedNewQuote,
+        outcome: customer == null
+            ? 'noCustomer'
+            : _currentQuoteId == null
+            ? 'created'
+            : (_currentQuoteId == currentQuoteIdBefore
+                  ? 'alreadyOnBucket'
+                  : 'reused'),
+      ).toString(),
+    );
+  }
+
+  Future<void> _ensureRoutingForProductWithinGate(Product product) async {
+    _routingStartedNewQuote = false;
     final customer = _selectedCustomer;
     final bucket = _resolveQuoteBucketForProduct(product);
     final rawType = product.productType;
@@ -6131,7 +6306,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
 
     if (_orderLines.isNotEmpty) {
-      await _saveQuote();
+      await _saveQuote(saveSource: 'routing');
     }
 
     final existingQuoteId = await _findExistingQuoteIdForCustomerBucket(
@@ -6200,6 +6375,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         '[Routing] Creating new routed quote for bucket: "$targetId"',
       );
     }
+    _routingStartedNewQuote = true;
     await _startNewQuote(customer, initialBucket: bucket);
     if (mounted) {
       if (bucketTrace) {
@@ -8273,7 +8449,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     for (final line in prepare.lines) {
       try {
         if (!line.isDuplicate) {
-          await _ensureRoutingForProduct(line.product);
+          await _ensureRoutingForProduct(line.product, source: 'import');
           _mergeImportedProductIntoOrder(line.product, line.importedQtyMoq);
           importedRows++;
           newItemsCount++;
@@ -8292,7 +8468,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             duplicateChoiceSkipCount++;
             break;
           case OrderImportDuplicateResolution.totalQty:
-            await _ensureRoutingForProduct(line.product);
+            await _ensureRoutingForProduct(line.product, source: 'import');
             final existing = line.existingOrderQtySum!;
             final raw = existing + line.importedQtyMoq;
             final finalQty = _nearestValidMoqMultiple(
@@ -8314,7 +8490,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             );
             break;
           case OrderImportDuplicateResolution.minimumQty:
-            await _ensureRoutingForProduct(line.product);
+            await _ensureRoutingForProduct(line.product, source: 'import');
             final existing = line.existingOrderQtySum!;
             final raw = existing < line.importedQtyMoq
                 ? existing
@@ -8338,7 +8514,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
             );
             break;
           case OrderImportDuplicateResolution.useImportedQty:
-            await _ensureRoutingForProduct(line.product);
+            await _ensureRoutingForProduct(line.product, source: 'import');
             final raw = line.importedQtyMoq;
             final finalQty = _nearestValidMoqMultiple(
               requestedQty: raw,
@@ -10434,12 +10610,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
         return null;
       }
-      await _ensureRoutingForProduct(product);
-      final bucket = _resolveQuoteBucketForProduct(product);
-      final added = _addProduct(
+      final added = await _routeAndAddProduct(
         product,
-        raw,
-        bucket: bucket,
+        source: source,
+        addSourceLabel: raw,
         scheduleScanTabOrderRowReveal: true,
         feedbackSource: source,
       );
@@ -10522,6 +10696,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
     } finally {
       _isProcessingScan = false;
+    }
+    // Item may enqueue after the while empties but before the flag clears.
+    if (_pendingScans.isNotEmpty && mounted) {
+      unawaited(_drainScanQueue());
     }
   }
 
@@ -10646,9 +10824,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         });
         return;
       }
-      await _ensureRoutingForProduct(product);
-      final bucket = _resolveQuoteBucketForProduct(product);
-      final added = _addProduct(product, input, bucket: bucket);
+      final added = await _routeAndAddProduct(
+        product,
+        source: 'quickEntry',
+        addSourceLabel: input,
+      );
       if (!added) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
@@ -11948,9 +12128,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
   }
 
-  Future<void> _onRestoreDeletedQuote(DeletedQuoteInfo entry) async {
+  Future<bool> _onRestoreDeletedQuote(DeletedQuoteInfo entry) async {
     final restored = await _restoreFromRecentlyDeleted(entry);
-    if (!mounted) return;
+    if (!mounted) return restored;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -11960,10 +12140,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ),
       ),
     );
+    return restored;
   }
 
-  Future<void> _onPermanentlyDeleteDeletedQuote(DeletedQuoteInfo entry) async {
-    if (!mounted) return;
+  Future<bool> _onPermanentlyDeleteDeletedQuote(DeletedQuoteInfo entry) async {
+    if (!mounted) return false;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -11986,9 +12167,9 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !mounted) return false;
     final deleted = await _permanentlyDeleteRecentlyDeleted(entry);
-    if (!mounted) return;
+    if (!mounted) return deleted;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -11997,6 +12178,28 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               : 'Could not permanently delete order.',
         ),
       ),
+    );
+    return deleted;
+  }
+
+  /// Bulk permanent delete using the same per-entry safe path as single delete.
+  Future<RecentlyDeletedBulkDeleteResult> _onPermanentlyDeleteAllDeletedQuotes(
+    List<DeletedQuoteInfo> entries,
+  ) async {
+    var succeeded = 0;
+    var failed = 0;
+    // Snapshot order; skip confirmation here — the dedicated screen confirms.
+    for (final entry in List<DeletedQuoteInfo>.from(entries)) {
+      final ok = await _permanentlyDeleteRecentlyDeleted(entry);
+      if (ok) {
+        succeeded++;
+      } else {
+        failed++;
+      }
+    }
+    return RecentlyDeletedBulkDeleteResult(
+      succeeded: succeeded,
+      failed: failed,
     );
   }
 
@@ -12488,12 +12691,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       return;
     }
     if (!await _ensureQuoteReadyForManualAdd()) return;
-    await _ensureRoutingForProduct(product);
-    final bucket = _resolveQuoteBucketForProduct(product);
-    final added = _addProduct(
+    final added = await _routeAndAddProduct(
       product,
-      input,
-      bucket: bucket,
+      source: 'ecatalogSearch',
+      addSourceLabel: input,
       feedbackSource: 'ecatalog',
     );
     if (!added) return;
@@ -13524,6 +13725,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       onViewDeleted: _onViewDeletedQuote,
       onRestoreDeleted: _onRestoreDeletedQuote,
       onPermanentlyDeleteDeleted: _onPermanentlyDeleteDeletedQuote,
+      onPermanentlyDeleteAllDeleted: _onPermanentlyDeleteAllDeletedQuotes,
     );
   }
 
@@ -13940,6 +14142,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   Future<void> _saveQuote({
     bool notifyOnArchiveSideSave = true,
     bool rebindWorkspaceIfArchiveSideSave = false,
+    String saveSource = 'save',
   }) async {
     if (_selectedCustomer == null) {
       if (_orderLines.isEmpty && _currentQuoteId == null) {
@@ -14016,7 +14219,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
       }
 
+      final minted = workspaceId == null;
       final id = workspaceId ?? now.millisecondsSinceEpoch.toString();
+
+      _debugLogQuoteRouting(
+        '[SaveQuote] begin source=$saveSource '
+        'seq=${_quoteRoutingGate.completedOperations} '
+        'minted=$minted id=$id customer=$customerId '
+        'bucket=$rootBucketKey lines=${_orderLines.length} '
+        'gateActive=${_quoteRoutingGate.activeKey ?? 'none'} '
+        'startedNewQuote=$_routingStartedNewQuote',
+      );
 
       final quoteJson = {
         'id': id,
@@ -14084,6 +14297,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       await file.writeAsString(jsonEncode(quoteJson), flush: true);
 
+      // Adopt the id as soon as the payload exists. The payload file *is* the
+      // quote's identity, so if the index write below fails (or the widget is
+      // unmounted before the trailing setState) a retry must reuse this id
+      // instead of minting a second one for the same customer + bucket.
+      _currentQuoteId = id;
+
       final indexFile = await _activeQuoteIndexFileForReadWrite(dir);
       List<Map<String, dynamic>> list = [];
 
@@ -14126,6 +14345,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
       await indexFile.writeAsString(jsonEncode(list), flush: true);
       await _removeQuoteFromArchiveIndexIfPresent(id);
+
+      final sameBucketIds = list
+          .where(
+            (e) =>
+                (e['customerId']?.toString() ?? '') == customerId &&
+                _logicalQuoteBucketKey(
+                      e['quoteBucketKey']?.toString() ?? '',
+                    ) ==
+                    rootBucketKey,
+          )
+          .map((e) => e['id']?.toString() ?? '')
+          .where((e) => e.isNotEmpty)
+          .toList();
+      _debugLogQuoteRouting(
+        '[SaveQuote] complete source=$saveSource '
+        'seq=${_quoteRoutingGate.completedOperations} '
+        'minted=$minted id=$id bucket=$rootBucketKey '
+        'indexRows=${list.length} sameBucketIds=$sameBucketIds',
+      );
 
       if (_orderCsvImportInProgress) {
         _orderImportTouchedQuoteIds.add(id);
@@ -15566,7 +15804,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     messenger.showSnackBar(
       SnackBar(
         content: const Text('Order moved to Recently Deleted'),
-        duration: const Duration(seconds: 5),
+        duration: const Duration(seconds: 1),
         persist: false,
         action: SnackBarAction(
           label: 'UNDO',
@@ -17204,9 +17442,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       product: product,
       alreadyInOrder: alreadyInOrder,
       onTap: () async {
-        await _ensureRoutingForProduct(product);
-        final bucket = _resolveQuoteBucketForProduct(product);
-        final added = _addProduct(product, 'SEARCH', bucket: bucket);
+        final added = await _routeAndAddProduct(
+          product,
+          source: 'searchTap',
+          addSourceLabel: 'SEARCH',
+        );
         if (!added) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
@@ -20362,6 +20602,7 @@ class _ArchiveQuotesTab extends StatefulWidget {
     required this.onViewDeleted,
     required this.onRestoreDeleted,
     required this.onPermanentlyDeleteDeleted,
+    required this.onPermanentlyDeleteAllDeleted,
   });
 
   final Future<List<SavedQuoteInfo>> Function() loadArchive;
@@ -20374,8 +20615,12 @@ class _ArchiveQuotesTab extends StatefulWidget {
   final Future<void> Function() onPurgeConfirmed;
   final Future<List<DeletedQuoteInfo>> Function() loadDeleted;
   final Future<void> Function(DeletedQuoteInfo info) onViewDeleted;
-  final Future<void> Function(DeletedQuoteInfo info) onRestoreDeleted;
-  final Future<void> Function(DeletedQuoteInfo info) onPermanentlyDeleteDeleted;
+  final Future<bool> Function(DeletedQuoteInfo info) onRestoreDeleted;
+  final Future<bool> Function(DeletedQuoteInfo info) onPermanentlyDeleteDeleted;
+  final Future<RecentlyDeletedBulkDeleteResult> Function(
+    List<DeletedQuoteInfo> entries,
+  )
+  onPermanentlyDeleteAllDeleted;
 
   @override
   State<_ArchiveQuotesTab> createState() => _ArchiveQuotesTabState();
@@ -20384,7 +20629,6 @@ class _ArchiveQuotesTab extends StatefulWidget {
 class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
   late Future<List<SavedQuoteInfo>> _future;
   late Future<List<DeletedQuoteInfo>> _deletedFuture;
-  final Set<String> _deletedActionsInProgress = <String>{};
 
   @override
   void initState() {
@@ -20403,6 +20647,23 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
   /// Called from parent after archive index / quote file cleanup.
   void reloadArchiveList() {
     _reload();
+  }
+
+  Future<void> _openRecentlyDeleted() async {
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => RecentlyDeletedScreen(
+          loadDeleted: widget.loadDeleted,
+          onView: widget.onViewDeleted,
+          onRestore: widget.onRestoreDeleted,
+          onPermanentlyDelete: widget.onPermanentlyDeleteDeleted,
+          onPermanentlyDeleteAll: widget.onPermanentlyDeleteAllDeleted,
+        ),
+      ),
+    );
+    // Returning from the dedicated screen — refresh Archive counts only.
+    if (mounted) _reload();
   }
 
   int _sortArchiveEntries(SavedQuoteInfo a, SavedQuoteInfo b) {
@@ -20611,127 +20872,6 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
     return card;
   }
 
-  Widget _buildDeletedCard(DeletedQuoteInfo info) {
-    final busy = _deletedActionsInProgress.contains(info.quoteId);
-    final days = deletedQuoteDaysRemaining(info.deletedAt, DateTime.now());
-    final expiryText = days == 0
-        ? 'Expires today'
-        : '$days day${days == 1 ? '' : 's'} remaining';
-    final original = resolveRestoreStatus(info.originalStatus);
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        info.customerName.isEmpty
-                            ? '(No customer)'
-                            : info.customerName,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 15,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        info.name.isEmpty ? '(Unnamed quote)' : info.name,
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Originally: $original',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade700,
-                        ),
-                      ),
-                      Text(
-                        'Deleted: ${info.deletedAt.toLocal()} · $expiryText',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.delete_outline, color: Colors.redAccent),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                OutlinedButton(
-                  onPressed: busy ? null : () => widget.onViewDeleted(info),
-                  child: const Text('View'),
-                ),
-                OutlinedButton(
-                  onPressed: busy
-                      ? null
-                      : () async {
-                          setState(
-                            () => _deletedActionsInProgress.add(info.quoteId),
-                          );
-                          try {
-                            await widget.onRestoreDeleted(info);
-                            if (mounted) _reload();
-                          } finally {
-                            if (mounted) {
-                              setState(
-                                () => _deletedActionsInProgress.remove(
-                                  info.quoteId,
-                                ),
-                              );
-                            }
-                          }
-                        },
-                  child: const Text('Restore'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: busy
-                      ? null
-                      : () async {
-                          setState(
-                            () => _deletedActionsInProgress.add(info.quoteId),
-                          );
-                          try {
-                            await widget.onPermanentlyDeleteDeleted(info);
-                            if (mounted) _reload();
-                          } finally {
-                            if (mounted) {
-                              setState(
-                                () => _deletedActionsInProgress.remove(
-                                  info.quoteId,
-                                ),
-                              );
-                            }
-                          }
-                        },
-                  icon: const Icon(Icons.delete_forever),
-                  label: const Text('Delete Permanently'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.error,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -20762,18 +20902,9 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
           return FutureBuilder<List<DeletedQuoteInfo>>(
             future: _deletedFuture,
             builder: (context, deletedSnapshot) {
-              if (deletedSnapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              if (deletedSnapshot.hasError) {
-                return Center(
-                  child: Text(
-                    'Could not load Recently Deleted: '
-                    '${deletedSnapshot.error}',
-                  ),
-                );
-              }
-              final deleted = deletedSnapshot.data ?? [];
+              final deletedCount = deletedSnapshot.hasData
+                  ? deletedSnapshot.data!.length
+                  : null;
               return RefreshIndicator(
                 onRefresh: () async {
                   final archiveFuture = widget.loadArchive();
@@ -20784,12 +20915,44 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
                   });
                   await Future.wait([archiveFuture, deletedFuture]);
                 },
-                child: archived.isEmpty && confirmed.isEmpty && deleted.isEmpty
+                child: archived.isEmpty && confirmed.isEmpty
                     ? ListView(
                         physics: const AlwaysScrollableScrollPhysics(),
-                        children: const [
-                          SizedBox(height: 120),
-                          Center(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                OutlinedButton(
+                                  key: const Key('open_recently_deleted_button'),
+                                  onPressed: _openRecentlyDeleted,
+                                  child: Text(
+                                    deletedCount == null
+                                        ? 'Recently Deleted'
+                                        : deletedCount == 0
+                                        ? 'Recently Deleted'
+                                        : 'Recently Deleted ($deletedCount)',
+                                  ),
+                                ),
+                                OutlinedButton(
+                                  onPressed: () async {
+                                    await widget.onPurgeArchived();
+                                  },
+                                  child: const Text('Purge Archived'),
+                                ),
+                                OutlinedButton(
+                                  onPressed: () async {
+                                    await widget.onPurgeConfirmed();
+                                  },
+                                  child: const Text('Purge Confirmed'),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 80),
+                          const Center(
                             child: Text(
                               'No archived quotes yet.\nExport a quote from Orders to see it here.',
                               textAlign: TextAlign.center,
@@ -20806,6 +20969,17 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
                               spacing: 8,
                               runSpacing: 8,
                               children: [
+                                OutlinedButton(
+                                  key: const Key('open_recently_deleted_button'),
+                                  onPressed: _openRecentlyDeleted,
+                                  child: Text(
+                                    deletedCount == null
+                                        ? 'Recently Deleted'
+                                        : deletedCount == 0
+                                        ? 'Recently Deleted'
+                                        : 'Recently Deleted ($deletedCount)',
+                                  ),
+                                ),
                                 OutlinedButton(
                                   onPressed: () async {
                                     await widget.onPurgeArchived();
@@ -20849,20 +21023,6 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
                             )
                           else
                             ...confirmed.map(_buildCard),
-                          _sectionHeader('Recently Deleted'),
-                          if (deleted.isEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                left: 4,
-                                bottom: 8,
-                              ),
-                              child: Text(
-                                'None',
-                                style: TextStyle(color: Colors.grey.shade600),
-                              ),
-                            )
-                          else
-                            ...deleted.map(_buildDeletedCard),
                           const SizedBox(height: 24),
                         ],
                       ),

@@ -134,7 +134,8 @@ void main() {
 
     // Protect the c92a912 workflows from accidental replacement while pricing
     // wiring is edited.
-    expect(source, contains("_sectionHeader('Recently Deleted')"));
+    expect(source, contains('RecentlyDeletedScreen('));
+    expect(source, contains("Key('open_recently_deleted_button')"));
     expect(source, contains('persistCsvCopies: true'));
     expect(source, contains('archiveActiveQuotesAfterShare: true'));
     expect(source, contains('Email Current Quote Only\\n(moves to Archive)'));
