@@ -29,6 +29,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/data/products.csv
+    - assets/data/discontinued_products.csv
     - assets/data/customers.csv
     - assets/data/customer_walk_order.csv
     - assets/data/product_type_buckets.json

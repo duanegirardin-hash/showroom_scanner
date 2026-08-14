@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:csv/csv.dart';
 import 'package:excel/excel.dart' as xlsx;
@@ -18,6 +19,7 @@ import 'package:share_plus/share_plus.dart';
 
 import 'customer_quote_email.dart';
 import 'customers_official_cache.dart';
+import 'discontinued_products.dart';
 import 'master_products_sheet_builder.dart';
 import 'active_quote_continuation.dart' show canonicalQuoteBucketKey;
 import 'pricing_math.dart' as pricing;
@@ -2131,7 +2133,13 @@ Future<File> exportOrderCsvToShowroomExportsLayout({
   return file;
 }
 
-enum ScanFeedbackType { none, successNewItem, successExistingItem, notFound }
+enum ScanFeedbackType {
+  none,
+  successNewItem,
+  successExistingItem,
+  notFound,
+  discontinued,
+}
 
 /// Lifecycle for saved quotes (active workspace vs archive).
 enum QuoteLifecycleStatus { active, archived, confirmed }
@@ -4192,6 +4200,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   final Map<String, Product> _productsByUpc = {};
   final Map<String, Product> _productsByItemNumber = {};
+  DiscontinuedCatalog _discontinuedCatalog = DiscontinuedCatalog.empty;
+  DiscontinuedProduct? _discontinuedPreview;
   final Map<String, QuoteBucketDefinition> _quoteBucketsByRawType = {};
   final Map<String, QuoteBucketDefinition> _quoteBucketsByBucketKey = {};
   final Set<String> _configuredRawQuoteBucketKeys = {};
@@ -5282,10 +5292,16 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _logScanPerfStep(sampleId, 'beep triggered (good)');
       }
       HapticFeedback.selectionClick();
-    } else if (type == ScanFeedbackType.notFound) {
+    } else if (type == ScanFeedbackType.notFound ||
+        type == ScanFeedbackType.discontinued) {
       await _playErrorBuzz();
       if (sampleId > 0) {
-        _logScanPerfStep(sampleId, 'beep triggered (error)');
+        _logScanPerfStep(
+          sampleId,
+          type == ScanFeedbackType.discontinued
+              ? 'beep triggered (discontinued)'
+              : 'beep triggered (error)',
+        );
       }
       HapticFeedback.vibrate();
     }
@@ -9152,10 +9168,69 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         });
         _requestScannerFocusAfterCatalogReady();
       }
+      await _loadDiscontinuedFromAssets();
       return;
     }
     await _loadProductsFromAssets();
+    await _loadDiscontinuedFromAssets();
   }
+
+  Future<void> _loadDiscontinuedFromAssets() async {
+    try {
+      final rawCsv = await rootBundle.loadString(
+        'assets/data/discontinued_products.csv',
+      );
+      final catalog = parseDiscontinuedCsv(rawCsv);
+      if (!mounted) return;
+      setState(() {
+        _discontinuedCatalog = catalog;
+      });
+      if (kDebugMode) {
+        debugPrint(
+          '[Discontinued] loaded assets/data/discontinued_products.csv '
+          'count=${catalog.count}',
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Discontinued] asset load skipped/failed: $e');
+      }
+      // Non-fatal: Active catalog remains usable without discontinued data.
+    }
+  }
+
+  DiscontinuedProduct? _findDiscontinuedProduct(String input) {
+    return findDiscontinuedProduct(
+      input: input,
+      activeByUpc: _productsByUpc,
+      activeByItemNumber: _productsByItemNumber,
+      discontinued: _discontinuedCatalog,
+      normalizeItemNumber: normalizeItemNumber,
+    );
+  }
+
+  void _showDiscontinuedScanResult(
+    DiscontinuedProduct product, {
+    required String raw,
+    required String source,
+  }) {
+    _setStateDebug('scan_discontinued', () {
+      _discontinuedPreview = product;
+      _lastScan = raw;
+      _lastItem = product.description;
+      _status = 'DISCONTINUED — not available to order';
+      _quickEntryStatus = 'DISCONTINUED — not available to order';
+    });
+    _triggerScanFeedback(ScanFeedbackType.discontinued, source: source);
+  }
+
+  void _clearDiscontinuedPreview() {
+    if (_discontinuedPreview == null) return;
+    _setStateDebug('scan_discontinued_clear', () {
+      _discontinuedPreview = null;
+    });
+  }
+
 
   Future<void> _loadProductsFromAssets() async {
     if (kDebugMode) debugPrint('[Products] _loadProductsFromAssets called');
@@ -10640,6 +10715,25 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       }
 
       if (product == null) {
+        final discontinued = _findDiscontinuedProduct(raw);
+        if (discontinued != null) {
+          if (sampleId > 0) {
+            _logScanPerfStep(sampleId, 'setState start (discontinued state)');
+          }
+          _showDiscontinuedScanResult(
+            discontinued,
+            raw: raw,
+            source: source,
+          );
+          _restoreScanFieldFocus();
+          if (sampleId > 0) {
+            _logScanPerfStep(sampleId, 'app ready for next scan');
+            _finishScanPerfSample(sampleId, outcome: 'discontinued');
+            _currentScanSampleId = 0;
+          }
+          return null;
+        }
+        _discontinuedPreview = null;
         if (sampleId > 0) {
           _logScanPerfStep(sampleId, 'setState start (not-found state)');
         }
@@ -10668,6 +10762,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         }
         return null;
       }
+      _clearDiscontinuedPreview();
       final added = await _routeAndAddProduct(
         product,
         source: source,
@@ -10863,6 +10958,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       final product = _findExactProductForQuickEntry(input);
 
       if (product == null) {
+        final discontinued = _findDiscontinuedProduct(input);
+        if (discontinued != null) {
+          _showDiscontinuedScanResult(
+            discontinued,
+            raw: input,
+            source: 'quickEntry',
+          );
+          _quickEntryController.clear();
+          _setStateDebug('quick_entry_clear_search_discontinued', () {
+            _scanSearchQuery = '';
+            _searchResults = [];
+          });
+          _forceScannerFocusAfterInvalidQuickEntry();
+          return;
+        }
+        _discontinuedPreview = null;
         _showExactLookupMessageForQuery(input, scanTab: true);
         _quickEntryController.clear();
         _setStateDebug('quick_entry_clear_search_not_found', () {
@@ -10872,6 +10983,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _forceScannerFocusAfterInvalidQuickEntry();
         return;
       }
+
+      _clearDiscontinuedPreview();
 
       if (!await _ensureQuoteReadyForManualAdd()) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -12745,6 +12858,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (input.isEmpty) return;
     final product = _findExactProductForQuickEntry(input);
     if (product == null) {
+      final discontinued = _findDiscontinuedProduct(input);
+      if (discontinued != null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'DISCONTINUED: ${discontinued.itemNumber} — not available to order',
+            ),
+          ),
+        );
+        _triggerScanFeedback(
+          ScanFeedbackType.discontinued,
+          source: 'ecatalog',
+        );
+        return;
+      }
       _showExactLookupMessageForQuery(input, scanTab: false);
       return;
     }
@@ -17389,7 +17518,8 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         _scanFeedbackType == ScanFeedbackType.successExistingItem) {
       return Colors.green.withValues(alpha: 0.55);
     }
-    if (_scanFeedbackType == ScanFeedbackType.notFound) {
+    if (_scanFeedbackType == ScanFeedbackType.notFound ||
+        _scanFeedbackType == ScanFeedbackType.discontinued) {
       return Colors.red.withValues(alpha: 0.55);
     }
     return null;
@@ -17761,6 +17891,12 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       },
       child: _ScanTabLayout(
         quotePanel: _buildScanQuotePanel(),
+        discontinuedBanner: _discontinuedPreview == null
+            ? null
+            : _DiscontinuedScanBanner(
+                product: _discontinuedPreview!,
+                onDismiss: _clearDiscontinuedPreview,
+              ),
         loadingProducts: _loadingProducts,
         scanPanelScrollController: _scanPanelScrollController,
         liveOrderControlPanel: _buildScanLiveOrderControlPanel(),
@@ -17869,6 +18005,210 @@ const BorderRadius _kOrderLineCardBorderRadius = BorderRadius.all(
   Radius.circular(12),
 );
 
+
+class _DiscontinuedScanBanner extends StatelessWidget {
+  const _DiscontinuedScanBanner({
+    required this.product,
+    required this.onDismiss,
+  });
+
+  final DiscontinuedProduct product;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final url =
+        'https://showroom-images.netlify.app/images/${product.itemNumber.trim()}.jpeg';
+    // Parent Flexible(tight) + SizedBox.expand give a finite height. Image
+    // Expanded fills the remainder after compact details so the stamp is large.
+    return Material(
+      elevation: 2,
+      borderRadius: BorderRadius.circular(10),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: IconButton(
+                tooltip: 'Dismiss',
+                onPressed: onDismiss,
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                icon: const Icon(Icons.close, size: 20),
+              ),
+            ),
+            Expanded(
+              flex: 3,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Image.network(
+                      url,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => ColoredBox(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainerHigh,
+                        child: const Icon(
+                          Icons.image_not_supported_outlined,
+                          size: 48,
+                        ),
+                      ),
+                      loadingBuilder: (context, child, progress) {
+                        if (progress == null) return child;
+                        return const Center(child: CircularProgressIndicator());
+                      },
+                    ),
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: _DiscontinuedDiagonalOverlay(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              product.itemNumber,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            Text(
+              product.description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: textTheme.bodySmall,
+            ),
+            Text(
+              product.upc.isEmpty ? 'UPC: (blank)' : 'UPC: ${product.upc}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: textTheme.labelSmall,
+            ),
+            Text(
+              'This item is no longer available to order.',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: textTheme.labelSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: Colors.red.shade800,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Fills the image Stack and paints a large diagonal DISCONTINUED stamp that
+/// is uniformly scaled so the rotated AABB fits inside the image bounds.
+class _DiscontinuedDiagonalOverlay extends StatelessWidget {
+  const _DiscontinuedDiagonalOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        return CustomPaint(
+          size: size,
+          painter: _DiscontinuedDiagonalPainter(size: size),
+        );
+      },
+    );
+  }
+}
+
+/// Diagonal DISCONTINUED stamp: large design size, then uniformly scaled so the
+/// *rotated* bounding box fits inside the image Stack (no edge clipping).
+class _DiscontinuedDiagonalPainter extends CustomPainter {
+  const _DiscontinuedDiagonalPainter({required this.size});
+
+  final Size size;
+
+  /// ~-30° (within -25°…-35°).
+  static const double _radians = -30 * math.pi / 180;
+  static const double _designFontSize = 96;
+  static const double _padX = 14;
+  static const double _padY = 10;
+  /// Leave a small margin so rotation corners stay inside ClipRRect.
+  static const double _margin = 0.94;
+
+  @override
+  void paint(Canvas canvas, Size paintSize) {
+    // Prefer the explicit layout size when available.
+    final box = size.width > 0 && size.height > 0 ? size : paintSize;
+    if (box.width <= 0 || box.height <= 0) return;
+
+    final textPainter = TextPainter(
+      text: const TextSpan(
+        text: 'DISCONTINUED',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: _designFontSize,
+          height: 1.0,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 1.0,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+
+    final stampW = textPainter.width + _padX * 2;
+    final stampH = textPainter.height + _padY * 2;
+    final cosA = math.cos(_radians).abs();
+    final sinA = math.sin(_radians).abs();
+    final rotatedW = stampW * cosA + stampH * sinA;
+    final rotatedH = stampW * sinA + stampH * cosA;
+    final scale = math.min(
+      (box.width * _margin) / rotatedW,
+      (box.height * _margin) / rotatedH,
+    );
+
+    canvas.save();
+    canvas.translate(box.width * 0.5, box.height * 0.5);
+    canvas.rotate(_radians);
+    canvas.scale(scale);
+
+    final bgRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: Offset.zero, width: stampW, height: stampH),
+      const Radius.circular(8),
+    );
+    canvas.drawRRect(
+      bgRect,
+      Paint()..color = const Color(0xE6B71C1C), // strong red, ~90% opaque
+    );
+    canvas.drawRRect(
+      bgRect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3
+        ..color = Colors.white.withValues(alpha: 0.95),
+    );
+
+    textPainter.paint(
+      canvas,
+      Offset(-textPainter.width / 2, -textPainter.height / 2),
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _DiscontinuedDiagonalPainter oldDelegate) =>
+      oldDelegate.size != size;
+}
+
 /// Full Scan tab body: quote header, scrollable middle, and bottom search / quote actions.
 class _ScanTabLayout extends StatelessWidget {
   // REBUILD_INSTRUMENT: remove when done profiling scan-tab rebuild frequency
@@ -17876,6 +18216,7 @@ class _ScanTabLayout extends StatelessWidget {
 
   const _ScanTabLayout({
     required this.quotePanel,
+    this.discontinuedBanner,
     required this.loadingProducts,
     required this.scanPanelScrollController,
     required this.liveOrderControlPanel,
@@ -17918,6 +18259,7 @@ class _ScanTabLayout extends StatelessWidget {
   );
 
   final Widget quotePanel;
+  final Widget? discontinuedBanner;
   final bool loadingProducts;
   final ScrollController scanPanelScrollController;
   final Widget liveOrderControlPanel;
@@ -17955,16 +18297,30 @@ class _ScanTabLayout extends StatelessWidget {
           padding: _quotePanelPadding,
           child: RepaintBoundary(child: quotePanel),
         ),
-        Padding(
-          padding: EdgeInsets.fromLTRB(
-            _livePanelPadding.left,
-            8,
-            _livePanelPadding.right,
-            0,
+        // Tight Flexible + expand: stamp area fills the allocated Scan slot.
+        if (discontinuedBanner != null)
+          Flexible(
+            flex: 5,
+            fit: FlexFit.tight,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: SizedBox.expand(child: discontinuedBanner!),
+            ),
           ),
-          child: RepaintBoundary(child: liveOrderControlPanel),
-        ),
+        // Live scan stats are secondary while the L-item stamp is showing.
+        if (discontinuedBanner == null)
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              _livePanelPadding.left,
+              8,
+              _livePanelPadding.right,
+              0,
+            ),
+            child: RepaintBoundary(child: liveOrderControlPanel),
+          ),
         Expanded(
+          // Secondary while an L-item banner occupies the Scan body.
+          flex: 1,
           child: loadingProducts
               ? _loadingProductsIndicator
               : CustomScrollView(
