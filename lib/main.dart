@@ -20,6 +20,8 @@ import 'package:share_plus/share_plus.dart';
 import 'customer_quote_email.dart';
 import 'customers_official_cache.dart';
 import 'discontinued_products.dart';
+import 'pc_receiver/pc_receiver_send_ui.dart';
+import 'quote_emun_csv.dart';
 import 'master_products_sheet_builder.dart';
 import 'active_quote_continuation.dart' show canonicalQuoteBucketKey;
 import 'pricing_math.dart' as pricing;
@@ -2287,13 +2289,7 @@ bool _sameLogicalCustomerQuoteRows({
 
 /// Safe quantity read from persisted quote line JSON (avoids cast crashes on bad types).
 /// Missing or unparseable values use 1; explicit zero (including "0") is preserved.
-int _quantityFromJson(dynamic v) {
-  if (v == null) return 1;
-  if (v is int) return v;
-  if (v is num) return v.toInt();
-  if (v is String) return int.tryParse(v) ?? 1;
-  return 1;
-}
+int _quantityFromJson(dynamic v) => quoteQuantityFromJson(v);
 
 /// Aggregates for archive / read-only quote display (from persisted JSON).
 (int lineCount, int unitCount, double orderTotal) quoteDataLineStatsAndTotal(
@@ -3755,6 +3751,7 @@ class _LoadQuoteDialogContent extends StatefulWidget {
     required this.dialogContext,
     required this.onRemoveQuote,
     required this.onShareQuote,
+    required this.onSendToPc,
     required this.searchQuotesFocusNode,
   });
 
@@ -3763,6 +3760,7 @@ class _LoadQuoteDialogContent extends StatefulWidget {
   final BuildContext dialogContext;
   final Future<bool> Function(String id) onRemoveQuote;
   final Future<void> Function(String id, String name) onShareQuote;
+  final Future<void> Function(String id, String name) onSendToPc;
   final FocusNode searchQuotesFocusNode;
 
   @override
@@ -3948,7 +3946,7 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                       ),
                                     ),
                                     SizedBox(
-                                      width: 112,
+                                      width: 156,
                                       child: Row(
                                         mainAxisAlignment:
                                             MainAxisAlignment.end,
@@ -3958,8 +3956,22 @@ class _LoadQuoteDialogContentState extends State<_LoadQuoteDialogContent> {
                                               Icons.email_outlined,
                                             ),
                                             tooltip: 'Email / Share quote',
+                                            visualDensity: VisualDensity.compact,
                                             onPressed: () async {
                                               await widget.onShareQuote(
+                                                info.id,
+                                                info.name,
+                                              );
+                                            },
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.computer_outlined,
+                                            ),
+                                            tooltip: 'Send to PC',
+                                            visualDensity: VisualDensity.compact,
+                                            onPressed: () async {
+                                              await widget.onSendToPc(
                                                 info.id,
                                                 info.name,
                                               );
@@ -16173,31 +16185,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     bool sortByItemNumberAsc = false,
   }) {
     if (!richEmailShareAttachments) {
-      const header = 'Item,Quantity';
-      final lines =
-          data['lines'] as List<dynamic>? ??
-          data['items'] as List<dynamic>? ??
-          [];
-      final rows = <String>[header];
-      final csvLines = <({String itemNumber, int qty})>[];
-
-      for (final lineJson in lines) {
-        final map = Map<String, dynamic>.from(lineJson as Map);
-        final itemNumber = (map['itemNumber'] as String?) ?? '';
-        final qty = _quantityFromJson(map['quantity']);
-        csvLines.add((itemNumber: itemNumber, qty: qty));
-      }
-
-      final orderedCsvLines = sortByItemNumberAsc
-          ? _sortByItemNumberAscending(csvLines, (r) => r.itemNumber)
-          : csvLines;
-
-      for (final line in orderedCsvLines) {
-        final itemEscaped = _csvEscape(line.itemNumber);
-        rows.add('$itemEscaped,${line.qty}');
-      }
-
-      return rows.join('\n');
+      return formatQuoteAsEmunCsv(
+        data,
+        sortByItemNumberAsc: sortByItemNumberAsc,
+        compareItemNumber: _compareItemNumberAscending,
+      );
     }
 
     const header =
@@ -16517,6 +16509,42 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     }
     if (_currentQuoteId == quoteId) return _selectedCustomer;
     return null;
+  }
+
+  /// Load-quote SEND TO PC (Phase 3). Does not archive, delete, or change email.
+  Future<void> _onLoadQuoteSendToPcTapped(
+    String tappedQuoteId,
+    String tappedQuoteName,
+  ) async {
+    if (!mounted) return;
+    SavedQuoteInfo? info;
+    try {
+      final list = await _loadQuoteIndex();
+      for (final e in list) {
+        if (e.id == tappedQuoteId) {
+          info = e;
+          break;
+        }
+      }
+    } catch (e, st) {
+      debugPrint('[PcReceiver] quote index lookup failed: $e\n$st');
+    }
+    if (!mounted) return;
+    await showPcReceiverSendFlow(
+      context: context,
+      quoteId: tappedQuoteId,
+      quoteName: tappedQuoteName,
+      customerId: info?.customerId ?? '',
+      customerName: info?.customerName ?? '',
+      loadQuoteJson: () async {
+        final dir = await _getQuotesDirectory();
+        final quoteFile = File('${dir.path}/quote_$tappedQuoteId.json');
+        if (!await quoteFile.exists()) return null;
+        final quoteRaw = await quoteFile.readAsString();
+        return Map<String, dynamic>.from(jsonDecode(quoteRaw) as Map);
+      },
+      formatCsv: (data) => _formatQuoteAsCsv(data),
+    );
   }
 
   /// Load-quote Email menu: single quote (existing behavior), all for workspace customer, or all saved.
@@ -17358,6 +17386,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
               dialogContext: ctx,
               onRemoveQuote: _removeQuoteFromIndex,
               onShareQuote: _onLoadQuoteEmailTapped,
+              onSendToPc: _onLoadQuoteSendToPcTapped,
               searchQuotesFocusNode: _searchQuotesFocusNode,
             ),
             actionsAlignment: MainAxisAlignment.start,
