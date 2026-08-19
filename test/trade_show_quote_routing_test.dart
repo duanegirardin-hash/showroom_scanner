@@ -5,6 +5,7 @@ import 'package:csv/csv.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:showroom_scanner/active_quote_continuation.dart';
+import 'package:showroom_scanner/main.dart' show SavedQuoteInfo;
 import 'package:showroom_scanner/quote_bucket_routing.dart';
 import 'package:showroom_scanner/quote_routing_gate.dart';
 import 'package:showroom_scanner/trade_show_quote_routing.dart';
@@ -141,6 +142,23 @@ TradeShowQuoteRoutingConfig loadBundledTradeShowConfig() {
   );
 }
 
+TradeShowQuoteRoutingConfig withTradeShowEnabled(
+  TradeShowQuoteRoutingConfig config, {
+  required bool enabled,
+}) {
+  return TradeShowQuoteRoutingConfig(
+    enabled: enabled,
+    glasswareItemNumbers: config.glasswareItemNumbers,
+    furnitureItemNumbers: config.furnitureItemNumbers,
+    furnitureCategories: config.furnitureCategories,
+    furnitureSubCategory: config.furnitureSubCategory,
+    incenseSubCategory: config.incenseSubCategory,
+    glassware: config.glassware,
+    furniture: config.furniture,
+    incense: config.incense,
+  );
+}
+
 TradeShowRouteDecision route(
   TradeShowQuoteRoutingConfig config, {
   required String item,
@@ -185,11 +203,13 @@ String resolveFullBucketKey({
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  late TradeShowQuoteRoutingConfig bundled;
   late TradeShowQuoteRoutingConfig config;
   late Map<String, ProductTypeBucketMapping> byNorm;
 
   setUpAll(() async {
-    config = loadBundledTradeShowConfig();
+    bundled = loadBundledTradeShowConfig();
+    config = withTradeShowEnabled(bundled, enabled: true);
     final bucketRaw = await rootBundle.loadString(
       'assets/data/product_type_buckets.json',
     );
@@ -198,9 +218,156 @@ void main() {
     );
   });
 
+  group('post-show: Glassware / Furniture / Incense use Product Type', () {
+    test('bundled config is disabled; old bucket labels remain defined', () {
+      expect(bundled.enabled, isFalse);
+      expect(bundled.glassware.bucketKey, 'glassware');
+      expect(bundled.furniture.bucketKey, 'furniture');
+      expect(bundled.incense.bucketKey, 'incense');
+      expect(bundled.glassware.displayLabel, 'GLASSWARE');
+      expect(bundled.furniture.displayLabel, 'FURNITURE');
+      expect(bundled.incense.displayLabel, 'INCENSE');
+    });
+
+    test('Glassware EVERYDAY routes to EVERYDAY', () {
+      expect(route(bundled, item: '70209').rule, TradeShowRouteRule.none);
+      expect(
+        resolveFullBucketKey(
+          tradeShow: bundled,
+          byNorm: byNorm,
+          item: '70209',
+          productType: 'EVERYDAY',
+        ),
+        'every_day',
+      );
+    });
+
+    test('Furniture EVERYDAY routes to EVERYDAY', () {
+      expect(
+        route(
+          bundled,
+          item: '91815',
+          category: 'Decor & Giftware',
+          subCategory: 'Furniture & Shelving',
+        ).rule,
+        TradeShowRouteRule.none,
+      );
+      expect(
+        resolveFullBucketKey(
+          tradeShow: bundled,
+          byNorm: byNorm,
+          item: '91815',
+          productType: 'EVERYDAY',
+          category: 'Decor & Giftware',
+          subCategory: 'Furniture & Shelving',
+        ),
+        'every_day',
+      );
+    });
+
+    test('Incense EVERYDAY routes to EVERYDAY', () {
+      expect(
+        route(bundled, item: 'INC-1', subCategory: 'Incense').rule,
+        TradeShowRouteRule.none,
+      );
+      expect(
+        resolveFullBucketKey(
+          tradeShow: bundled,
+          byNorm: byNorm,
+          item: 'INC-1',
+          productType: 'EVERYDAY',
+          subCategory: 'Incense',
+        ),
+        'every_day',
+      );
+    });
+
+    test('Everyday + Glassware + Furniture + Incense share EVERYDAY', () {
+      const items = <({String item, String type, String cat, String sub})>[
+        (item: 'REG-1', type: 'EVERYDAY', cat: 'Kitchenware', sub: 'Gadgets'),
+        (item: '70209', type: 'EVERYDAY', cat: 'Glassware', sub: 'Drinkware'),
+        (
+          item: '91815',
+          type: 'EVERYDAY',
+          cat: 'Decor & Giftware',
+          sub: 'Furniture & Shelving',
+        ),
+        (item: 'INC-1', type: 'EVERYDAY', cat: 'Candles & Incense', sub: 'Incense'),
+      ];
+      final keys = [
+        for (final i in items)
+          resolveFullBucketKey(
+            tradeShow: bundled,
+            byNorm: byNorm,
+            item: i.item,
+            productType: i.type,
+            category: i.cat,
+            subCategory: i.sub,
+          ),
+      ];
+      expect(keys, everyElement('every_day'));
+      expect(keys.toSet(), {'every_day'});
+    });
+
+    test('sub-categories no longer create special quote buckets', () {
+      for (final id in kApprovedGlasswareItemNumbers) {
+        expect(route(bundled, item: id).bucket, isNull, reason: id);
+      }
+      for (final id in kApprovedFurnitureItemNumbers) {
+        expect(route(bundled, item: id).bucket, isNull, reason: id);
+      }
+      expect(route(bundled, item: 'X', subCategory: 'Incense').bucket, isNull);
+    });
+
+    test('non-EVERYDAY Product Types still follow Product Type', () {
+      expect(
+        resolveFullBucketKey(
+          tradeShow: bundled,
+          byNorm: byNorm,
+          item: '70209',
+          productType: 'SPRING/SUMMER - GENERAL',
+        ),
+        'summer_general',
+      );
+      expect(
+        resolveFullBucketKey(
+          tradeShow: bundled,
+          byNorm: byNorm,
+          item: '91815',
+          productType: 'CHRISTMAS',
+        ),
+        'christmas',
+      );
+    });
+
+    test('existing special quotes remain loadable by bucket key', () {
+      expect(canonicalQuoteBucketKey('glassware'), 'glassware');
+      expect(canonicalQuoteBucketKey('furniture'), 'furniture');
+      expect(canonicalQuoteBucketKey('incense'), 'incense');
+      for (final entry in [
+        ('glassware', 'GLASSWARE'),
+        ('furniture', 'FURNITURE'),
+        ('incense', 'INCENSE'),
+      ]) {
+        final info = SavedQuoteInfo.fromJson({
+          'id': 'quote_${entry.$1}',
+          'name': '${entry.$2} QUOTE',
+          'customerName': 'CUSTOMER ABC',
+          'customerId': '302021',
+          'quoteBucketKey': entry.$1,
+          'quoteBucketLabel': entry.$2,
+          'updatedAt': '2026-08-01T12:00:00.000',
+        });
+        expect(info.quoteBucketKey, entry.$1);
+        expect(info.quoteBucketLabel, entry.$2);
+        expect(canonicalQuoteBucketKey(info.quoteBucketKey), entry.$1);
+      }
+    });
+  });
+
   group('trade-show config', () {
-    test('enabled with 64 glassware and 40 furniture IDs', () {
-      expect(config.enabled, isTrue);
+    test('bundled lists still include 64 glassware and 40 furniture IDs', () {
+      expect(bundled.enabled, isFalse);
       expect(config.glasswareItemNumbers, hasLength(64));
       expect(
         config.glasswareItemNumbers,
@@ -713,6 +880,25 @@ void main() {
     setUp(() async {
       dir = await Directory.systemTemp.createTemp('trade_show_quote_');
     });
+
+    test('Everyday + Glassware + Furniture + Incense share one EVERYDAY quote',
+        () async {
+      final app = RoutingHarness(dir: dir, gate: QuoteRoutingGate());
+      await app.scan('REG-1', 'every_day');
+      await app.saveQuote();
+      final id = app.currentQuoteId!;
+      await app.scan('70209', 'every_day');
+      await app.scan('91815', 'every_day');
+      await app.scan('INC-1', 'every_day');
+      expect(app.currentQuoteId, id);
+      await app.saveQuote();
+      final byBucket = await app.activeQuoteIdsByBucket();
+      expect(byBucket['every_day']!.toSet(), {id});
+      expect(byBucket['glassware'], isNull);
+      expect(byBucket['furniture'], isNull);
+      expect(byBucket['incense'], isNull);
+    });
+
 
     tearDown(() async {
       if (await dir.exists()) await dir.delete(recursive: true);

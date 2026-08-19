@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "buckets": {
     "glassware": {
       "bucketKey": "glassware",
@@ -137,6 +137,7 @@
     "catalogCategory": "Bundled/live products.csv uses Category 'Decor & Giftware' (not 'Home Décor & Giftware'). Aliases cover both spellings.",
     "furnitureExplicit": "Explicit furnitureItemNumbers route to FURNITURE regardless of Product Type (user-approved override).",
     "furnitureBroadEverydayOnly": "Category+Sub-Category Furniture & Shelving remains EVERYDAY-only so unrelated seasonal SKUs stay on seasonal quotes.",
-    "precedence": "Glassware list → Furniture explicit list → Everyday Furniture cat+sub → Incense → normal Product Type routing."
+    "precedence": "DISABLED after August Open House. Lists/labels kept so existing GLASSWARE/FURNITURE/INCENSE quotes remain loadable; new scans use Product Type routing.",
+    "postShow": "Glassware, Furniture, and Incense with Product Type EVERYDAY route to EVERYDAY."
   }
 }

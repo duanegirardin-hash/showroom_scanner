@@ -5679,8 +5679,10 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   QuoteBucketDefinition _resolveQuoteBucketForProduct(Product product) {
-    // Trade-show quote-routing overrides (Glassware / Furniture / Incense)
-    // run before normal Product Type routing. They do not mutate Product fields.
+    // Trade-show Glassware / Furniture / Incense overrides run before Product
+    // Type routing when enabled in trade_show_quote_routing.json. After the
+    // August Open House that flag is false, so these items follow Product Type.
+    // Bucket labels stay registered so existing special quotes remain loadable.
     final tradeShow = resolveTradeShowQuoteRoute(
       config: _tradeShowQuoteRouting,
       itemNumber: product.itemNumber,
