@@ -52,6 +52,37 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('SEND TO PC mode dialog offers current and all customer options', (
+    tester,
+  ) async {
+    await pumpDialog<PcReceiverSendMode>(
+      tester,
+      const PcReceiverSendModeDialog(),
+    );
+    expect(find.text('SEND TO PC'), findsOneWidget);
+    expect(find.text('Send Current Quote to PC'), findsOneWidget);
+    expect(
+      find.text('Send All Current Quotes for This Customer to PC'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Send Current Quote to PC'));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('send all confirm dialog shows quote count', (tester) async {
+    await pumpDialog<PcReceiverSendChoice>(
+      tester,
+      PcReceiverSendAllConfirmDialog(
+        pairing: pairing(),
+        customerName: "PETER & PAUL'S BASKETS & GIFTS",
+        quoteCount: 4,
+      ),
+    );
+    expect(find.textContaining('4 current quotes'), findsOneWidget);
+    expect(find.textContaining("PETER & PAUL'S BASKETS & GIFTS"), findsOneWidget);
+    expect(find.text('SEND TO PC'), findsWidgets);
+  });
+
   testWidgets('reachable PC shows SEND TO PC and CHANGE PAIRED PC', (
     tester,
   ) async {

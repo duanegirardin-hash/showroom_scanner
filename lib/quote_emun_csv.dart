@@ -2,6 +2,66 @@
 /// Must stay identical to the non-rich path of [_formatQuoteAsCsv] in main.dart.
 library;
 
+/// True when a parsed export quote-type segment begins with a barcode-like run
+/// (8+ consecutive digits), e.g. `062823532588_GENERAL_QUOTE`.
+bool quoteExportTypeLooksBarcodeCorrupted(String quoteType) {
+  final trimmed = quoteType.trim();
+  if (trimmed.isEmpty) return false;
+  return RegExp(r'^\d{8,}').hasMatch(trimmed);
+}
+
+/// Chooses the export/SEND TO PC quote-type segment from parsed name + bucket.
+String resolveQuoteExportTypeCandidate({
+  required String parsedQuoteType,
+  String? quoteBucketLabel,
+  String? quoteBucketKey,
+}) {
+  final parsed = parsedQuoteType.trim();
+  if (parsed.isNotEmpty && !quoteExportTypeLooksBarcodeCorrupted(parsed)) {
+    return parsed;
+  }
+
+  final bucketLabel = (quoteBucketLabel ?? '').trim();
+  if (bucketLabel.isNotEmpty) {
+    final upper = bucketLabel.toUpperCase();
+    return upper.endsWith(' QUOTE') ? bucketLabel.trim() : '$bucketLabel QUOTE';
+  }
+
+  final bucketKey = (quoteBucketKey ?? '').trim();
+  if (bucketKey.isNotEmpty) {
+    final fromKey = bucketKey.replaceAll('_', ' ').trim().toUpperCase();
+    return fromKey.endsWith(' QUOTE') ? fromKey : '$fromKey QUOTE';
+  }
+
+  if (parsed.isNotEmpty) return parsed;
+  return 'QUOTE';
+}
+
+/// When focus is in the quote-name field, returns a newly inserted 8+ digit barcode
+/// scan to route into the normal scanner flow, or null if none detected.
+String? newlyInsertedBarcodeInQuoteName(String currentText, String savedText) {
+  final current = currentText.trim();
+  if (current.isEmpty) return null;
+
+  if (RegExp(r'^\d{8,}$').hasMatch(current)) {
+    return current;
+  }
+
+  final savedRuns = RegExp(r'\d{8,}')
+      .allMatches(savedText.trim())
+      .map((m) => m.group(0)!)
+      .toSet();
+
+  for (final match in RegExp(r'\d{8,}').allMatches(current)) {
+    final run = match.group(0)!;
+    if (!savedRuns.contains(run)) {
+      return run;
+    }
+  }
+
+  return null;
+}
+
 int quoteQuantityFromJson(dynamic v) {
   if (v == null) return 1;
   if (v is int) return v;
@@ -52,11 +112,67 @@ int _defaultItemNumberCompare(String a, String b) {
   return a.trim().compareTo(b.trim());
 }
 
-({String quoteId, String customerId, String customerName})
-quoteTransferMetadata(Map<String, dynamic> data, {String fallbackCustomerId = '', String fallbackCustomerName = ''}) {
+/// Wrap the quote-type segment of an export basename for PC transfer only.
+/// Example: `EVERYDAY_QUOTE_2026_08_27_001_...` → `[EVERYDAY_QUOTE]_2026_08_27_001_...`
+String wrapQuoteTypeForPcTransferBasename(String exportBasenameWithoutExtension) {
+  final base = exportBasenameWithoutExtension.trim();
+  if (base.isEmpty) return base;
+  if (base.startsWith('[')) return base;
+
+  final match = RegExp(r'^(.+)_(\d{4})_(\d{2})_(\d{2})_(\d{3})_(.+)$').firstMatch(base);
+  if (match == null) return base;
+
+  final quoteType = match.group(1)!.trim();
+  if (quoteType.isEmpty) return base;
+
+  return '[${quoteType}]_${match.group(2)}_${match.group(3)}_${match.group(4)}_'
+      '${match.group(5)}_${match.group(6)}';
+}
+
+/// PC transfer filename stem: `{quoteId}_{exportBasename}` (PC transfer naming).
+String buildPcTransferQuoteFilenameStem({
+  required String quoteId,
+  required String exportBasenameWithoutExtension,
+}) {
+  final base = wrapQuoteTypeForPcTransferBasename(exportBasenameWithoutExtension);
+  final id = quoteId.trim();
+  if (base.isEmpty) return id;
+  if (id.isEmpty) return base;
+  return '${id}_$base';
+}
+
+/// Resolve the quote name sent to the PC receiver (metadata only, not CSV).
+String resolvePcTransferQuoteName(
+  Map<String, dynamic> data, {
+  String Function(Map<String, dynamic> data)? buildTransferFilename,
+  String fallbackCustomerId = '',
+  String fallbackCustomerName = '',
+  String fallbackQuoteName = '',
+}) {
+  final built = buildTransferFilename?.call(data).trim() ?? '';
+  if (built.isNotEmpty) return built;
+  return quoteTransferMetadata(
+    data,
+    fallbackCustomerId: fallbackCustomerId,
+    fallbackCustomerName: fallbackCustomerName,
+    fallbackQuoteName: fallbackQuoteName,
+  ).quoteName;
+}
+
+({String quoteId, String customerId, String customerName, String quoteName})
+quoteTransferMetadata(
+  Map<String, dynamic> data, {
+  String fallbackCustomerId = '',
+  String fallbackCustomerName = '',
+  String fallbackQuoteName = '',
+}) {
   final quoteId = (data['id'] as String?)?.trim() ?? '';
   var customerId = fallbackCustomerId.trim();
   var customerName = fallbackCustomerName.trim();
+  var quoteName = (data['name'] as String?)?.trim() ?? '';
+  if (quoteName.isEmpty) {
+    quoteName = fallbackQuoteName.trim();
+  }
   final customerMap = data['customer'];
   if (customerMap is Map) {
     final map = Map<String, dynamic>.from(customerMap);
@@ -69,5 +185,6 @@ quoteTransferMetadata(Map<String, dynamic> data, {String fallbackCustomerId = ''
     quoteId: quoteId,
     customerId: customerId,
     customerName: customerName,
+    quoteName: quoteName,
   );
 }

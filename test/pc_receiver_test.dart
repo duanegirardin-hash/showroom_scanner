@@ -135,6 +135,7 @@ void main() {
     test('metadata stays outside CSV', () {
       final meta = quoteTransferMetadata({
         'id': '1786661863097',
+        'name': 'EVERYDAY QUOTE_2026_08_27_003',
         'customer': {'id': '0DG', 'companyName': 'DUANE GIRARDIN'},
         'lines': [
           {'itemNumber': '20466', 'quantity': 12},
@@ -143,6 +144,99 @@ void main() {
       expect(meta.quoteId, '1786661863097');
       expect(meta.customerId, '0DG');
       expect(meta.customerName, 'DUANE GIRARDIN');
+      expect(meta.quoteName, 'EVERYDAY QUOTE_2026_08_27_003');
+    });
+
+    test('quote name falls back when JSON name is empty', () {
+      final meta = quoteTransferMetadata(
+        {'id': '1', 'customer': {'id': '0DG', 'companyName': 'DUANE GIRARDIN'}},
+        fallbackQuoteName: 'FALLBACK QUOTE NAME',
+      );
+      expect(meta.quoteName, 'FALLBACK QUOTE NAME');
+    });
+
+    test('wrapQuoteTypeForPcTransferBasename brackets quote type generically', () {
+      expect(
+        wrapQuoteTypeForPcTransferBasename(
+          'EVERYDAY_QUOTE_2026_08_27_001_PETER_PAUL_S_BASKETS_GIFTS_'
+          '20260827_175033_025',
+        ),
+        '[EVERYDAY_QUOTE]_2026_08_27_001_PETER_PAUL_S_BASKETS_GIFTS_'
+        '20260827_175033_025',
+      );
+      expect(
+        wrapQuoteTypeForPcTransferBasename(
+          'CHRISTMAS_QUOTE_2026_12_25_002_BIG_DOLLAR_20261225_120000_000',
+        ),
+        '[CHRISTMAS_QUOTE]_2026_12_25_002_BIG_DOLLAR_20261225_120000_000',
+      );
+      expect(
+        wrapQuoteTypeForPcTransferBasename(
+          'EASTER_QUOTE_2026_04_20_001_DUANE_GIRARDIN_20260420_090000_000',
+        ),
+        '[EASTER_QUOTE]_2026_04_20_001_DUANE_GIRARDIN_20260420_090000_000',
+      );
+    });
+
+    test('buildPcTransferQuoteFilenameStem brackets quote type for PC transfer', () {
+      const exportBase =
+          'EVERYDAY_QUOTE_2026_08_27_001_WM_LIQUIDATION_1536448_ONTARIO_INC_'
+          '20260827_173514_362';
+      const expected =
+          '1787866440577_[EVERYDAY_QUOTE]_2026_08_27_001_WM_LIQUIDATION_'
+          '1536448_ONTARIO_INC_20260827_173514_362';
+      expect(
+        buildPcTransferQuoteFilenameStem(
+          quoteId: '1787866440577',
+          exportBasenameWithoutExtension: exportBase,
+        ),
+        expected,
+      );
+    });
+
+    test('resolvePcTransferQuoteName prefers export-style builder', () {
+      const fullName =
+          '1787866440577_[EVERYDAY_QUOTE]_2026_08_27_001_WM_LIQUIDATION_'
+          '1536448_ONTARIO_INC_20260827_173514_362';
+      final resolved = resolvePcTransferQuoteName(
+        {
+          'id': '1787866440577',
+          'name': 'EVERYDAY QUOTE_2026_08_27_001',
+          'customer': {
+            'id': '200667',
+            'companyName': 'WM LIQUIDATION / 1536448 ONTARIO INC.',
+          },
+        },
+        buildTransferFilename: (_) => fullName,
+      );
+      expect(resolved, fullName);
+    });
+
+    test('resolvePcTransferQuoteName falls back to stored quote name', () {
+      final resolved = resolvePcTransferQuoteName(
+        {
+          'id': '1787866440577',
+          'name': 'EVERYDAY QUOTE_2026_08_27_001',
+        },
+      );
+      expect(resolved, 'EVERYDAY QUOTE_2026_08_27_001');
+    });
+
+    test('barcode-corrupted name resolves to bucket label for PC bracket type', () {
+      final parsedType = resolveQuoteExportTypeCandidate(
+        parsedQuoteType: '062823532588_GENERAL_QUOTE',
+        quoteBucketLabel: 'SUMMER GENERAL',
+      );
+      expect(parsedType, 'SUMMER GENERAL QUOTE');
+      const exportBase =
+          'SUMMER_GENERAL_QUOTE_2026_08_28_001_YOUR_STORE_W_MORE_505_RON_'
+          '20260828_121548_660';
+      final pc = buildPcTransferQuoteFilenameStem(
+        quoteId: '1787931361156',
+        exportBasenameWithoutExtension: exportBase,
+      );
+      expect(pc, contains('[SUMMER_GENERAL_QUOTE]'));
+      expect(wrapQuoteTypeForPcTransferBasename(exportBase), startsWith('[SUMMER_GENERAL_QUOTE]'));
     });
   });
 
@@ -156,6 +250,7 @@ void main() {
         quoteId: '1',
         customerId: '0DG',
         customerName: 'DUANE GIRARDIN',
+        quoteName: 'EVERYDAY QUOTE_2026_08_27_003',
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.notPaired);
@@ -174,6 +269,7 @@ void main() {
         quoteId: '1',
         customerId: '0DG',
         customerName: 'DUANE GIRARDIN',
+        quoteName: 'EVERYDAY QUOTE_2026_08_27_003',
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.unauthorized);
@@ -191,6 +287,7 @@ void main() {
         quoteId: '1',
         customerId: '0DG',
         customerName: 'DUANE GIRARDIN',
+        quoteName: 'EVERYDAY QUOTE_2026_08_27_003',
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.pcNotFound);
@@ -198,13 +295,21 @@ void main() {
       expect(r.quoteUnchanged, isTrue);
     });
 
-    test('successful acknowledgement', () async {
+    test('successful acknowledgement sends full export-style quote_name', () async {
+      const quoteName =
+          '1787866440577_[EVERYDAY_QUOTE]_2026_08_27_001_WM_LIQUIDATION_'
+          '1536448_ONTARIO_INC_20260827_173514_362';
       final client = PcReceiverClient(
         httpClient: MockClient((req) async {
           expect(req.url.path, '/ingest');
           final body = jsonDecode(req.body) as Map;
-          expect(body['quote_id'], '1786661863097');
+          expect(body['quote_id'], '1787866440577');
+          expect(body['customer_id'], '200667');
+          expect(body['customer_name'], contains('WM LIQUIDATION'));
+          expect(body['quote_name'], quoteName);
           expect((body['csv_text'] as String).startsWith('Item,Quantity'), isTrue);
+          expect((body['csv_text'] as String).contains('WM LIQUIDATION'), isFalse);
+          expect((body['csv_text'] as String).contains(quoteName), isFalse);
           return http.Response(
             jsonEncode({
               'overall': 'received',
@@ -215,7 +320,7 @@ void main() {
                 {
                   'status': 'received',
                   'code': 'ok',
-                  'quote_id': '1786661863097',
+                  'quote_id': '1787866440577',
                 },
               ],
             }),
@@ -225,9 +330,10 @@ void main() {
       );
       final r = await client.sendQuote(
         pairing: pairing(),
-        quoteId: '1786661863097',
-        customerId: '0DG',
-        customerName: 'DUANE GIRARDIN',
+        quoteId: '1787866440577',
+        customerId: '200667',
+        customerName: 'WM LIQUIDATION _ 1536448 ONTARIO INC',
+        quoteName: quoteName,
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.sent);
@@ -260,6 +366,7 @@ void main() {
         quoteId: '1786661863097',
         customerId: '0DG',
         customerName: 'DUANE GIRARDIN',
+        quoteName: 'EVERYDAY QUOTE_2026_08_27_003',
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.alreadyOnPc);
@@ -275,6 +382,7 @@ void main() {
         quoteId: '1',
         customerId: '0DG',
         customerName: 'DUANE GIRARDIN',
+        quoteName: 'EVERYDAY QUOTE_2026_08_27_003',
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.failed);
@@ -294,6 +402,7 @@ void main() {
         quoteId: '1',
         customerId: '0DG',
         customerName: 'DUANE GIRARDIN',
+        quoteName: 'EVERYDAY QUOTE_2026_08_27_003',
         csvText: 'Item,Quantity\n20466,12',
       );
       expect(r.kind, PcSendKind.pcNotFound);

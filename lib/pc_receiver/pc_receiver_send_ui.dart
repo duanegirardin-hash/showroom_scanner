@@ -5,11 +5,13 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'pc_receiver_client.dart';
 import 'pc_receiver_pairing.dart';
 import 'pc_receiver_store.dart';
-import '../quote_emun_csv.dart';
+import 'pc_receiver_batch_send.dart';
 
 enum PcReceiverNotFoundChoice { tryAgain, pairChange, cancel }
 
 enum PcReceiverSendChoice { send, changePc, cancel }
+
+enum PcReceiverSendMode { sendCurrent, sendAllCustomer, cancel }
 
 Future<void> showPcReceiverSendFlow({
   required BuildContext context,
@@ -19,6 +21,7 @@ Future<void> showPcReceiverSendFlow({
   required String customerName,
   required Future<Map<String, dynamic>?> Function() loadQuoteJson,
   required String Function(Map<String, dynamic> data) formatCsv,
+  String Function(Map<String, dynamic> data)? buildTransferFilename,
   PcReceiverStore? store,
   PcReceiverClient? client,
 }) async {
@@ -100,22 +103,155 @@ Future<void> showPcReceiverSendFlow({
       return;
     }
 
-    final csv = formatCsv(data);
-    final meta = quoteTransferMetadata(
-      data,
-      fallbackCustomerId: customerId,
-      fallbackCustomerName: customerName,
-    );
-    final result = await httpClient.sendQuote(
+    final result = await sendPreparedQuoteToPcReceiver(
+      client: httpClient,
       pairing: pairing,
-      quoteId: meta.quoteId.isNotEmpty ? meta.quoteId : quoteId,
-      customerId: meta.customerId,
-      customerName: meta.customerName,
-      csvText: csv,
+      quoteId: quoteId,
+      quoteName: quoteName,
+      customerId: customerId,
+      customerName: customerName,
+      data: data,
+      formatCsv: formatCsv,
+      buildTransferFilename: buildTransferFilename,
     );
     if (!context.mounted) return;
     await _showResult(context, result);
     return;
+  }
+}
+
+Future<void> showPcReceiverSendAllForCustomerFlow({
+  required BuildContext context,
+  required String customerName,
+  required Future<List<PcReceiverQuoteSendTarget>> Function() loadEligibleQuotes,
+  required String Function(Map<String, dynamic> data) formatCsv,
+  String Function(Map<String, dynamic> data)? buildTransferFilename,
+  PcReceiverStore? store,
+  PcReceiverClient? client,
+}) async {
+  final targets = await loadEligibleQuotes();
+  if (!context.mounted) return;
+  if (targets.isEmpty) {
+    await _showResult(
+      context,
+      const PcSendResult(
+        kind: PcSendKind.failed,
+        title: 'NO CURRENT QUOTES',
+        body: 'No current quotes found for this customer.',
+      ),
+    );
+    return;
+  }
+
+  final pairStore = store ?? PcReceiverStore();
+  final httpClient = client ?? PcReceiverClient();
+  var pairing = await pairStore.load();
+
+  while (context.mounted) {
+    if (pairing == null) {
+      final startPair = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => const PcReceiverNoPairDialog(),
+      );
+      if (startPair != true || !context.mounted) return;
+      pairing = await showPcReceiverPairDialog(
+        context: context,
+        store: pairStore,
+      );
+      continue;
+    }
+
+    final ping = await httpClient.ping(pairing);
+    if (!context.mounted) return;
+
+    if (ping.kind == PcSendKind.pcNotFound ||
+        ping.kind == PcSendKind.unauthorized ||
+        ping.kind == PcSendKind.notReady) {
+      final choice = await showDialog<PcReceiverNotFoundChoice>(
+        context: context,
+        builder: (ctx) => PcReceiverNotFoundDialog(result: ping),
+      );
+      if (!context.mounted) return;
+      if (choice == PcReceiverNotFoundChoice.tryAgain) {
+        continue;
+      }
+      if (choice == PcReceiverNotFoundChoice.pairChange) {
+        final next = await showPcReceiverPairDialog(
+          context: context,
+          store: pairStore,
+          existing: pairing,
+        );
+        if (next != null) pairing = next;
+        continue;
+      }
+      return;
+    }
+
+    final sendChoice = await showDialog<PcReceiverSendChoice>(
+      context: context,
+      builder: (ctx) => PcReceiverSendAllConfirmDialog(
+        pairing: pairing!,
+        customerName: customerName,
+        quoteCount: targets.length,
+      ),
+    );
+    if (!context.mounted) return;
+    if (sendChoice == PcReceiverSendChoice.changePc) {
+      final next = await showPcReceiverPairDialog(
+        context: context,
+        store: pairStore,
+        existing: pairing,
+      );
+      if (next != null) pairing = next;
+      continue;
+    }
+    if (sendChoice != PcReceiverSendChoice.send) return;
+
+    final summary = await runPcReceiverBatchSend(
+      client: httpClient,
+      pairing: pairing,
+      targets: targets,
+      formatCsv: formatCsv,
+      buildTransferFilename: buildTransferFilename,
+    );
+    if (!context.mounted) return;
+    await _showBatchResult(context, summary);
+    return;
+  }
+}
+
+class PcReceiverSendModeDialog extends StatelessWidget {
+  const PcReceiverSendModeDialog({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('SEND TO PC'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(context, PcReceiverSendMode.sendCurrent),
+            child: const Text('Send Current Quote to PC'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(context, PcReceiverSendMode.sendAllCustomer),
+            child: const Text(
+              'Send All Current Quotes for This Customer to PC',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, PcReceiverSendMode.cancel),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
   }
 }
 
@@ -221,6 +357,56 @@ class PcReceiverSendConfirmDialog extends StatelessWidget {
   }
 }
 
+class PcReceiverSendAllConfirmDialog extends StatelessWidget {
+  const PcReceiverSendAllConfirmDialog({
+    super.key,
+    required this.pairing,
+    required this.customerName,
+    required this.quoteCount,
+  });
+
+  final PcReceiverPairing pairing;
+  final String customerName;
+  final int quoteCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final quoteLine = quoteCount == 1
+        ? '1 current quote'
+        : '$quoteCount current quotes';
+    return AlertDialog(
+      title: const Text('SEND TO PC'),
+      content: Text(
+        [
+          'PC Receiver',
+          pairing.displaySummary,
+          '',
+          if (customerName.isNotEmpty) customerName,
+          quoteLine,
+          '',
+          'Sends each quote as a separate CSV file.',
+          'Does not archive or email.',
+        ].join('\n'),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, PcReceiverSendChoice.cancel),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () =>
+              Navigator.pop(context, PcReceiverSendChoice.changePc),
+          child: const Text('CHANGE PAIRED PC'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, PcReceiverSendChoice.send),
+          child: const Text('SEND TO PC'),
+        ),
+      ],
+    );
+  }
+}
+
 Future<void> _showResult(BuildContext context, PcSendResult result) {
   debugPrint('[PcReceiver] ${result.kind} ${result.technicalLog}');
   return showDialog<void>(
@@ -228,6 +414,29 @@ Future<void> _showResult(BuildContext context, PcSendResult result) {
     builder: (ctx) => AlertDialog(
       title: Text(result.title),
       content: Text(result.body),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('OK'),
+        ),
+      ],
+    ),
+  );
+}
+
+Future<void> _showBatchResult(
+  BuildContext context,
+  PcReceiverBatchSendSummary summary,
+) {
+  debugPrint(
+    '[PcReceiver] batch total=${summary.total} sent=${summary.sentCount} '
+    'duplicate=${summary.alreadyOnPcCount} failed=${summary.failedCount}',
+  );
+  return showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Send to PC Complete'),
+      content: Text(formatPcReceiverBatchSummaryBody(summary)),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(ctx),

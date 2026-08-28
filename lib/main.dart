@@ -20,6 +20,7 @@ import 'package:share_plus/share_plus.dart';
 import 'customer_quote_email.dart';
 import 'customers_official_cache.dart';
 import 'discontinued_products.dart';
+import 'pc_receiver/pc_receiver_batch_send.dart';
 import 'pc_receiver/pc_receiver_send_ui.dart';
 import 'quote_emun_csv.dart';
 import 'master_products_sheet_builder.dart';
@@ -4754,21 +4755,27 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     _quoteNameBarcodeDebounce?.cancel();
 
     final text = _quoteNameController.text.trim();
-    final digits = digitsOnly(text);
+    final barcode = newlyInsertedBarcodeInQuoteName(
+      text,
+      _savedQuoteNameBeforeEdit,
+    );
 
-    if (digits.length >= 8 && digits == text) {
+    if (barcode != null) {
       _quoteNameBarcodeDebounce = Timer(const Duration(milliseconds: 80), () {
         if (!mounted) return;
 
         final t = _quoteNameController.text.trim();
-        final d = digitsOnly(t);
+        final detected = newlyInsertedBarcodeInQuoteName(
+          t,
+          _savedQuoteNameBeforeEdit,
+        );
 
-        if (d.length >= 8 && d == t) {
+        if (detected != null) {
           _quoteNameController.text = _savedQuoteNameBeforeEdit;
           _quoteNameController.selection = TextSelection.collapsed(
             offset: _savedQuoteNameBeforeEdit.length,
           );
-          _enqueueScan(t);
+          _enqueueScan(detected);
           _requestScannerFocus();
         }
 
@@ -6866,11 +6873,11 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required DateTime exportedOn,
   }) {
     final parsed = _extractQuoteNamingParts(quoteName);
-    final rawTypeCandidate = parsed.quoteType.trim().isNotEmpty
-        ? parsed.quoteType
-        : ((quoteBucketLabel ?? quoteBucketKey ?? '').trim().isNotEmpty
-              ? '${(quoteBucketLabel ?? quoteBucketKey ?? '').trim()} QUOTE'
-              : 'QUOTE');
+    final rawTypeCandidate = resolveQuoteExportTypeCandidate(
+      parsedQuoteType: parsed.quoteType,
+      quoteBucketLabel: quoteBucketLabel,
+      quoteBucketKey: quoteBucketKey,
+    );
     final normalizedType = _sanitizeOrderExportFileSegment(
       rawTypeCandidate,
       ifEmpty: 'QUOTE',
@@ -10912,14 +10919,17 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   /// Detect barcode-like input and process as scan, then restore quote name.
   void _onQuoteNameSubmitted(String value) {
     final trimmed = value.trim();
-    final digits = digitsOnly(trimmed);
+    final barcode = newlyInsertedBarcodeInQuoteName(
+      trimmed,
+      _savedQuoteNameBeforeEdit,
+    );
 
-    if (digits.length >= 8 && digits == trimmed) {
+    if (barcode != null) {
       _quoteNameController.text = _savedQuoteNameBeforeEdit;
       _quoteNameController.selection = TextSelection.collapsed(
         offset: _savedQuoteNameBeforeEdit.length,
       );
-      _enqueueScan(trimmed);
+      _enqueueScan(barcode);
       _requestScannerFocus();
       return;
     }
@@ -16514,11 +16524,50 @@ class _ScannerHomePageState extends State<ScannerHomePage>
   }
 
   /// Load-quote SEND TO PC (Phase 3). Does not archive, delete, or change email.
+  String _buildPcTransferQuoteFilename(Map<String, dynamic> data) {
+    final id = (data['id'] as String?)?.trim() ?? '';
+    var customerName = '';
+    var customerId = '';
+    final customerMap = data['customer'];
+    if (customerMap is Map<String, dynamic>) {
+      try {
+        final c = Customer.fromJson(Map<String, dynamic>.from(customerMap));
+        customerName = c.displayName.trim();
+        customerId = c.id.trim();
+      } catch (_) {}
+    }
+    final exportedOn =
+        DateTime.tryParse((data['updatedAt'] as String?) ?? '') ??
+        DateTime.tryParse((data['createdAt'] as String?) ?? '') ??
+        DateTime.now();
+    final exportCsv = _buildExportOrderCsvFilename(
+      quoteName: (data['name'] as String?)?.trim() ?? '',
+      customerName: customerName,
+      customerId: customerId,
+      quoteData: data,
+      customerFolderName: customerName,
+      quoteBucketLabel: (data['quoteBucketLabel'] as String?)?.trim(),
+      quoteBucketKey: (data['quoteBucketKey'] as String?)?.trim(),
+      quoteDate: _quoteDateFromMapOrFallback(data, exportedOn),
+      exportedOn: exportedOn,
+    );
+    return buildPcTransferQuoteFilenameStem(
+      quoteId: id,
+      exportBasenameWithoutExtension: p.basenameWithoutExtension(exportCsv),
+    );
+  }
+
   Future<void> _onLoadQuoteSendToPcTapped(
     String tappedQuoteId,
     String tappedQuoteName,
   ) async {
     if (!mounted) return;
+    final mode = await showDialog<PcReceiverSendMode>(
+      context: context,
+      builder: (ctx) => const PcReceiverSendModeDialog(),
+    );
+    if (!mounted || mode == null || mode == PcReceiverSendMode.cancel) return;
+
     SavedQuoteInfo? info;
     try {
       final list = await _loadQuoteIndex();
@@ -16532,20 +16581,57 @@ class _ScannerHomePageState extends State<ScannerHomePage>
       debugPrint('[PcReceiver] quote index lookup failed: $e\n$st');
     }
     if (!mounted) return;
-    await showPcReceiverSendFlow(
+
+    if (mode == PcReceiverSendMode.sendCurrent) {
+      await showPcReceiverSendFlow(
+        context: context,
+        quoteId: tappedQuoteId,
+        quoteName: tappedQuoteName,
+        customerId: info?.customerId ?? '',
+        customerName: info?.customerName ?? '',
+        loadQuoteJson: () async {
+          final dir = await _getQuotesDirectory();
+          final quoteFile = File('${dir.path}/quote_$tappedQuoteId.json');
+          if (!await quoteFile.exists()) return null;
+          final quoteRaw = await quoteFile.readAsString();
+          return Map<String, dynamic>.from(jsonDecode(quoteRaw) as Map);
+        },
+        formatCsv: (data) => _formatQuoteAsCsv(data),
+        buildTransferFilename: _buildPcTransferQuoteFilename,
+      );
+      return;
+    }
+
+    await showPcReceiverSendAllForCustomerFlow(
       context: context,
-      quoteId: tappedQuoteId,
-      quoteName: tappedQuoteName,
-      customerId: info?.customerId ?? '',
       customerName: info?.customerName ?? '',
-      loadQuoteJson: () async {
+      loadEligibleQuotes: () async {
+        final cust = await _customerForQuoteEmailContext(tappedQuoteId);
+        if (cust == null) return <PcReceiverQuoteSendTarget>[];
+        final active = await _loadQuoteIndex();
+        final eligible = active
+            .where((q) => _savedQuoteInfoMatchesCustomer(q, cust))
+            .toList();
         final dir = await _getQuotesDirectory();
-        final quoteFile = File('${dir.path}/quote_$tappedQuoteId.json');
-        if (!await quoteFile.exists()) return null;
-        final quoteRaw = await quoteFile.readAsString();
-        return Map<String, dynamic>.from(jsonDecode(quoteRaw) as Map);
+        return eligible
+            .map(
+              (q) => PcReceiverQuoteSendTarget(
+                quoteId: q.id,
+                quoteName: q.name,
+                customerId: q.customerId,
+                customerName: q.customerName,
+                loadQuoteJson: () async {
+                  final quoteFile = File('${dir.path}/quote_${q.id}.json');
+                  if (!await quoteFile.exists()) return null;
+                  final quoteRaw = await quoteFile.readAsString();
+                  return Map<String, dynamic>.from(jsonDecode(quoteRaw) as Map);
+                },
+              ),
+            )
+            .toList();
       },
       formatCsv: (data) => _formatQuoteAsCsv(data),
+      buildTransferFilename: _buildPcTransferQuoteFilename,
     );
   }
 

@@ -70,6 +70,7 @@ class PcReceiverClient {
     required String quoteId,
     required String customerId,
     required String customerName,
+    required String quoteName,
     required String csvText,
   }) async {
     if (pairing == null) {
@@ -92,6 +93,7 @@ class PcReceiverClient {
       'quote_id': quoteId,
       'customer_id': customerId,
       'customer_name': customerName,
+      'quote_name': quoteName,
       'csv_text': csvText,
     };
 
