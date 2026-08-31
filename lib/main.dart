@@ -18,6 +18,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'customer_quote_email.dart';
+import 'archive_delete_focus.dart';
 import 'customers_official_cache.dart';
 import 'discontinued_products.dart';
 import 'pc_receiver/pc_receiver_batch_send.dart';
@@ -4528,6 +4529,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         '[ScannerField][FocusListener] hasFocus=${_scannerFocusNode.hasFocus} primary=${FocusManager.instance.primaryFocus}',
       );
       if (!_scannerFocusNode.hasFocus &&
+          _scanTabActive &&
           !_quickEntryFocusNode.hasFocus &&
           !_quoteNameFocusNode.hasFocus &&
           !_searchQuotesFocusNode.hasFocus &&
@@ -4573,15 +4575,24 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     });
 
     _searchQuotesFocusNode.addListener(() {
-      if (_searchQuotesFocusNode.hasFocus) {
+      if (!_searchQuotesFocusNode.hasFocus) return;
+      // Only show the keyboard when Load Quote's search field is mounted.
+      if (_editDialogOpen && _searchQuotesFocusNode.context != null) {
         showKeyboardIfNeeded();
+        return;
       }
+      _searchQuotesFocusNode.unfocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
     });
 
     _searchCustomersFocusNode.addListener(() {
-      if (_searchCustomersFocusNode.hasFocus) {
+      if (!_searchCustomersFocusNode.hasFocus) return;
+      if (_editDialogOpen && _searchCustomersFocusNode.context != null) {
         showKeyboardIfNeeded();
+        return;
       }
+      _searchCustomersFocusNode.unfocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
     });
 
     _quoteNameController.addListener(_onQuoteNameChanged);
@@ -4602,7 +4613,22 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         previousIndex: previousIndex,
         nextIndex: nextIndex,
       );
+      if (nextIndex == _tabIndexArchive) {
+        _releaseTextInputFocusForNonEditingWorkflow();
+      }
     });
+  }
+
+  void _releaseTextInputFocusForNonEditingWorkflow() {
+    releaseArchiveDeleteWorkflowFocus(
+      extraNodes: [
+        _quickEntryFocusNode,
+        _quoteNameFocusNode,
+        _searchQuotesFocusNode,
+        _searchCustomersFocusNode,
+        _ecatalogSearchFocusNode,
+      ],
+    );
   }
 
   void _perfLog(String message) {
@@ -12130,6 +12156,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     required BuildContext context,
     required _ArchiveDeleteConfirmKind kind,
   }) async {
+    _releaseTextInputFocusForNonEditingWorkflow();
     late final String title;
     late final String body;
     late final String confirmLabel;
@@ -12180,6 +12207,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
         ],
       ),
     );
+    _releaseTextInputFocusForNonEditingWorkflow();
     return result == true;
   }
 
@@ -12340,6 +12368,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
 
   Future<bool> _onPermanentlyDeleteDeletedQuote(DeletedQuoteInfo entry) async {
     if (!mounted) return false;
+    _releaseTextInputFocusForNonEditingWorkflow();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -12365,6 +12394,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     if (confirmed != true || !mounted) return false;
     final deleted = await _permanentlyDeleteRecentlyDeleted(entry);
     if (!mounted) return deleted;
+    _releaseTextInputFocusForNonEditingWorkflow();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -17500,6 +17530,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     );
 
     _editDialogOpen = false;
+    _releaseTextInputFocusForNonEditingWorkflow();
 
     final id = selectedId;
     if (id != null && mounted) {
@@ -18060,6 +18091,7 @@ class _ScannerHomePageState extends State<ScannerHomePage>
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) {
+        if (!_scanTabActive) return;
         if (!_quickEntryFocusNode.hasFocus &&
             !_quoteNameFocusNode.hasFocus &&
             !_editDialogOpen) {
@@ -21182,6 +21214,7 @@ class _ArchiveQuotesTabState extends State<_ArchiveQuotesTab> {
 
   Future<void> _openRecentlyDeleted() async {
     if (!mounted) return;
+    releaseArchiveDeleteWorkflowFocus();
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (context) => RecentlyDeletedScreen(

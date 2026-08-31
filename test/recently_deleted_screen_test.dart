@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:showroom_scanner/archive_delete_focus.dart';
 import 'package:showroom_scanner/quote_deleted_lifecycle.dart';
 import 'package:showroom_scanner/recently_deleted_screen.dart';
 
@@ -57,7 +58,7 @@ void main() {
     expect(find.text('Recently Deleted'), findsWidgets);
     expect(find.byKey(const Key('recently_deleted_empty_state')), findsOneWidget);
     expect(find.byKey(const Key('delete_all_permanently_button')), findsOneWidget);
-    expect(find.text('Delete All Permanently'), findsOneWidget);
+    expect(find.text(kDeleteAllQuotesPermanentlyButtonLabel), findsOneWidget);
     // Empty list disables bulk delete.
     final bulk = tester.widget<OutlinedButton>(
       find.byKey(const Key('delete_all_permanently_button')),

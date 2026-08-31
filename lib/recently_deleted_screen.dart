@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'archive_delete_focus.dart';
 import 'quote_deleted_lifecycle.dart';
 
 /// Result of a bulk permanent-delete attempt.
@@ -121,6 +122,7 @@ class RecentlyDeletedScreenState extends State<RecentlyDeletedScreen> {
     required bool preserveScroll,
   }) async {
     if (_busyIds.contains(info.quoteId) || _bulkInProgress) return;
+    releaseArchiveDeleteWorkflowFocus();
     setState(() => _busyIds.add(info.quoteId));
     try {
       final ok = await action();
@@ -139,6 +141,7 @@ class RecentlyDeletedScreenState extends State<RecentlyDeletedScreen> {
     final entries = List<DeletedQuoteInfo>.from(_entries ?? const []);
     if (entries.isEmpty || _bulkInProgress) return;
     final n = entries.length;
+    releaseArchiveDeleteWorkflowFocus();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -342,11 +345,18 @@ class RecentlyDeletedScreenState extends State<RecentlyDeletedScreen> {
                                 ? null
                                 : _confirmAndDeleteAll,
                             icon: const Icon(Icons.delete_forever),
-                            label: const Text('Delete All Permanently'),
+                            label: const Text(
+                              kDeleteAllQuotesPermanentlyButtonLabel,
+                              textAlign: TextAlign.center,
+                            ),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: Theme.of(
                                 context,
                               ).colorScheme.error,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
                             ),
                           ),
                         ),
